@@ -9,7 +9,7 @@ test('informações de privacidade são públicas sem expor dados ou abrir APIs 
   app.db.prepare('INSERT INTO agents(id,name,email,password,role) VALUES(?,?,?,?,?)').run('private-agent','Private person','private@example.invalid','test-private-hash','admin');
   await new Promise(resolve => app.server.listen(0,'127.0.0.1',resolve));
   const base = 'http://127.0.0.1:' + app.server.address().port;
-  for (const path of ['/privacidade','/exclusao-de-dados']) {
+  for (const path of ['/sobre','/privacidade','/exclusao-de-dados']) {
     const response = await fetch(base+path);
     assert.equal(response.status,200);
     assert.match(response.headers.get('content-type'),/text\/html/);

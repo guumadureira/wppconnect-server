@@ -139,6 +139,7 @@ export function createCentral(config = process.env, transport = fetch) {
         tick();return reply(200,{ok:true});
       }
       const publicFiles = {
+        '/sobre': ['sobre.html', 'text/html; charset=utf-8'],
         '/privacidade': ['privacidade.html', 'text/html; charset=utf-8'],
         '/exclusao-de-dados': ['exclusao-de-dados.html', 'text/html; charset=utf-8'],
         '/assets/app-icon.png': ['app-icon.png', 'image/png'],
