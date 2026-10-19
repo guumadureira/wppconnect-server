@@ -13,8 +13,7 @@ async function fixture(t, overrides = {}) {
   const config = { DATABASE_PATH: ':memory:', PUBLIC_ORIGIN: 'https://central.example.invalid', SETUP_TOKEN: 'test-only-install-code',
     WHATSAPP_MODE: 'live', WHATSAPP_PHONE_NUMBER_ID: 'unchanged-test-phone', WHATSAPP_ACCESS_TOKEN: 'test-only-current-token',
     WEBHOOK_VERIFY_TOKEN: 'test-only-webhook-secret', META_APP_SECRET: 'test-only-app-secret', META_GRAPH_VERSION: 'v25.0',
-    META_APP_ID: '5555500001', META_LOGIN_CONFIG_ID: '5555500002', META_COEXISTENCE_WABA_ID: eventData.data.waba_id,
-    META_COEXISTENCE_PHONE_NUMBER_ID: eventData.data.phone_number_id, ...overrides };
+    META_APP_ID: '5555500001', META_LOGIN_CONFIG_ID: '5555500002', META_COEXISTENCE_PHONE_NUMBER: '550000000000', ...overrides };
   const calls = [];
   let mode = 'ok';
   const app = createCentral(config, async (url, options) => {
@@ -25,7 +24,8 @@ async function fixture(t, overrides = {}) {
       if (mode === 'missing-token') return Response.json({});
       return Response.json({ access_token: 'test-only-exchanged-token' });
     }
-    return Response.json({ data: [{ id: config.META_COEXISTENCE_PHONE_NUMBER_ID, display_phone_number: '+55 00 0000-0000',
+    return Response.json({ data: [{ id: mode === 'new-assets' ? '7777722222' : eventData.data.phone_number_id,
+      display_phone_number: mode === 'wrong-phone' ? '+55 11 1111-1111' : '+55 00 0000-0000',
       is_on_biz_app: mode !== 'not-business', platform_type: mode === 'on-premise' ? 'ON_PREMISE' : 'CLOUD_API' }] });
   });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
@@ -43,8 +43,8 @@ async function fixture(t, overrides = {}) {
   const admin = (await request('/api/login', 'POST', account)).cookie;
   const begin = async (cookie = admin) => (await request('/api/whatsapp/signup/start', 'POST', {}, cookie)).body;
   const finish = async (attempt, changes = {}, cookie = admin) => request('/api/whatsapp/signup/complete', 'POST', {
-    attemptId: attempt.attemptId, code: 'test-only-one-use-code', wabaId: config.META_COEXISTENCE_WABA_ID,
-    phoneNumberId: config.META_COEXISTENCE_PHONE_NUMBER_ID, ...changes }, cookie);
+    attemptId: attempt.attemptId, code: 'test-only-one-use-code', wabaId: eventData.data.waba_id,
+    phoneNumberId: eventData.data.phone_number_id, ...changes }, cookie);
   return { config, calls, app, request, admin, begin, finish, setMode: value => { mode = value; } };
 }
 
@@ -101,9 +101,9 @@ test('código só é trocado uma vez e pertence à sessão que iniciou o cadastr
   assert.ok(f.calls.every(call => !/\/(register|deregister|messages|subscribed_apps)(\?|$)/.test(call.url)));
 });
 
-test('cadastro rejeita outra conta ou número antes de consultar a Meta e invalida tentativas antigas', async t => {
+test('cadastro rejeita identificadores malformados antes de consultar a Meta e invalida tentativas antigas', async t => {
   const f = await fixture(t);
-  for (const changes of [{ phoneNumberId: '9999999999' }, { wabaId: '9999999998' }]) assert.equal((await f.finish(await f.begin(), changes)).status, 400);
+  for (const changes of [{ phoneNumberId: '../wrong' }, { wabaId: 'bad/asset' }]) assert.equal((await f.finish(await f.begin(), changes)).status, 400);
   const old = await f.begin();
   await f.begin();
   assert.equal((await f.finish(old)).status, 409);
@@ -127,16 +127,28 @@ test('tentativas expiradas e dois retornos concorrentes não reutilizam o códig
   assert.equal(f.calls.length, 2);
 });
 
-test('erros da Meta e ausência de coexistência nunca concluem cadastro nem expõem segredos', async t => {
+test('erros da Meta, outro telefone e ausência de coexistência nunca concluem cadastro nem expõem segredos', async t => {
   const f = await fixture(t);
-  for (const mode of ['timeout', 'error', 'missing-token', 'on-premise', 'not-business']) {
+  for (const mode of ['timeout', 'error', 'missing-token', 'on-premise', 'not-business', 'wrong-phone']) {
     f.setMode(mode);
     const result = await f.finish(await f.begin());
-    assert.equal(result.status, ['on-premise', 'not-business'].includes(mode) ? 409 : 502);
+    assert.equal(result.status, ['on-premise', 'not-business', 'wrong-phone'].includes(mode) ? 409 : 502);
     assert.ok(!JSON.stringify(result.body).includes('test-only-'));
     assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM whatsapp_signup_checks').get().n, 0);
     assert.equal(f.config.WHATSAPP_PHONE_NUMBER_ID, 'unchanged-test-phone');
   }
+});
+
+test('confere o telefone real pela Meta mesmo quando os identificadores dos ativos mudam', async t => {
+  const f = await fixture(t);
+  f.setMode('new-assets');
+  const result = await f.finish(await f.begin(), { wabaId: '7777711111', phoneNumberId: '7777722222' });
+  assert.equal(result.status, 200);
+  assert.ok(f.calls[1].url.includes('/7777711111/phone_numbers'));
+  const stored = f.app.db.prepare('SELECT * FROM whatsapp_signup_checks').get();
+  assert.equal(stored.waba_id, '7777711111');
+  assert.equal(stored.phone_number_id, '7777722222');
+  assert.equal(f.config.WHATSAPP_PHONE_NUMBER_ID, 'unchanged-test-phone');
 });
 
 test('navegador espera código e evento em qualquer ordem e ignora origem falsa, eventos duplicados e cancelamento', async () => {

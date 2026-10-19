@@ -3,7 +3,7 @@ import { randomBytes, createHash } from 'node:crypto';
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
 const digest = value => createHash('sha256').update(value).digest('hex');
 const numericId = value => typeof value === 'string' && /^\d{5,30}$/.test(value);
-const required = ['META_APP_ID', 'META_LOGIN_CONFIG_ID', 'META_APP_SECRET', 'META_GRAPH_VERSION', 'META_COEXISTENCE_WABA_ID', 'META_COEXISTENCE_PHONE_NUMBER_ID'];
+const required = ['META_APP_ID', 'META_LOGIN_CONFIG_ID', 'META_APP_SECRET', 'META_GRAPH_VERSION', 'META_COEXISTENCE_PHONE_NUMBER'];
 
 // Preparation only: never register, migrate, subscribe, send, or replace credentials.
 // Authorization codes and the exchanged token are not persisted or returned.
@@ -16,7 +16,7 @@ export function createWhatsAppSignup(config, db, transport) {
   function status(origin) {
     const missing = required.filter(name => !config[name]);
     const invalid = required.filter(name => name !== 'META_APP_SECRET' && config[name] &&
-      !(name === 'META_GRAPH_VERSION' ? /^v\d{1,2}\.\d+$/.test(config[name]) : numericId(config[name])));
+      !(name === 'META_GRAPH_VERSION' ? /^v\d{1,2}\.\d+$/.test(config[name]) : name === 'META_COEXISTENCE_PHONE_NUMBER' ? /^\d{8,15}$/.test(config[name]) : numericId(config[name])));
     const publicHttps = new URL(origin).protocol === 'https:';
     return { available: !missing.length && !invalid.length && publicHttps && config.WHATSAPP_MODE === 'live',
       missing, invalid, publicHttps, mode: config.WHATSAPP_MODE === 'live' ? 'live' : 'demo',
@@ -56,22 +56,25 @@ export function createWhatsAppSignup(config, db, transport) {
     if (!attempt || attempt.session !== session || attempt.expires <= Date.now()) fail(409, 'O cadastro expirou ou pertence a outra sessão. Inicie novamente.');
     // Consume before any await: a code is never exchanged twice, including retries.
     attempts.delete(key);
-    if (body.wabaId !== config.META_COEXISTENCE_WABA_ID || body.phoneNumberId !== config.META_COEXISTENCE_PHONE_NUMBER_ID) fail(400, 'A conta ou o número escolhido é diferente do autorizado para esta central.');
+    if (!numericId(body.wabaId) || !numericId(body.phoneNumberId)) fail(400, 'A Meta não retornou identificadores válidos de conta e número.');
     if (typeof body.code !== 'string' || !body.code.trim() || body.code.length > 4096) fail(400, 'A Meta não retornou um código de autorização válido.');
     const root = `https://graph.facebook.com/${config.META_GRAPH_VERSION}`;
     const result = await graph(`${root}/oauth/access_token`, { method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ client_id: config.META_APP_ID, client_secret: config.META_APP_SECRET, code: body.code }).toString() });
     if (typeof result?.access_token !== 'string' || !result.access_token || result.access_token.length > 16384) fail(502, 'A Meta não retornou uma autorização válida.');
-    const numbers = await graph(`${root}/${config.META_COEXISTENCE_WABA_ID}/phone_numbers?fields=id,display_phone_number,platform_type,is_on_biz_app&limit=100`, {
+    const numbers = await graph(`${root}/${body.wabaId}/phone_numbers?fields=id,display_phone_number,platform_type,is_on_biz_app&limit=100`, {
       method: 'GET', headers: { authorization: `Bearer ${result.access_token}` } });
-    const phone = Array.isArray(numbers?.data) && numbers.data.find(item => item.id === config.META_COEXISTENCE_PHONE_NUMBER_ID);
+    const phone = Array.isArray(numbers?.data) && numbers.data.find(item => item?.id === body.phoneNumberId);
     if (!phone || phone.is_on_biz_app !== true || phone.platform_type !== 'CLOUD_API') fail(409, 'A Meta ainda não confirmou esse número no Business e na Cloud API por coexistência. A conexão atual foi preservada.');
     const checkedAt = Date.now();
     const display = typeof phone.display_phone_number === 'string' && /^[+\d\s()-]{5,40}$/.test(phone.display_phone_number) ? phone.display_phone_number : '';
+    // Compare the actual number, verified by Meta, rather than trusting client IDs
+    // or assuming asset IDs will remain identical throughout onboarding.
+    if (display.replace(/\D/g, '') !== config.META_COEXISTENCE_PHONE_NUMBER) fail(409, 'O número confirmado pela Meta é diferente do autorizado para esta central. A conexão atual foi preservada.');
     db.prepare(`INSERT INTO whatsapp_signup_checks(id,waba_id,phone_number_id,display_phone_number,checked_at) VALUES(1,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET waba_id=excluded.waba_id,phone_number_id=excluded.phone_number_id,display_phone_number=excluded.display_phone_number,checked_at=excluded.checked_at`)
-      .run(config.META_COEXISTENCE_WABA_ID, phone.id, display, checkedAt);
+      .run(body.wabaId, phone.id, display, checkedAt);
     return { authorizationChecked: true, activationPending: true, connectionVerified: false,
       phoneNumber: display, checkedAt,
       message: 'Autorização conferida. O número de atendimento da central foi preservado. A ativação é uma etapa separada; envio e recebimento ainda precisam ser validados.' };

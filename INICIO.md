@@ -34,8 +34,7 @@ Use `.env.example` como referência e crie `.env` somente quando precisar altera
 | `META_GRAPH_VERSION` | Versão suportada pelo aplicativo, no formato `vNN.N`. |
 | `META_APP_ID` | Identificador público do aplicativo usado no cadastro de coexistência. |
 | `META_LOGIN_CONFIG_ID` | Identificador público da configuração de Login do Facebook para Empresas. |
-| `META_COEXISTENCE_WABA_ID` | Conta WhatsApp esperada no cadastro; não altera a conta ativa. |
-| `META_COEXISTENCE_PHONE_NUMBER_ID` | Número esperado no cadastro; não altera `WHATSAPP_PHONE_NUMBER_ID`. |
+| `META_COEXISTENCE_PHONE_NUMBER` | Número do Business esperado, com país e DDD, somente dígitos conforme a Meta; não altera `WHATSAPP_PHONE_NUMBER_ID`. |
 | `PUBLIC_ORIGIN` | Origem HTTPS pública da central, sem caminho nem barra final. |
 | `SETUP_TOKEN` | Código privado para cadastrar o administrador em uma instalação remota. |
 | `ALERT_WEBHOOK_URL` | Destino opcional, sob seu controle, para entregar lembretes fora do navegador. |
@@ -59,9 +58,9 @@ O webhook verifica HMAC do corpo bruto e restringe o recebimento ao identificado
 
 ### Preparar coexistência
 
-Configure os quatro identificadores `META_APP_ID`, `META_LOGIN_CONFIG_ID`, `META_COEXISTENCE_WABA_ID` e `META_COEXISTENCE_PHONE_NUMBER_ID`, além de `META_APP_SECRET` e `META_GRAPH_VERSION`. O modo deve ser `live` e a origem pública HTTPS. Na configuração de Login do Facebook para Empresas, autorize essa mesma origem para o SDK JavaScript. As verificações/habilitações exigidas pela Meta permanecem necessárias; IDs preenchidos não comprovam elegibilidade.
+Configure os identificadores `META_APP_ID` e `META_LOGIN_CONFIG_ID`, o número esperado `META_COEXISTENCE_PHONE_NUMBER` e as credenciais `META_APP_SECRET` e `META_GRAPH_VERSION`. O modo deve ser `live` e a origem pública HTTPS. Na configuração de Login do Facebook para Empresas, autorize essa mesma origem para o SDK JavaScript. As verificações/habilitações exigidas pela Meta permanecem necessárias; IDs preenchidos não comprovam elegibilidade.
 
-O botão administrativo abre uma página separada que carrega o SDK oficial somente após verificar a sessão. Ela solicita `whatsapp_business_app_onboarding` com sessão `3` e fluxo `v4`, recebe código e evento de conclusão em qualquer ordem e envia o código uma única vez ao servidor. O servidor restringe a tentativa à sessão, por até dez minutos, e confere a conta e o número esperados pela Graph API. Só registra uma conferência quando a Meta retorna `is_on_biz_app: true` e `platform_type: CLOUD_API` para o número esperado. Respostas do navegador, sozinhas, não comprovam a conexão.
+O botão administrativo abre uma página separada que carrega o SDK oficial somente após verificar a sessão. Ela solicita `whatsapp_business_app_onboarding` com sessão `3` e fluxo `v4`, recebe código e evento de conclusão em qualquer ordem e envia o código uma única vez ao servidor. O servidor restringe a tentativa à sessão, por até dez minutos, e consulta pela Graph API os números da conta escolhida, usando o token recém-autorizado. Só registra uma conferência quando a Meta retorna `is_on_biz_app: true` e `platform_type: CLOUD_API` e o telefone real coincide com `META_COEXISTENCE_PHONE_NUMBER`. Essa comparação aceita identificadores de ativos novos durante o cadastro, mantendo o telefone físico restrito ao autorizado. Respostas do navegador, sozinhas, não comprovam a conexão.
 
 Esse recurso **prepara e confere a autorização**: não registra/migra/exclui o número, não assina webhooks de outra conta, não envia mensagens e não troca `WHATSAPP_PHONE_NUMBER_ID` nem `WHATSAPP_ACCESS_TOKEN`. O token retornado é usado apenas na consulta e não fica guardado, nem é enviado ao navegador. O banco registra apenas identificadores, telefone de exibição e data da conferência. A ativação posterior requer uma nova autorização, armazenamento adequado das credenciais e validação efetiva de recebimento/envio. O SQLite temporário do Render Free continua sendo apenas para avaliação.
 
