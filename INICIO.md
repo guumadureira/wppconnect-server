@@ -64,6 +64,8 @@ O botão administrativo abre uma página separada que carrega o SDK oficial some
 
 Esse recurso **prepara e confere a autorização**: não registra/migra/exclui o número, não assina webhooks de outra conta, não envia mensagens e não troca `WHATSAPP_PHONE_NUMBER_ID` nem `WHATSAPP_ACCESS_TOKEN`. O token retornado é usado apenas na consulta e não fica guardado, nem é enviado ao navegador. O banco registra apenas identificadores, telefone de exibição e data da conferência. A ativação posterior requer uma nova autorização, armazenamento adequado das credenciais e validação efetiva de recebimento/envio. O SQLite temporário do Render Free continua sendo apenas para avaliação.
 
+Se apenas o login do Facebook retornar, a tela informa que ainda aguarda a confirmação do cadastro WhatsApp. Quando falta um dos dois retornos por mais de 30 segundos, a tentativa é encerrada com orientação e acesso à configuração na Meta. Isso não comprova a causa do retorno incompleto; confira a variação de login e as habilitações do aplicativo. Um retorno tardio não conclui a tentativa encerrada.
+
 Referência do protocolo: [exemplo oficial da Meta](https://github.com/fbsamples/business-messaging-sample-tech-provider-app/tree/14703a3e1fdba9bcf75b2360b00817b6fcc9f79b), em especial `app/components/ClientDashboard.tsx`, `Fbl4bLauncher.tsx` e `app/publicConfig.ts`. Os testes locais simulam a Meta e não usam o número real.
 
 ## Limites atuais

@@ -178,3 +178,61 @@ test('navegador espera código e evento em qualquer ordem e ignora origem falsa,
     assert.ok(!JSON.stringify(notices).includes('private-value'));
   }
 });
+
+test('login sem cadastro informa o que falta e encerra a espera sem aceitar retorno tardio', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let completed = 0, ended = 0;
+  const notices = [];
+  const flow = createSignupFlow({ complete: async () => { completed++; return { message: 'ok' }; }, notify: text => notices.push(text), done: () => ended++ });
+  flow.begin({ attemptId: 'first-attempt' });
+  flow.login({ authResponse: { code: 'private-code' } });
+  assert.match(notices.at(-1), /Login do Facebook recebido/);
+  t.mock.timers.tick(30000);
+  assert.match(notices.at(-1), /não confirmou o cadastro do WhatsApp/);
+  assert.equal(ended, 1);
+  flow.message(message());
+  await settle();
+  assert.equal(completed, 0);
+  assert.ok(!JSON.stringify(notices).includes('private-code'));
+});
+
+test('retorno parcial permite conclusão dentro do prazo e cancelamento limpa a espera', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let completed = 0, ended = 0;
+  const notices = [];
+  const flow = createSignupFlow({ complete: async () => { completed++; return { message: 'Autorização conferida.' }; }, notify: text => notices.push(text), done: () => ended++ });
+  flow.begin({ attemptId: 'attempt' });
+  flow.message(message());
+  assert.match(notices.at(-1), /Aguardando a autorização do Facebook/);
+  t.mock.timers.tick(20000);
+  flow.login({ authResponse: { code: 'private-code' } });
+  await settle();
+  t.mock.timers.tick(30000);
+  assert.equal(completed, 1);
+  assert.equal(ended, 1);
+  assert.equal(notices.at(-1), 'Autorização conferida.');
+  flow.begin({ attemptId: 'next-attempt' });
+  flow.login({ authResponse: { code: 'another-private-code' } });
+  flow.cancel();
+  t.mock.timers.tick(30000);
+  assert.equal(notices.at(-1), 'Cadastro encerrado. A conexão atual foi preservada.');
+  assert.equal(ended, 2);
+});
+
+test('voltar à central sem nenhum retorno mostra orientação sem assumir sucesso ou cancelamento', async () => {
+  let completed = 0;
+  const notices = [];
+  const flow = createSignupFlow({ complete: async () => { completed++; return { message: 'Autorização conferida.' }; }, notify: text => notices.push(text) });
+  flow.begin({ attemptId: 'attempt' });
+  flow.resume();
+  assert.match(notices.at(-1), /Se a janela fechou/);
+  assert.equal(completed, 0);
+  flow.login({ authResponse: { code: 'private-code' } });
+  flow.resume();
+  assert.match(notices.at(-1), /Login do Facebook recebido/);
+  flow.message(message());
+  await settle();
+  assert.equal(completed, 1);
+  flow.resume();
+  assert.equal(notices.at(-1), 'Autorização conferida.');
+});

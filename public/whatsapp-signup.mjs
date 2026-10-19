@@ -3,9 +3,21 @@ const trustedOrigins = new Set(['https://www.facebook.com', 'https://web.faceboo
 export function createSignupFlow({ complete, notify, done }) {
   let attempt, code, info, active = false, completing = false;
   let generation = 0;
-  function stop(message) { active = false; code = info = null; notify(message); done?.(); }
+  let returnTimer;
+  function clearReturnTimer() { clearTimeout(returnTimer); returnTimer = null; }
+  function stop(message, reason = 'finished') { clearReturnTimer(); active = false; code = info = null; notify(message); done?.(reason); }
+  function waitForOtherReturn() {
+    notify(code ? 'Login do Facebook recebido. Aguardando a confirmação do cadastro do WhatsApp…' : 'Cadastro do WhatsApp recebido. Aguardando a autorização do Facebook…');
+    if (returnTimer) return;
+    returnTimer = setTimeout(() => {
+      if (!active || completing) return;
+      stop(code ? 'A Meta retornou o login do Facebook, mas não confirmou o cadastro do WhatsApp. Confira se a configuração de login usa Cadastro Incorporado do WhatsApp e se o aplicativo tem as habilitações necessárias.' : 'O cadastro do WhatsApp respondeu, mas a autorização do Facebook não chegou. Inicie uma nova tentativa.', 'incomplete');
+    }, 30000);
+    returnTimer.unref?.();
+  }
   async function finish() {
     if (!active || completing || !code || !info) return;
+    clearReturnTimer();
     completing = true;
     const current = generation;
     const payload = { attemptId: attempt.attemptId, code, wabaId: info.waba_id, phoneNumberId: info.phone_number_id };
@@ -18,11 +30,13 @@ export function createSignupFlow({ complete, notify, done }) {
     finally { if (current === generation) completing = false; }
   }
   return {
-    begin(value) { if (active || completing) return false; generation++; attempt = value; code = info = null; active = true; notify('Conclua o cadastro na janela da Meta.'); return true; },
+    begin(value) { if (active || completing) return false; clearReturnTimer(); generation++; attempt = value; code = info = null; active = true; notify('Conclua o cadastro na janela da Meta.'); return true; },
     login(response) {
       if (!active || completing) return;
       if (typeof response?.authResponse?.code !== 'string' || !response.authResponse.code) { stop('Cadastro cancelado. A conexão atual foi preservada.'); return; }
-      code = response.authResponse.code; void finish();
+      code = response.authResponse.code;
+      if (!info) waitForOtherReturn();
+      void finish();
     },
     message(event) {
       if (!active || completing || !trustedOrigins.has(event.origin) || typeof event.data !== 'string' || event.data.length > 32768) return;
@@ -31,14 +45,19 @@ export function createSignupFlow({ complete, notify, done }) {
       if (data.event === 'CANCEL' || data.event === 'ERROR') { stop('A Meta interrompeu o cadastro. A conexão atual foi preservada.'); return; }
       if (!['FINISH', 'FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING'].includes(data.event)) return;
       if (!/^\d{5,30}$/.test(data.data?.waba_id) || !/^\d{5,30}$/.test(data.data?.phone_number_id)) return;
-      info = { waba_id: data.data.waba_id, phone_number_id: data.data.phone_number_id }; void finish();
+      info = { waba_id: data.data.waba_id, phone_number_id: data.data.phone_number_id };
+      if (!code) waitForOtherReturn();
+      void finish();
+    },
+    resume() {
+      if (active && !completing && !code && !info) notify('A Meta ainda não retornou a conclusão do cadastro. Se a janela fechou, clique em Reiniciar preparação. Se ela continua aberta, conclua o cadastro nela.');
     },
     cancel() { if (completing) return; generation++; stop('Cadastro encerrado. A conexão atual foi preservada.'); },
   };
 }
 
 async function bootSignup() {
-  const launch = document.querySelector('#launch'), status = document.querySelector('#status'), retry = document.querySelector('#retry');
+  const launch = document.querySelector('#launch'), status = document.querySelector('#status'), retry = document.querySelector('#retry'), review = document.querySelector('#review-config');
   const notify = message => { status.textContent = message; };
   const api = async (path, body) => {
     const response = await fetch(path, { method: body ? 'POST' : 'GET', credentials: 'same-origin',
@@ -49,8 +68,9 @@ async function bootSignup() {
   };
   let timeout;
   const flow = createSignupFlow({ complete: body => api('/api/whatsapp/signup/complete', body), notify,
-    done: () => { clearTimeout(timeout); launch.disabled = true; retry.hidden = false; } });
+    done: reason => { clearTimeout(timeout); launch.disabled = true; retry.hidden = false; if (reason === 'incomplete') review.hidden = false; } });
   window.addEventListener('message', flow.message);
+  window.addEventListener('focus', flow.resume);
   retry.onclick = () => location.reload();
   try {
     const config = await api('/api/whatsapp/signup');
@@ -59,6 +79,7 @@ async function bootSignup() {
       throw new Error('O cadastro ainda não está disponível nesta central.' + (pending.length ? ' Configurações pendentes: ' + pending.join(', ') + '.' : ' É necessário modo real e HTTPS.'));
     }
     const attempt = await api('/api/whatsapp/signup/start', {});
+    review.querySelector('a').href = `https://developers.facebook.com/apps/${attempt.appId}/business-login/configurations/`;
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('A Meta demorou para carregar. Verifique se o navegador permite o SDK do Facebook.')), 15000);
       window.fbAsyncInit = () => {
