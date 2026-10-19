@@ -81,3 +81,9 @@ Mais detalhes da versão anterior estão em [docs/projeto-original.md](docs/proj
 ## Personalização planejada
 
 Após a implantação, alinhar cores, fontes e componentes à identidade visual da Domum Engenharia, conforme pedido do usuário. Usar materiais e referências oficiais da empresa; a personalização visual ainda não foi feita.
+
+## Informações públicas do aplicativo
+
+`/privacidade` e `/exclusao-de-dados` são páginas públicas, sem login e sem SDK da Meta. Identificam a Domum Engenharia (Rodrigues & Madureira LTDA), com o contato público informado pela empresa: `domumenge@outlook.com`. Atualize esses textos se mudarem o responsável, o contato, os fornecedores, a retenção ou as funcionalidades. A exclusão é solicitada por e-mail e tratada pela empresa; não há exclusão automática implementada.
+
+O ícone provisório da central está em `/assets/app-icon.png` (1024 × 1024); o original vetorial é `public/app-icon.svg`. Ele não substitui o logotipo oficial da empresa. Para a análise do app na Meta, use a URL HTTPS pública de `/privacidade` e, no campo de instruções de exclusão, `/exclusao-de-dados`. A existência dessas páginas não comprova aprovação do aplicativo nem entrega de mensagens.
