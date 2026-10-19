@@ -1,10 +1,10 @@
-# Configuração para revisão. Criar os recursos no Render exige plano pago.
-# O deploy permanece em demonstração; nenhuma credencial da Meta está incluída.
+# Avaliação no plano gratuito, com dados fictícios e armazenamento temporário.
+# Nenhum disco, banco pago ou credencial da Meta está incluído.
 services:
   - type: web
     name: central-atendimento
     runtime: node
-    plan: starter
+    plan: free
     autoDeploy: false
     buildCommand: npm test
     startCommand: npm start
@@ -17,10 +17,6 @@ services:
       - key: WHATSAPP_MODE
         value: demo
       - key: DATABASE_PATH
-        value: /var/data/central.sqlite
+        value: /tmp/central-demo.sqlite
       - key: SETUP_TOKEN
         generateValue: true
-    disk:
-      name: central-data
-      mountPath: /var/data
-      sizeGB: 1
