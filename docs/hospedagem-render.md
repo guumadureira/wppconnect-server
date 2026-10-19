@@ -1,29 +1,41 @@
-# Hospedagem proposta: Render
+# Avaliação gratuita no Render
 
-O usuário ainda não possui servidor nem domínio. A proposta é um serviço Node no Render, com endereço HTTPS fornecido pela plataforma e disco persistente para o SQLite. Domínio próprio é opcional. O serviço e o disco são pagos; consulte os valores atuais no painel antes de criar recursos.
+O usuário pediu para validar a central sem gastar. O blueprint padrão `render.yaml` usa **Free**, em modo demonstração, com SQLite temporário. Ele não cria disco persistente nem banco de dados pago. O Render fornece um endereço HTTPS; não é necessário comprar domínio.
 
-O arquivo `render.yaml` foi preparado para revisão. Nenhum recurso foi criado, nenhum plano foi contratado e nenhuma publicação foi feita. A documentação web do Render respondeu 403 neste ambiente, então a aceitação do blueprint pelo painel da plataforma ainda precisa ser validada. Referências: [Blueprint](https://render.com/docs/blueprint-spec), [discos](https://render.com/docs/disks), [Node](https://render.com/docs/node-version).
+A conta Render foi criada pelo usuário. O projeto está na `main`, e a configuração é validável pelo [schema oficial](https://render.com/schema/render.yaml.json). Nenhum serviço foi implantado nesta tarefa. A aba autenticada do usuário não oferece ferramentas de controle nesta conversa; a automação disponível depende de uma chave de API configurada com segurança no ambiente.
+
+## Manter custo zero
+
+Use o workspace gratuito e mantenha a avaliação sem método de pagamento cadastrado. Confira **Free** no resumo do serviço e não adicione disco, banco pago ou upgrade. Segundo a [documentação oficial do plano gratuito](https://render.com/docs/free), o Render oferece uma franquia de horas, banda e builds. Sem método de pagamento, atingir a franquia suspende os serviços ou novos builds, em vez de cobrar excedentes. Com método de pagamento cadastrado, alguns excedentes podem gerar cobrança; a seleção Free sozinha não limita todos os gastos do workspace.
+
+Não altere a cobrança da conta para fazer o teste. Se já existir um método de pagamento, revise os limites no painel antes de implantar ou valide localmente, onde esta aplicação não depende de serviço externo pago.
 
 ## O que está preparado
 
-- Node.js 24.19.0, testes antes da inicialização, comando `npm start` e verificação em `/healthz`.
-- Escuta em `0.0.0.0`, usando a porta informada pela hospedagem.
-- Banco em `/var/data/central.sqlite`, num disco persistente de 1 GB. O serviço precisa permanecer com uma única instância enquanto usar SQLite local.
-- Modo demonstração. As credenciais da Meta não fazem parte do blueprint.
-- Código de instalação gerado pela plataforma em `SETUP_TOKEN`, necessário para criar o primeiro administrador.
-- Atualização automática desativada. Novos commits não devem iniciar deploys sem revisão.
+- Node.js 24.19.0, testes antes da inicialização, `npm start` e verificação em `/healthz`.
+- Serviço Free, escutando em `0.0.0.0` e usando a porta da hospedagem.
+- SQLite temporário em `/tmp/central-demo.sqlite`.
+- `WHATSAPP_MODE=demo`: envios simulados, sem credenciais da Meta e sem envio a clientes.
+- `SETUP_TOKEN` gerado pela plataforma para proteger o cadastro do primeiro administrador.
+- Atualização automática desativada.
 
-Quando `PUBLIC_ORIGIN` não estiver definido, a aplicação usa `RENDER_EXTERNAL_URL`, fornecido pela plataforma, como origem das requisições. Se usar domínio próprio, configure `PUBLIC_ORIGIN=https://SEU-DOMINIO`, sem barra final, antes de atender por esse endereço. Não configure uma origem localhost na hospedagem remota.
+Quando `PUBLIC_ORIGIN` não estiver definido, a aplicação usa `RENDER_EXTERNAL_URL`, fornecido pelo Render. Não configure uma origem localhost na hospedagem remota.
 
-## Publicação, após revisão e autorização
+## Implantar e validar a demonstração
 
-O usuário informou que criou sua conta no Render. Se o painel ainda estiver em `verify-email`, concluir a confirmação pelo e-mail recebido. A conexão do repositório e a contratação dos recursos são etapas distintas do cadastro; o blueprint deve usar o código novo depois que ele estiver disponível no GitHub.
+1. No Render, conectar o GitHub e selecionar `guumadureira/wppconnect-server`, branch `main`, com o blueprint `render.yaml`.
+2. Conferir o plano Free e a ausência de recursos pagos, observando as condições de custo zero acima. Depois criar o serviço gratuito.
+3. Validar o build, a inicialização e o health check. Abrir o endereço HTTPS gerado.
+4. Consultar `SETUP_TOKEN` privadamente nas variáveis do serviço e usá-lo no cadastro inicial. Não colocar o valor em URL, Git ou chat. Criar o administrador e dois atendentes fictícios.
+5. Simular um cliente, responder com os dois atendentes e conferir as assinaturas. Testar responsável, agendamento, conclusão/reabertura e visualização no celular.
+6. Verificar a sessão e o funcionamento enquanto o servidor estiver ativo. Não usar esta avaliação para comprovar retenção de dados, alertas contínuos ou conexão real ao WhatsApp.
 
-1. Revisar a versão da central e disponibilizá-la no GitHub. Se as alterações estiverem numa branch de revisão, integrar a mudança antes de implantar a partir de `main`. Conferir que o commit selecionado contém `server.mjs`, `render.yaml` e o projeto novo.
-2. Conectar a conta Render ao repositório e criar um Blueprint com `render.yaml`. Conferir no painel o plano, o disco e o custo antes de confirmar a criação dos recursos.
-3. Validar o resultado dos testes, a inicialização e o health check. Acessar a central pelo endereço HTTPS gerado.
-4. Consultar `SETUP_TOKEN` privadamente nas variáveis do serviço e usá-lo somente no cadastro inicial da central. Não colocar esse valor em URL, Git ou chat. Criar o administrador e depois os demais atendentes.
-5. Validar a demonstração com dados fictícios e confirmar persistência após reiniciar o serviço. Configurar backup consistente do SQLite e verificar sua restauração antes de produção.
-6. Só depois configurar a Meta conforme [INICIO.md](../INICIO.md). Registrar o webhook público, testar com um contato autorizado e confirmar entrega dos lembretes.
+## Limitações do plano gratuito
 
-O runtime da nuvem desta conversa é destinado a desenvolvimento. Não há URL pública para este servidor local nem conexão de entrada da Meta validada. O disco, a hospedagem e o banco no Render são recursos separados deste ambiente.
+Após 15 minutos sem tráfego, o serviço pode entrar em suspensão. A retomada pode levar cerca de um minuto. O SQLite, inclusive contas, mensagens e retornos, pode desaparecer ao suspender, reiniciar ou atualizar o serviço. Nesse caso, é necessário repetir o cadastro inicial com o código de instalação. Use somente dados fictícios.
+
+Os temporizadores de lembretes não executam enquanto o processo estiver suspenso. O plano não oferece persistência local para produção. Nenhum destino externo de alertas foi configurado. A validação aqui é da interface e dos fluxos simulados da central.
+
+O teste real do número Business é uma etapa separada: exige configurar a Meta, verificar coexistência/elegibilidade e avaliar os custos e regras da API ou do provedor escolhido. Não habilite `live` durante a avaliação gratuita da central.
+
+Referências consultadas em 19/10/2026: [plano gratuito](https://render.com/docs/free), [blueprints](https://render.com/docs/blueprint-spec) e [preços](https://render.com/pricing).

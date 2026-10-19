@@ -18,7 +18,7 @@ O padrão é **demonstração**: mensagens não são enviadas ao WhatsApp. Depoi
 
 Se aparecer **Central indisponível**, a página não conseguiu acessar a API da central. Use **Tentar novamente** para repetir a conexão, ou **Explorar demonstração** para abrir explicitamente uma prévia com dados fictícios neste navegador. Essa opção não acessa o banco do servidor nem envia mensagens ao WhatsApp. Uma prévia HTML servida por outro endereço não oferece, por si só, as rotas da API.
 
-As contas, mensagens, retornos e alertas persistem em `data/central.sqlite`. Preserve o diretório `data` e faça backups consistentes com SQLite. Testes usam bancos separados e transporte simulado. O README original do WPPConnect permanece preservado, mas seus comandos não se aplicam à nova central.
+Na execução local, as contas, mensagens, retornos e alertas persistem em `data/central.sqlite`. Preserve o diretório `data` e faça backups consistentes com SQLite. No Render gratuito, o blueprint usa `/tmp/central-demo.sqlite`: o banco é temporário e pode desaparecer quando o serviço reiniciar, atualizar ou entrar em suspensão. Use somente dados fictícios nessa avaliação. Testes automatizados usam bancos separados e transporte simulado. O README original do WPPConnect permanece preservado, mas seus comandos não se aplicam à nova central.
 
 ## Configuração privada
 
@@ -43,9 +43,9 @@ Em **Conexão → Verificar configuração**, o administrador vê os nomes das c
 
 ## Retomar a conexão à Meta
 
-A hospedagem proposta está em [docs/hospedagem-render.md](docs/hospedagem-render.md), com configuração em `render.yaml`. Não foi contratada nem publicada. No Render, a aplicação usa `RENDER_EXTERNAL_URL` como origem quando `PUBLIC_ORIGIN` não estiver definido.
+A avaliação gratuita está em [docs/hospedagem-render.md](docs/hospedagem-render.md), com configuração em `render.yaml`: plano Free, modo demonstração e banco temporário. Nenhum recurso foi criado. No Render, a aplicação usa `RENDER_EXTERNAL_URL` como origem quando `PUBLIC_ORIGIN` não estiver definido. Esse teste valida a central online, mas não a conexão real ao número Business.
 
-1. Definir hospedagem com Node.js 24+, processo sempre ativo, disco persistente, HTTPS público e backup. Configurar `HOST` e `PORT` conforme a hospedagem e `PUBLIC_ORIGIN` com o domínio público. Configurar `SETUP_TOKEN` antes de expor o cadastro inicial. O proxy reverso deve preservar a origem das requisições e servir HTTPS.
+1. Para uso real pela equipe, definir hospedagem com Node.js 24+, processo sempre ativo, disco persistente, HTTPS público e backup. O plano gratuito com SQLite temporário serve para avaliação, pois pode perder contas e conversas. Configurar `HOST` e `PORT` conforme a hospedagem e `PUBLIC_ORIGIN` com o domínio público. Configurar `SETUP_TOKEN` antes de expor o cadastro inicial. O proxy reverso deve preservar a origem das requisições e servir HTTPS.
 2. Inspecionar o portfólio empresarial e a conta WhatsApp corretos, preservando número, conta Business e conversas. O aplicativo antigo “Chatwoot Domum” não foi reutilizado nem excluído. Sua configuração ainda precisa ser verificada antes de qualquer remoção.
 3. Verificar elegibilidade e um fluxo de cadastro de **coexistência** compatível com manter o Business ativo. O projeto não implementa cadastro integrado e nenhum provedor foi contratado. Uma chave de provedor pode exigir um adaptador diferente; este código chama diretamente a Cloud API da Meta.
 4. Configurar as credenciais de forma privada. Cadastrar `https://SEU-DOMINIO/webhooks/whatsapp` e a assinatura dos eventos de mensagens. Para coexistência, verificar também a disponibilidade/configuração de `smb_message_echoes`.
