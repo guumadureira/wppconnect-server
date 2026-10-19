@@ -147,6 +147,11 @@ function connectionDiagnostic(status){
   const messages={recorded:'Mensagem registrada na central.',other_number:'Evento recebido, mas ignorado: o número do evento é diferente do configurado. O exemplo do painel da Meta também pode usar outro número.',duplicate:'Evento recebido: a mensagem já estava registrada.',invalid_message:'Evento recebido, mas a mensagem não contém identificação ou telefone válidos.',no_new_message:'Evento recebido sem mensagem nova; pode ser uma atualização de status.',signature_rejected:'Evento recusado: assinatura de segurança inválida. Confira o segredo do aplicativo no servidor.',not_configured:'Evento recusado: faltam configurações obrigatórias no servidor.',invalid_payload:'Evento recusado: formato de dados inválido.',payload_too_large:'Evento recusado: tamanho acima do limite.',processing_error:'Evento recebido, mas houve uma falha no processamento.'};
   const lines=[status.missing.length?'Configurações pendentes no servidor: '+status.missing.join(', ')+'.':'Credenciais preenchidas. Envio e recebimento completos ainda precisam de validação.'];
   if(!status.publicHttps)lines.push('É necessário HTTPS público para o webhook da Meta.');
+  if(status.lastSendFailure){
+    const failure=status.lastSendFailure;
+    const source={api:'resposta da API da Meta',delivery:'aviso de falha de entrega da Meta',transport:'falha ao confirmar a resposta da Meta'}[failure.source] || 'envio';
+    lines.push('Última falha de envio registrada: '+formatDate(failure.at)+' ('+source+'). '+(failure.code?'Código Meta: '+failure.code+'.':'Não foi recebido um código numérico da Meta.'));
+  }
   const w=status.webhook;
   if(w){
     lines.push('Observações desde o início desta execução: '+formatDate(w.startedAt)+'. Os contadores reiniciam com o servidor.');
