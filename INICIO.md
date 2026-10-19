@@ -32,6 +32,9 @@ Use `.env.example` como referência e crie `.env` somente quando precisar altera
 | `META_APP_SECRET` | Segredo original do aplicativo para validar o HMAC dos eventos. |
 | `WEBHOOK_VERIFY_TOKEN` | Valor privado de verificação, igual no servidor e no cadastro do webhook. |
 | `META_GRAPH_VERSION` | Versão suportada pelo aplicativo, no formato `vNN.N`. |
+| `META_APP_ID` | Identificador público do aplicativo usado no cadastro de coexistência. |
+| `META_LOGIN_CONFIG_ID` | Identificador público da configuração de Login do Facebook para Empresas. |
+| `META_COEXISTENCE_PHONE_NUMBER` | Número do Business esperado, com país e DDD, somente dígitos conforme a Meta; não altera `WHATSAPP_PHONE_NUMBER_ID`. |
 | `PUBLIC_ORIGIN` | Origem HTTPS pública da central, sem caminho nem barra final. |
 | `SETUP_TOKEN` | Código privado para cadastrar o administrador em uma instalação remota. |
 | `ALERT_WEBHOOK_URL` | Destino opcional, sob seu controle, para entregar lembretes fora do navegador. |
@@ -43,15 +46,25 @@ Em **Conexão → Verificar configuração**, o administrador vê os nomes das c
 
 ## Retomar a conexão à Meta
 
-A avaliação gratuita está em [docs/hospedagem-render.md](docs/hospedagem-render.md), com configuração em `render.yaml`: plano Free, modo demonstração e banco temporário. Nenhum recurso foi criado. No Render, a aplicação usa `RENDER_EXTERNAL_URL` como origem quando `PUBLIC_ORIGIN` não estiver definido. Esse teste valida a central online, mas não a conexão real ao número Business.
+A avaliação gratuita está em [docs/hospedagem-render.md](docs/hospedagem-render.md), com configuração em `render.yaml`: plano Free, modo demonstração e banco temporário. A central foi publicada em `https://central-atendimento-znn0.onrender.com`; a configuração do serviço foi posteriormente colocada em modo real com o número de teste da Meta, preservando o número Business da empresa. No Render, a aplicação usa `RENDER_EXTERNAL_URL` como origem quando `PUBLIC_ORIGIN` não estiver definido. Hospedagem online e credenciais preenchidas não comprovam conexão efetiva com o número Business.
 
 1. Para uso real pela equipe, definir hospedagem com Node.js 24+, processo sempre ativo, disco persistente, HTTPS público e backup. O plano gratuito com SQLite temporário serve para avaliação, pois pode perder contas e conversas. Configurar `HOST` e `PORT` conforme a hospedagem e `PUBLIC_ORIGIN` com o domínio público. Configurar `SETUP_TOKEN` antes de expor o cadastro inicial. O proxy reverso deve preservar a origem das requisições e servir HTTPS.
 2. Inspecionar o portfólio empresarial e a conta WhatsApp corretos, preservando número, conta Business e conversas. O aplicativo antigo “Chatwoot Domum” não foi reutilizado nem excluído. Sua configuração ainda precisa ser verificada antes de qualquer remoção.
-3. Verificar elegibilidade e um fluxo de cadastro de **coexistência** compatível com manter o Business ativo. O projeto não implementa cadastro integrado e nenhum provedor foi contratado. Uma chave de provedor pode exigir um adaptador diferente; este código chama diretamente a Cloud API da Meta.
+3. Verificar elegibilidade e um fluxo de cadastro de **coexistência** compatível com manter o Business ativo. Em **Conexão → Preparar conexão com WhatsApp Business**, administradores podem abrir o cadastro incorporado e conferir a autorização. A ativação do número continua separada; nenhum provedor foi contratado. Uma chave de provedor pode exigir um adaptador diferente; este código chama diretamente a Cloud API da Meta.
 4. Configurar as credenciais de forma privada. Cadastrar `https://SEU-DOMINIO/webhooks/whatsapp` e a assinatura dos eventos de mensagens. Para coexistência, verificar também a disponibilidade/configuração de `smb_message_echoes`.
 5. Com um contato de teste autorizado, validar entrada de mensagem, resposta assinada por dois usuários, recibos, ecos de respostas pelo aplicativo e entrega efetiva de um lembrete. Só então abrir o atendimento à equipe.
 
 O webhook verifica HMAC do corpo bruto e restringe o recebimento ao identificador de número configurado. Mensagens duplicadas são deduplicadas. Envios recusados ou não confirmados mantêm a pendência, e uma mensagem nova recebida durante o envio continua pendente.
+
+### Preparar coexistência
+
+Configure os identificadores `META_APP_ID` e `META_LOGIN_CONFIG_ID`, o número esperado `META_COEXISTENCE_PHONE_NUMBER` e as credenciais `META_APP_SECRET` e `META_GRAPH_VERSION`. O modo deve ser `live` e a origem pública HTTPS. Na configuração de Login do Facebook para Empresas, autorize essa mesma origem para o SDK JavaScript. As verificações/habilitações exigidas pela Meta permanecem necessárias; IDs preenchidos não comprovam elegibilidade.
+
+O botão administrativo abre uma página separada que carrega o SDK oficial somente após verificar a sessão. Ela solicita `whatsapp_business_app_onboarding` com sessão `3` e fluxo `v4`, recebe código e evento de conclusão em qualquer ordem e envia o código uma única vez ao servidor. O servidor restringe a tentativa à sessão, por até dez minutos, e consulta pela Graph API os números da conta escolhida, usando o token recém-autorizado. Só registra uma conferência quando a Meta retorna `is_on_biz_app: true` e `platform_type: CLOUD_API` e o telefone real coincide com `META_COEXISTENCE_PHONE_NUMBER`. Essa comparação aceita identificadores de ativos novos durante o cadastro, mantendo o telefone físico restrito ao autorizado. Respostas do navegador, sozinhas, não comprovam a conexão.
+
+Esse recurso **prepara e confere a autorização**: não registra/migra/exclui o número, não assina webhooks de outra conta, não envia mensagens e não troca `WHATSAPP_PHONE_NUMBER_ID` nem `WHATSAPP_ACCESS_TOKEN`. O token retornado é usado apenas na consulta e não fica guardado, nem é enviado ao navegador. O banco registra apenas identificadores, telefone de exibição e data da conferência. A ativação posterior requer uma nova autorização, armazenamento adequado das credenciais e validação efetiva de recebimento/envio. O SQLite temporário do Render Free continua sendo apenas para avaliação.
+
+Referência do protocolo: [exemplo oficial da Meta](https://github.com/fbsamples/business-messaging-sample-tech-provider-app/tree/14703a3e1fdba9bcf75b2360b00817b6fcc9f79b), em especial `app/components/ClientDashboard.tsx`, `Fbl4bLauncher.tsx` e `app/publicConfig.ts`. Os testes locais simulam a Meta e não usam o número real.
 
 ## Limites atuais
 
@@ -59,7 +72,7 @@ O webhook verifica HMAC do corpo bruto e restringe o recebimento ao identificado
 - O prazo de alerta usa tempo corrido, sem calendário de horário comercial. O padrão é 30 minutos.
 - Notificações do navegador exigem permissão e a central aberta. Avisos com a página fechada dependem de um destino externo de alertas; nenhum está configurado neste ambiente.
 - Mensagens livres são bloqueadas após a janela de 24 horas. Modelos aprovados, anexos, recuperação de senha e importação do histórico ainda não estão implementados.
-- A base foi validada localmente com API simulada. Não há publicação, pareamento ou conexão real à Meta confirmados.
+- O fluxo local foi validado com API simulada. No serviço publicado, o webhook foi cadastrado e o campo `messages` assinado; o usuário optou por adiar o teste de recebimento na central. O envio do número de teste retornou `130497`, restrição informada pela Meta para o país do destinatário. A coexistência e a ativação do número Business real permanecem pendentes.
 
 Mais detalhes da versão anterior estão em [docs/projeto-original.md](docs/projeto-original.md). O código legado do WPPConnect foi removido por solicitação do usuário; o nome do repositório não define o adaptador usado pela nova central.
 
