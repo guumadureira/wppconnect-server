@@ -1,0 +1,11 @@
+CENTRAL DE ATENDIMENTO
+
+Para testar sem instalar nada, abra public/index.html no navegador.
+
+Na aba Equipe, cadastre e edite os nomes que devem aparecer nas assinaturas. Os perfis e clientes iniciais são fictícios. Nenhuma mensagem será enviada ao WhatsApp.
+
+O projeto executável permite contas individuais e possui a integração preparada para a Cloud API da Meta. As instruções atuais estão em INICIO.md. A proposta de hospedagem está em docs/hospedagem-render.md.
+
+Seu número Business ainda não foi conectado. A ativação precisa verificar a elegibilidade para coexistência por um provedor compatível. Não apague a conta Business para tentar contornar o cadastro.
+
+Não foi publicado um servidor nem contratado um serviço nesta entrega.

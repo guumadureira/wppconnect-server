@@ -1,3 +1,5 @@
+> **Projeto ativo: Central de atendimento WhatsApp.** Consulte [INICIO.md](INICIO.md) para executar a nova aplicação e [a proposta de hospedagem](docs/hospedagem-render.md) para publicá-la após revisão. A documentação abaixo foi preservada como histórico do código WPPConnect removido; seus comandos não se aplicam ao projeto atual.
+
 # WPPConnect Team
 
 ## _WPPConnect Server_
