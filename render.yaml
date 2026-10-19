@@ -1,0 +1,26 @@
+# Configuração para revisão. Criar os recursos no Render exige plano pago.
+# O deploy permanece em demonstração; nenhuma credencial da Meta está incluída.
+services:
+  - type: web
+    name: central-atendimento
+    runtime: node
+    plan: starter
+    autoDeploy: false
+    buildCommand: npm test
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: 24.19.0
+      - key: HOST
+        value: 0.0.0.0
+      - key: WHATSAPP_MODE
+        value: demo
+      - key: DATABASE_PATH
+        value: /var/data/central.sqlite
+      - key: SETUP_TOKEN
+        generateValue: true
+    disk:
+      name: central-data
+      mountPath: /var/data
+      sizeGB: 1
