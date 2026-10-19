@@ -42,6 +42,8 @@ export function createCentral(config = process.env, transport = fetch) {
   const ready = live && ['WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_ACCESS_TOKEN','META_APP_SECRET','WEBHOOK_VERIFY_TOKEN','META_GRAPH_VERSION'].every(k => config[k]);
   // Only operational counts and timestamps; no payload, phone or credentials.
   // These observations start again with each server process.
+  const metaCode = value => Number.isSafeInteger(value) && value > 0 ? value : null;
+  let lastSendFailure = null;
   const webhook = {startedAt:now(),postRequests:0,acceptedRequests:0,rejectedRequests:0,recordedMessages:0,duplicates:0,ignoredNumberEvents:0,invalidMessages:0,lastRequestAt:null,lastCompletedAt:null,lastMessageAt:null,lastResult:null};
   const rejectWebhook = (status, message, reason) => { throw Object.assign(new Error(message), {status,webhookReason:reason}); };
   const attempts = new Map();
@@ -71,7 +73,7 @@ export function createCentral(config = process.env, transport = fetch) {
     }
   }
   function intake(value, field = 'messages') {
-    const result = {recordedMessages:0,duplicates:0,ignoredNumberEvents:0,invalidMessages:0};
+    const result = {recordedMessages:0,duplicates:0,ignoredNumberEvents:0,invalidMessages:0,sendFailure:null};
     if (String(value.metadata?.phone_number_id) !== String(config.WHATSAPP_PHONE_NUMBER_ID)) {result.ignoredNumberEvents++;return result;}
     const incoming = field === 'smb_message_echoes' ? (value.message_echoes || []) : (value.messages || []);
     for (const m of incoming) {
@@ -109,6 +111,7 @@ export function createCentral(config = process.env, transport = fetch) {
       const rank = {sending:0,unknown:0,sent:1,delivered:2,read:3,failed:4};
       if (s.status === 'failed' || rank[s.status] > rank[m.status]) run('UPDATE messages SET status=? WHERE id=?',s.status,m.id);
       if (s.status === 'failed') {
+        result.sendFailure={at:now(),source:'delivery',code:metaCode(s.errors?.[0]?.code)};
         const c = get('SELECT * FROM conversations WHERE id=?',m.conversation_id);
         const after = get("SELECT id FROM messages WHERE conversation_id=? AND direction='out' AND created>? AND status IN ('sent','delivered','read')",c.id,m.created);
         if (!after && c.last_inbound) run('UPDATE conversations SET pending_since=COALESCE(pending_since,last_inbound) WHERE id=?',c.id);
@@ -145,14 +148,17 @@ export function createCentral(config = process.env, transport = fetch) {
         try {event=JSON.parse(raw);}catch {rejectWebhook(400,'Evento inválido.','invalid_payload');}
         if (!event || event.object!=='whatsapp_business_account' || !Array.isArray(event.entry)) rejectWebhook(400,'Evento inválido.','invalid_payload');
         const observed = {recordedMessages:0,duplicates:0,ignoredNumberEvents:0,invalidMessages:0};
+        let observedSendFailure=null;
         db.exec('BEGIN');
         try {
           for(const entry of event.entry) for(const change of entry.changes || []) {
             const result=intake(change.value || {},change.field);
             for(const key of Object.keys(observed))observed[key]+=result[key];
+            if(result.sendFailure)observedSendFailure=result.sendFailure;
           }
           db.exec('COMMIT');
         } catch(e) {db.exec('ROLLBACK');throw e;}
+        if(observedSendFailure)lastSendFailure=observedSendFailure;
         for(const key of Object.keys(observed))webhook[key]+=observed[key];
         if(observed.recordedMessages)webhook.lastMessageAt=now();
         tick();
@@ -228,7 +234,7 @@ export function createCentral(config = process.env, transport = fetch) {
       if(url.pathname==='/api/connection-status' && req.method==='GET'){
         if(user.role!=='admin')fail(403,'Somente administradores podem consultar a configuração.');
         const required=['WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_ACCESS_TOKEN','META_APP_SECRET','WEBHOOK_VERIFY_TOKEN','META_GRAPH_VERSION'];
-        return reply(200,{mode:live?'live':'demo',credentialsConfigured:!!ready,connectionVerified:false,missing:required.filter(name=>!config[name]),webhookPath:'/webhooks/whatsapp',publicHttps:origin.startsWith('https://'),webhook});
+        return reply(200,{mode:live?'live':'demo',credentialsConfigured:!!ready,connectionVerified:false,missing:required.filter(name=>!config[name]),webhookPath:'/webhooks/whatsapp',publicHttps:origin.startsWith('https://'),webhook,lastSendFailure});
       }
       if (url.pathname==='/api/logout' && req.method==='POST') {
         if(token)run('DELETE FROM sessions WHERE token=?',hash(token));
@@ -282,13 +288,18 @@ export function createCentral(config = process.env, transport = fetch) {
             try {
               response=await transport(`https://graph.facebook.com/${config.META_GRAPH_VERSION}/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,{method:'POST',headers:{authorization:`Bearer ${config.WHATSAPP_ACCESS_TOKEN}`,'content-type':'application/json'},body:JSON.stringify({messaging_product:'whatsapp',to:c.phone,type:'text',text:{body:signed}}),signal:AbortSignal.timeout(15000)});
               const result=await response.json();
-              if(!response.ok||!result.messages?.[0]?.id) {run("UPDATE messages SET status='failed' WHERE id=?",id);fail(502,'O WhatsApp recusou o envio. A conversa continua pendente.');}
+              if(!response.ok||!result.messages?.[0]?.id) {
+                lastSendFailure={at:now(),source:'api',code:metaCode(result.error?.code)};
+                run("UPDATE messages SET status='failed' WHERE id=?",id);
+                fail(502,'O WhatsApp recusou o envio.'+(lastSendFailure.code?' Código Meta: '+lastSendFailure.code+'.':'')+' A conversa continua pendente.');
+              }
               const pid=result.messages[0].id;
               const echoed=get('SELECT id FROM messages WHERE provider_id=?',pid);
               if(echoed&&echoed.id!==id)run('DELETE FROM messages WHERE id=?',echoed.id);
               run("UPDATE messages SET status='sent',provider_id=? WHERE id=?",pid,id);
             } catch(e) {
               if(e.status)throw e;
+              lastSendFailure={at:now(),source:'transport',code:null};
               run("UPDATE messages SET status='unknown' WHERE id=?",id);fail(502,'Não foi possível confirmar o envio. Confira no Business antes de tentar novamente; a pendência foi mantida.');
             }
           }
