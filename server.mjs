@@ -40,6 +40,10 @@ export function createCentral(config = process.env, transport = fetch) {
   const run = (sql, ...args) => db.prepare(sql).run(...args);
   const live = config.WHATSAPP_MODE === 'live';
   const ready = live && ['WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_ACCESS_TOKEN','META_APP_SECRET','WEBHOOK_VERIFY_TOKEN','META_GRAPH_VERSION'].every(k => config[k]);
+  // Only operational counts and timestamps; no payload, phone or credentials.
+  // These observations start again with each server process.
+  const webhook = {startedAt:now(),postRequests:0,acceptedRequests:0,rejectedRequests:0,recordedMessages:0,duplicates:0,ignoredNumberEvents:0,invalidMessages:0,lastRequestAt:null,lastCompletedAt:null,lastMessageAt:null,lastResult:null};
+  const rejectWebhook = (status, message, reason) => { throw Object.assign(new Error(message), {status,webhookReason:reason}); };
   const attempts = new Map();
   const signup = createWhatsAppSignup(config, db, transport);
   const tick = () => {
@@ -67,13 +71,15 @@ export function createCentral(config = process.env, transport = fetch) {
     }
   }
   function intake(value, field = 'messages') {
-    if (String(value.metadata?.phone_number_id) !== String(config.WHATSAPP_PHONE_NUMBER_ID)) return;
+    const result = {recordedMessages:0,duplicates:0,ignoredNumberEvents:0,invalidMessages:0};
+    if (String(value.metadata?.phone_number_id) !== String(config.WHATSAPP_PHONE_NUMBER_ID)) {result.ignoredNumberEvents++;return result;}
     const incoming = field === 'smb_message_echoes' ? (value.message_echoes || []) : (value.messages || []);
     for (const m of incoming) {
-      if (!m.id || get('SELECT id FROM messages WHERE provider_id=?', m.id)) continue;
+      if (!m.id) {result.invalidMessages++;continue;}
+      if (get('SELECT id FROM messages WHERE provider_id=?', m.id)) {result.duplicates++;continue;}
       const echo = field === 'smb_message_echoes';
       const phone = clean(echo ? m.to : m.from, 30);
-      if (!/^\d{5,20}$/.test(phone)) continue;
+      if (!/^\d{5,20}$/.test(phone)) {result.invalidMessages++;continue;}
       const timestamp = Number(m.timestamp) * 1000;
       const at = Number.isFinite(timestamp) && timestamp > 0 ? Math.min(timestamp, now()) : now();
       let c = get('SELECT * FROM conversations WHERE phone=?', phone);
@@ -85,6 +91,7 @@ export function createCentral(config = process.env, transport = fetch) {
       }
       const body = clean(m.text?.body, 4096) || `[${clean(m.type,40) || 'Mensagem não textual'} — consulte o aplicativo WhatsApp Business]`;
       const received = run('INSERT INTO messages(id,conversation_id,provider_id,direction,body,agent_name,status,created) VALUES(?,?,?,?,?,?,?,?)',randomUUID(),c.id,m.id,echo?'out':'in',body,echo?'Aplicativo Business (atendente não identificado)':null,echo?'sent':'received',at).lastInsertRowid;
+      result.recordedMessages++;
       if (echo) {
         run('UPDATE conversations SET pending_since=CASE WHEN last_inbound<? THEN NULL ELSE pending_since END,updated=MAX(updated,?) WHERE id=?', at, at, c.id);
       } else {
@@ -107,6 +114,7 @@ export function createCentral(config = process.env, transport = fetch) {
         if (!after && c.last_inbound) run('UPDATE conversations SET pending_since=COALESCE(pending_since,last_inbound) WHERE id=?',c.id);
       }
     }
+    return result;
   }
   async function handler(req, res) {
     const origin = config.PUBLIC_ORIGIN || config.RENDER_EXTERNAL_URL || 'http://localhost:3000';
@@ -128,15 +136,29 @@ export function createCentral(config = process.env, transport = fetch) {
           res.writeHead(200,{'content-type':'text/plain'});return res.end(url.searchParams.get('hub.challenge') || '');
         }
         if (req.method !== 'POST') fail(405,'Método não permitido.');
-        if (!ready) fail(503,'Conexão ainda não configurada.');
+        webhook.postRequests++;webhook.lastRequestAt=now();
+        if (!ready) rejectWebhook(503,'Conexão ainda não configurada.','not_configured');
         const raw = await readBody();
         const expected = 'sha256='+createHmac('sha256',config.META_APP_SECRET).update(raw).digest('hex');
-        if (!safeEqual(req.headers['x-hub-signature-256'],expected)) fail(403,'Assinatura inválida.');
-        const event = JSON.parse(raw);
-        if (event.object!=='whatsapp_business_account') fail(400,'Evento inválido.');
+        if (!safeEqual(req.headers['x-hub-signature-256'],expected)) rejectWebhook(403,'Assinatura inválida.','signature_rejected');
+        let event;
+        try {event=JSON.parse(raw);}catch {rejectWebhook(400,'Evento inválido.','invalid_payload');}
+        if (!event || event.object!=='whatsapp_business_account' || !Array.isArray(event.entry)) rejectWebhook(400,'Evento inválido.','invalid_payload');
+        const observed = {recordedMessages:0,duplicates:0,ignoredNumberEvents:0,invalidMessages:0};
         db.exec('BEGIN');
-        try {for(const entry of event.entry || []) for(const change of entry.changes || []) intake(change.value || {},change.field);db.exec('COMMIT');}catch(e){db.exec('ROLLBACK');throw e;}
-        tick();return reply(200,{ok:true});
+        try {
+          for(const entry of event.entry) for(const change of entry.changes || []) {
+            const result=intake(change.value || {},change.field);
+            for(const key of Object.keys(observed))observed[key]+=result[key];
+          }
+          db.exec('COMMIT');
+        } catch(e) {db.exec('ROLLBACK');throw e;}
+        for(const key of Object.keys(observed))webhook[key]+=observed[key];
+        if(observed.recordedMessages)webhook.lastMessageAt=now();
+        tick();
+        webhook.acceptedRequests++;webhook.lastCompletedAt=now();
+        webhook.lastResult=observed.recordedMessages?'recorded':observed.ignoredNumberEvents?'other_number':observed.duplicates?'duplicate':observed.invalidMessages?'invalid_message':'no_new_message';
+        return reply(200,{ok:true});
       }
       const publicFiles = {
         '/sobre': ['sobre.html', 'text/html; charset=utf-8'],
@@ -206,7 +228,7 @@ export function createCentral(config = process.env, transport = fetch) {
       if(url.pathname==='/api/connection-status' && req.method==='GET'){
         if(user.role!=='admin')fail(403,'Somente administradores podem consultar a configuração.');
         const required=['WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_ACCESS_TOKEN','META_APP_SECRET','WEBHOOK_VERIFY_TOKEN','META_GRAPH_VERSION'];
-        return reply(200,{mode:live?'live':'demo',credentialsConfigured:!!ready,connectionVerified:false,missing:required.filter(name=>!config[name]),webhookPath:'/webhooks/whatsapp',publicHttps:origin.startsWith('https://')});
+        return reply(200,{mode:live?'live':'demo',credentialsConfigured:!!ready,connectionVerified:false,missing:required.filter(name=>!config[name]),webhookPath:'/webhooks/whatsapp',publicHttps:origin.startsWith('https://'),webhook});
       }
       if (url.pathname==='/api/logout' && req.method==='POST') {
         if(token)run('DELETE FROM sessions WHERE token=?',hash(token));
@@ -288,6 +310,10 @@ export function createCentral(config = process.env, transport = fetch) {
       }
       fail(404,'Recurso não encontrado.');
     } catch(error) {
+      if(url.pathname==='/webhooks/whatsapp' && req.method==='POST') {
+        webhook.rejectedRequests++;webhook.lastCompletedAt=now();
+        webhook.lastResult=error.webhookReason || (error.status===413?'payload_too_large':'processing_error');
+      }
       if(res.headersSent){res.destroy();return;}
       const status=error.status || 500;
       reply(status,{error:status<500||error.status?error.message:'Não foi possível concluir esta ação.'});

@@ -89,3 +89,9 @@ Após a implantação, alinhar cores, fontes e componentes à identidade visual 
 O ícone provisório da central está em `/assets/app-icon.png` (1024 × 1024); o original vetorial é `public/app-icon.svg`. Ele não substitui o logotipo oficial da empresa. Para a análise do app na Meta, use a URL HTTPS pública de `/privacidade` e, no campo de instruções de exclusão, `/exclusao-de-dados`. A existência dessas páginas não comprova aprovação do aplicativo nem entrega de mensagens.
 
 A página institucional `/sobre` apresenta a Domum Engenharia, a razão social confirmada e os canais públicos `domumenge@outlook.com` e Instagram `@domumenge`. Explica que a central está em implantação para atendimento próprio, sem oferta de SaaS a terceiros. A página é pública e não exige login, não carrega scripts nem adiciona coleta de dados por formulários. Não implica aprovação da verificação de acesso da Meta.
+
+### Diagnóstico do recebimento
+
+Em **Conexão → Diagnosticar recebimento**, o administrador consulta observações do processo atual: quantidade de POSTs ao webhook, requisições aceitas/recusadas, mensagens registradas, duplicadas e eventos de outro número, além de horários e resultado da última conclusão. Isso diferencia ausência de entrega, assinatura inválida, configuração incompleta, formato inválido e falha de processamento. O diagnóstico não chama a Meta e não registra corpos de eventos, telefones, tokens ou assinaturas. Os contadores ficam em memória e reiniciam com o servidor; não descrevem o período anterior ao início indicado.
+
+Mensagens só entram na contagem após o commit da transação. Eventos do exemplo da Meta podem usar outro identificador de número e serem aceitos com HTTP 200 sem criar conversas. Uma mensagem registrada comprova recebimento, mas não confirma entrega de respostas nem coexistência do número Business real.
