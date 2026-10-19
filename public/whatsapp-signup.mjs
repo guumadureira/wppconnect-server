@@ -49,6 +49,9 @@ export function createSignupFlow({ complete, notify, done }) {
       if (!code) waitForOtherReturn();
       void finish();
     },
+    resume() {
+      if (active && !completing && !code && !info) notify('A Meta ainda não retornou a conclusão do cadastro. Se a janela fechou, clique em Reiniciar preparação. Se ela continua aberta, conclua o cadastro nela.');
+    },
     cancel() { if (completing) return; generation++; stop('Cadastro encerrado. A conexão atual foi preservada.'); },
   };
 }
@@ -67,6 +70,7 @@ async function bootSignup() {
   const flow = createSignupFlow({ complete: body => api('/api/whatsapp/signup/complete', body), notify,
     done: reason => { clearTimeout(timeout); launch.disabled = true; retry.hidden = false; if (reason === 'incomplete') review.hidden = false; } });
   window.addEventListener('message', flow.message);
+  window.addEventListener('focus', flow.resume);
   retry.onclick = () => location.reload();
   try {
     const config = await api('/api/whatsapp/signup');

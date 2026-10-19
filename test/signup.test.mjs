@@ -218,3 +218,21 @@ test('retorno parcial permite conclusão dentro do prazo e cancelamento limpa a 
   assert.equal(notices.at(-1), 'Cadastro encerrado. A conexão atual foi preservada.');
   assert.equal(ended, 2);
 });
+
+test('voltar à central sem nenhum retorno mostra orientação sem assumir sucesso ou cancelamento', async () => {
+  let completed = 0;
+  const notices = [];
+  const flow = createSignupFlow({ complete: async () => { completed++; return { message: 'Autorização conferida.' }; }, notify: text => notices.push(text) });
+  flow.begin({ attemptId: 'attempt' });
+  flow.resume();
+  assert.match(notices.at(-1), /Se a janela fechou/);
+  assert.equal(completed, 0);
+  flow.login({ authResponse: { code: 'private-code' } });
+  flow.resume();
+  assert.match(notices.at(-1), /Login do Facebook recebido/);
+  flow.message(message());
+  await settle();
+  assert.equal(completed, 1);
+  flow.resume();
+  assert.equal(notices.at(-1), 'Autorização conferida.');
+});
