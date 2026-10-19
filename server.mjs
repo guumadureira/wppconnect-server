@@ -5,6 +5,7 @@ import { dirname, resolve } from 'node:path';
 import { randomBytes, randomUUID, createHash, createHmac, timingSafeEqual, scrypt } from 'node:crypto';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
+import { createWhatsAppSignup } from './whatsapp-signup.mjs';
 
 const derive = promisify(scrypt);
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -40,6 +41,7 @@ export function createCentral(config = process.env, transport = fetch) {
   const live = config.WHATSAPP_MODE === 'live';
   const ready = live && ['WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_ACCESS_TOKEN','META_APP_SECRET','WEBHOOK_VERIFY_TOKEN','META_GRAPH_VERSION'].every(k => config[k]);
   const attempts = new Map();
+  const signup = createWhatsAppSignup(config, db, transport);
   const tick = () => {
     const minutes = get('SELECT minutes FROM settings WHERE id=1').minutes;
     for (const c of all("SELECT * FROM conversations WHERE status='open'")) {
@@ -140,7 +142,8 @@ export function createCentral(config = process.env, transport = fetch) {
         res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store'});
         return res.end(readFileSync(new URL('./public/index.html',import.meta.url)));
       }
-      if (!url.pathname.startsWith('/api/')) fail(404,'Página não encontrada.');
+      const signupPage = ['/connect/whatsapp','/assets/whatsapp-signup.mjs'].includes(url.pathname);
+      if (!url.pathname.startsWith('/api/') && !signupPage) fail(404,'Página não encontrada.');
       if (!['GET','HEAD'].includes(req.method) && req.headers.origin !== origin) fail(403,'Origem não autorizada.');
       let body = {};
       if (['POST','PATCH'].includes(req.method)) {const raw=await readBody();try{body=JSON.parse(raw.toString() || '{}');}catch{fail(400,'Dados inválidos.');}if(!body||typeof body!=='object'||Array.isArray(body))fail(400,'Dados inválidos.');}
@@ -174,6 +177,20 @@ export function createCentral(config = process.env, transport = fetch) {
         return reply(200,{ok:true});
       }
       if (!user) fail(401,'Entre com seu usuário para continuar.');
+      if (signupPage || url.pathname.startsWith('/api/whatsapp/signup')) {
+        if (user.role !== 'admin') fail(403,'Somente administradores podem preparar a conexão.');
+        if (signupPage && req.method === 'GET') {
+          const page = url.pathname === '/connect/whatsapp';
+          if (page) res.setHeader('content-security-policy', "default-src 'self'; script-src 'self' https://connect.facebook.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://www.facebook.com; connect-src 'self' https://www.facebook.com https://graph.facebook.com; frame-src https://www.facebook.com https://web.facebook.com https://business.facebook.com https://staticxx.facebook.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+          res.setHeader('referrer-policy','no-referrer');
+          res.writeHead(200,{'content-type':page?'text/html; charset=utf-8':'text/javascript; charset=utf-8','cache-control':'no-store'});
+          return res.end(readFileSync(new URL(page?'./public/whatsapp-signup.html':'./public/whatsapp-signup.mjs',import.meta.url)));
+        }
+        if (url.pathname === '/api/whatsapp/signup' && req.method === 'GET') return reply(200,signup.status(origin));
+        if (url.pathname === '/api/whatsapp/signup/start' && req.method === 'POST') return reply(201,signup.start(hash(token),origin));
+        if (url.pathname === '/api/whatsapp/signup/complete' && req.method === 'POST') return reply(200,await signup.complete(hash(token),origin,body));
+        fail(405,'Método não permitido.');
+      }
       if(url.pathname==='/api/connection-status' && req.method==='GET'){
         if(user.role!=='admin')fail(403,'Somente administradores podem consultar a configuração.');
         const required=['WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_ACCESS_TOKEN','META_APP_SECRET','WEBHOOK_VERIFY_TOKEN','META_GRAPH_VERSION'];

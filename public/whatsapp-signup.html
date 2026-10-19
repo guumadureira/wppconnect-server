@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Preparar conexão · Central</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f5f7f4;color:#162c28;font:16px/1.6 system-ui,sans-serif}main{max-width:680px;margin:7vh auto;padding:28px}h1{line-height:1.2}a{color:#216c53}section{background:white;border:1px solid #e4e9e5;border-radius:16px;padding:24px;margin:24px 0}button{font:inherit;padding:12px 18px;border:0;border-radius:9px;background:#216c53;color:white;cursor:pointer}button:disabled{opacity:.55;cursor:default}.notice{border-left:4px solid #a95a22;padding:12px 16px;background:#fbf0e3}#status{min-height:3em;overflow-wrap:anywhere}small{color:#65746c}#retry{background:#52665c;margin-top:12px}[hidden]{display:none!important}
+</style>
+</head>
+<body><main>
+<a href="/">← Voltar à central</a>
+<h1>Preparar conexão com o WhatsApp Business</h1>
+<p>Abra o cadastro oficial da Meta para autorizar a conexão do número que você já usa no aplicativo Business.</p>
+<section>
+<p class="notice">Esta etapa confere a autorização. O número usado pela central permanece como está. A ativação do atendimento é uma etapa separada.</p>
+<p>Na Meta, escolha a opção de conectar seu WhatsApp Business existente. Se essa opção não for oferecida, feche o cadastro antes de cadastrar ou migrar um número.</p>
+<p>A disponibilidade depende da Meta e das habilitações da sua empresa e do aplicativo.</p>
+<button id="launch" disabled>Carregando configuração…</button>
+<p id="status" role="status" aria-live="polite">Conferindo seu acesso de administrador.</p>
+<button id="retry" hidden>Tentar novamente</button>
+<small>A autorização ocorre na Meta. Tokens e segredos não são exibidos nesta página.</small>
+</section>
+<p><small>Você pode cancelar o cadastro a qualquer momento. Uma autorização conferida não comprova entrega de mensagens nem remove restrições de envio.</small></p>
+</main><div id="fb-root"></div><script type="module" src="/assets/whatsapp-signup.mjs"></script></body>
+</html>
