@@ -138,6 +138,17 @@ export function createCentral(config = process.env, transport = fetch) {
         try {for(const entry of event.entry || []) for(const change of entry.changes || []) intake(change.value || {},change.field);db.exec('COMMIT');}catch(e){db.exec('ROLLBACK');throw e;}
         tick();return reply(200,{ok:true});
       }
+      const publicFiles = {
+        '/privacidade': ['privacidade.html', 'text/html; charset=utf-8'],
+        '/exclusao-de-dados': ['exclusao-de-dados.html', 'text/html; charset=utf-8'],
+        '/assets/app-icon.png': ['app-icon.png', 'image/png'],
+      };
+      if (Object.hasOwn(publicFiles, url.pathname) && ['GET','HEAD'].includes(req.method)) {
+        const [file, type] = publicFiles[url.pathname];
+        res.setHeader('content-security-policy', "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+        res.writeHead(200, {'content-type':type, 'cache-control':'public, max-age=300'});
+        return res.end(req.method === 'HEAD' ? undefined : readFileSync(new URL('./public/'+file, import.meta.url)));
+      }
       if (url.pathname==='/' && req.method==='GET') {
         res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store'});
         return res.end(readFileSync(new URL('./public/index.html',import.meta.url)));
