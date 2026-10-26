@@ -12,7 +12,13 @@ Limite atual: não há importação do histórico do celular, tratamento dos eve
 
 ## Entrega 2 — mídia e figurinhas
 
-Pendente: receber e visualizar imagens, documentos, áudios e figurinhas, baixar os arquivos no computador e enviar anexos. Em seguida, biblioteca de figurinhas salvas/favoritas e reenvio. Usar os IDs de mídia e os endpoints oficiais da Meta; guardar arquivos em armazenamento privado e liberá-los por rotas autenticadas da central. Definir limites por arquivo, uso do disco e retenção antes da ativação. O disco atual é de 1 GB; ampliação ou outro armazenamento precisam de confirmação de custo.
+Implementados no código: recebimento e prévia de imagens e figurinhas, recebimento de documentos, download autenticado para o computador, preparação/revisão e envio de anexos, biblioteca compartilhada de figurinhas favoritas e reenvio. A confirmação de envio fica separada da preparação do arquivo e do recibo de entrega. Figurinhas não aceitam legenda; a autoria do atendente fica no registro da central. Imagens e documentos levam a assinatura da sessão na legenda.
+
+Os bytes e metadados ficam em tabelas adicionais do mesmo SQLite das conversas, usando o caminho `DATABASE_PATH`. No Render com disco persistente, manter o banco em `/var/data/central.sqlite`. Não é necessário expor uma pasta pública nem contratar armazenamento nesta etapa. Limites iniciais: imagem JPEG/PNG de até 5 MB; documento PDF, Office ou TXT de até 20 MB; figurinha WebP 512 × 512, até 100 KB estática ou 500 KB animada. O limite lógico de todos os anexos é 500 MB, configurável para menos por `MEDIA_STORAGE_MAX_MB` (1 a 500). O SQLite, os demais registros e seus arquivos auxiliares também ocupam espaço no disco de 1 GB; esse teto não substitui o acompanhamento do espaço físico. Ampliação ou outro armazenamento precisam de confirmação de custo.
+
+Arquivos são acessíveis somente com sessão autenticada. O recebimento registra primeiro a mensagem, depois tenta baixar o arquivo por ID pela API oficial. Há conferência de formato/tamanho/hash, bloqueio de redirecionamento ou endereço externo não autorizado e até cinco tentativas automáticas, além da opção de tentar novamente manualmente. Falha, tamanho excessivo ou falta de espaço mantêm a mensagem e informam o problema, sem apagar anexos existentes. A aplicação não expõe o token nem a URL temporária da Meta ao navegador. O modo demonstração não chama a Meta.
+
+O envio usa os controles existentes de assinatura, idempotência, janela de 24 horas e manutenção da pendência em caso de falha. Preparar um arquivo ou selecionar uma figurinha não envia mensagem. Tirar o arquivo da prévia ou retirar uma figurinha dos favoritos não apaga o arquivo do histórico. Os favoritos são compartilhados pela equipe; as prévias de envio pertencem à conversa e à página aberta, e devem ser selecionadas novamente após recarregar a página. Anexos preparados mas não enviados também ocupam espaço. Ainda não há limpeza automática, importação de anexos antigos nem suporte a áudio/vídeo nesta entrega. A validação real com um contato autorizado e a publicação no Render permanecem separadas dos testes locais simulados.
 
 ## Entrega 3 — fotos e organização
 
@@ -103,6 +109,8 @@ Definir instruções Domum, dados enviados, base de conhecimento e orçamento an
 ## Referências verificadas
 
 - Meta, mensagens e mídia: <https://www.postman.com/meta/whatsapp-business-platform/overview>.
+- Meta, carregamento de figurinhas: <https://www.postman.com/meta/whatsapp-business-platform/request/fd2syvj/upload-sticker>.
+- Meta, download de mídia: <https://www.postman.com/meta/whatsapp-business-platform/request/zsq66eh/download-media>.
 - Notion, webhooks: <https://developers.notion.com/reference/webhooks>.
 - Autentique, criação de documentos e links individuais: <https://docs.autentique.com.br/api/2/mutations/criando-um-documento>.
 - Autentique, eventos, conclusão e validação dos webhooks: <https://docs.autentique.com.br/api/integration-basics/webhooks>.
