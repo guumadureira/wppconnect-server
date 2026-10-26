@@ -35,3 +35,13 @@ test('referência do Notion abre a conversa indicada mesmo fora de 15 dias e nã
   vm.runInContext("requestedConversation='not-existing';",c);await vm.runInContext('refresh()',c);
   assert.match(root.innerHTML,/Conversa não encontrada/);assert.doesNotMatch(root.innerHTML,/data-chat="c2"/);assert.equal(vm.runInContext('active',c),null);
 });
+
+test('diagnóstico fica disponível sem configuração e explica pendências sem liberar sincronização',()=>{
+  const {c}=fixture();
+  vm.runInContext("state.notion={enabled:false,activationPending:true,missing:['NOTION_CLIENTS_DATA_SOURCE_ID','NOTION_HISTORY_DATA_SOURCE_ID'],pendingEvents:0,uncertainEvents:0};",c);
+  let card=vm.runInContext('notionConnectionCard()',c);
+  assert.match(card,/id="verify-notion">Verificar configuração/);assert.match(card,/id="sync-notion" disabled/);assert.match(card,/NOTION_ENABLED=true/);assert.match(card,/NOTION_CLIENTS_DATA_SOURCE_ID/);assert.match(card,/NOTION_HISTORY_DATA_SOURCE_ID/);
+  assert.doesNotMatch(card,/Credencial de acesso ausente/);
+  vm.runInContext("state.notion={enabled:true,activationPending:false,missing:[],pendingEvents:0,uncertainEvents:0};notionDiagnostic={accessVerified:true};",c);card=vm.runInContext('notionConnectionCard()',c);
+  assert.match(card,/id="verify-notion">Verificar acesso ao Notion/);assert.match(card,/Acesso às bases principais do Notion conferido/);assert.doesNotMatch(card,/id="sync-notion" disabled/);
+});
