@@ -196,7 +196,7 @@ export function createCentral(config = process.env, transport = fetch) {
         const local = ['127.0.0.1','::1','::ffff:127.0.0.1'].includes(req.socket.remoteAddress) && ['localhost','127.0.0.1','[::1]'].includes(new URL(origin).hostname);
         if (config.SETUP_TOKEN ? !safeEqual(body.setupToken,config.SETUP_TOKEN) : !local) fail(403,'É necessário o código de instalação configurado no servidor.');
         const name=clean(body.name,80),email=clean(body.email).toLowerCase();
-        if (!name || !email.includes('@') || typeof body.password!=='string' || body.password.length<12 || body.password.length>512) fail(400,'Informe nome, e-mail e senha de pelo menos 12 caracteres.');
+        if (!name || !email.includes('@') || typeof body.password!=='string' || !body.password.length || body.password.length>512) fail(400,'Informe nome, e-mail e senha.');
         const encoded = await passwordHash(body.password);
         if (get('SELECT id FROM agents LIMIT 1')) fail(409,'A instalação já foi concluída.');
         run('INSERT INTO agents(id,name,email,password,role) VALUES(?,?,?,?,?)',randomUUID(),name,email,encoded,'admin');
@@ -251,7 +251,7 @@ export function createCentral(config = process.env, transport = fetch) {
       if (url.pathname==='/api/agents' && req.method==='POST') {
         if(user.role!=='admin')fail(403,'Somente administradores podem cadastrar atendentes.');
         const name=clean(body.name,80),email=clean(body.email).toLowerCase();
-        if(!name||!email.includes('@')||typeof body.password!=='string'||body.password.length<12||body.password.length>512)fail(400,'Informe nome, e-mail e senha de pelo menos 12 caracteres.');
+        if(!name||!email.includes('@')||typeof body.password!=='string'||!body.password.length||body.password.length>512)fail(400,'Informe nome, e-mail e senha.');
         if(get('SELECT id FROM agents WHERE email=?',email))fail(409,'Já existe um atendente com esse e-mail.');
         run('INSERT INTO agents(id,name,email,password,role) VALUES(?,?,?,?,?)',randomUUID(),name,email,await passwordHash(body.password),'agent');return reply(201,{ok:true});
       }
