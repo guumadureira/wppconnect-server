@@ -14,19 +14,56 @@ Pendente: receber e visualizar imagens, documentos, áudios e figurinhas, baixar
 
 Pendente: foto cadastrada no contato, arquivos associados ao cliente e arquivamento/limpeza de histórico. O objeto de perfil usado nos eventos de mensagem documenta o nome; a recuperação automática de fotos de perfil dos clientes não está confirmada. Oferecer foto manual enquanto isso. Prazos de retenção, itens protegidos e procedimento de exclusão dependem de escolha do usuário; nenhuma limpeza automática é ativada por este plano.
 
-## Entrega 4 — Notion e avisos ao cliente
+## Entrega 4 — jornada do cliente no Notion e comunicação
 
-Base confirmada pelo usuário: **Gestão de Atividades**. Propriedades verificadas: `Atividade`, `Status`, `Cliente cadastrado`, `Projeto / contrato` e `Trabalho integrado`. A relação `Cliente cadastrado` aponta para **Clientes — Cadastro restrito**, cujo telefone está no campo `Telefone`.
+O vínculo principal é o **cadastro único do cliente e seu telefone confirmado**, desde a elaboração da proposta até contrato, execução e entregas. Gestão de Atividades é uma fonte complementar dos eventos, dentro dessa jornada. Um cliente pode ter várias propostas e trabalhos; cada aviso deve identificar a frente correspondente e chegar à conversa autorizada.
 
-Status existentes: `A fazer`, `Planejado`, `Em andamento`, `Aguardando cliente/terceiro` e `Concluído`. Os IDs específicos das fontes e credenciais devem ser configurados no ambiente privado da implantação, fora deste documento.
+### Estrutura existente conferida
 
-Vincular explicitamente o ID do cliente no Notion ao ID do contato e à conversa, com conferência do telefone. Não localizar destinatários apenas pelo nome. Ler apenas os campos necessários à integração; o cadastro restrito também possui dados que não devem ser copiados para conversas, mensagens automáticas ou logs.
+| Fonte | Papel e vínculos disponíveis |
+| --- | --- |
+| Clientes — Cadastro restrito | Cadastro progressivo, com `Telefone` e demais informações do cliente. É a referência para vincular o contato da central. |
+| Controle de Propostas e Contratos | Contém `Cliente cadastrado`, `Link da Proposta`, `Status`, `Situação do contrato`, datas de envio/assinatura e `Trabalhos vinculados`. |
+| Trabalhos — Obras, projetos e serviços | Conecta cliente, frente contratada, projeto beta, painel interno, pasta de entregas e portal do cliente. É um índice de integração; preserva os painéis existentes. |
+| Projetos e Serviços — Beta | Contém o cadastro de Projetos e contratos — Beta, com `Cliente cadastrado`, `Trabalho integrado`, `Situação`, `Próximo marco` e pasta de documentos. |
+| Obras/Acompanhamentos/Reformas | Mantém páginas específicas e modelos de painel interno e portal, vinculados ao cliente e ao Trabalho. |
+| Gestão de Atividades | Eventos de execução vinculados por `Cliente cadastrado`, `Projeto / contrato` e `Trabalho integrado`. |
 
-Fluxo proposto: alteração no Notion → webhook verificado → consulta do estado atual da atividade → regra de status/cliente autorizada → prévia de mensagem → fila persistente → envio para a conversa vinculada → registro do resultado. Começar com revisão humana e ativar automação por regra somente após validação. Permitir também atualização de status a partir da central quando essa operação for configurada.
+Os IDs específicos das fontes e credenciais devem ficar no ambiente privado da implantação, fora deste documento. Não criar um cadastro de cliente diferente para cada etapa. Preservar as relações e o histórico já existentes; associações antigas ainda precisam de conferência antes de ativar avisos.
 
-Antes de enviar automaticamente, definir quais transições avisam o cliente, o texto que pode sair, contato autorizado e preferência de recebimento. Evitar reenvio em eventos repetidos, notificações de tarefas internas e destinos ambíguos. Fora da janela de atendimento do WhatsApp, o envio exige o caminho de modelo aprovado. Se não houver vínculo válido, manter o aviso pendente para revisão.
+### Eventos propostos
 
-Esta entrega ainda não contém cliente Notion, token no Render, webhook Notion nem envios de avisos. A conexão do Notion usada neste chat não é automaticamente disponibilizada ao servidor publicado. Não foram alterados registros no Notion.
+| Evento de negócio | Ação proposta no WhatsApp | Condição de liberação |
+| --- | --- | --- |
+| Proposta pronta | Enviar o PDF final ou acesso aprovado ao documento. | Autorização expressa de envio no Notion, destinatário conferido e versão final identificada. |
+| Contrato pronto para assinatura | Enviar o documento ou link do serviço de assinatura. | Documento aprovado e fluxo de assinatura definido. Serviço de assinatura a confirmar. |
+| Assinatura concluída | Informar a confirmação e disponibilizar a via assinada quando liberada. | Evidência real de assinatura, obtida do provedor ou conferida pela equipe. |
+| Contratação/frente aberta | Associar ou preparar a página de projeto/serviço/obra e informar o início correspondente. | Marcos de contratação e início confirmados conforme o fluxo existente. Aceite da proposta, assinatura, início e recebimento são eventos distintos. |
+| Documento ou entrega técnica liberada | Enviar o arquivo ou link permitido ao cliente. | Versão aprovada, trabalho correto e liberação explícita; geração ou arquivamento isolados não autorizam envio. |
+| Marco/atividade publicável atualizado | Informar o avanço referente ao trabalho. | Regra de comunicação escolhida e conteúdo revisado para o cliente. Edições internas não geram mensagens indiscriminadamente. |
+
+O procedimento existente de propostas arquiva o PDF e registra o link sem enviá-lo ao cliente. Preservar esse comportamento. O status `A enviar`, sozinho, não comprova aprovação da proposta ou autorização de envio. Propor um controle próprio de liberação no Notion, com documento, versão e destinatário, antes de implementar os gatilhos. Nenhuma propriedade nova foi criada por esta especificação.
+
+### Vínculo e registro dos envios
+
+1. Associar o ID do cliente no Notion ao ID estável do contato na central e conferir o telefone. Não localizar destinatários apenas pelo nome.
+2. Relacionar proposta, contrato, Trabalho e página específica ao mesmo cliente. A criação de páginas deve reutilizar as existentes e seguir seus modelos; não duplicar painéis ou consolidar históricos automaticamente.
+3. Ao autorizar uma comunicação, registrar origem do evento, trabalho, versão do documento, conteúdo liberado e destinatário. Mudança de telefone ou arquivo deve exigir nova conferência do envio pendente.
+4. Receber o evento pelo webhook verificado, consultar o registro atual, aplicar a regra de liberação e colocar o aviso em fila persistente, sem duplicação por repetição de evento.
+5. Começar com prévia/revisão humana e um piloto autorizado. Registrar envio aceito, entrega confirmada ou falha separadamente; enfileirar ou arquivar um arquivo não equivale a entregá-lo ao cliente.
+6. Usar anexos ou acesso aprovado especificamente para o destinatário. O portal do cliente é separado do painel interno; não enviar links da central administrativa nem ampliar compartilhamentos automaticamente.
+
+Ler apenas os campos necessários. Informações internas, margens e dados restritos não entram automaticamente nos avisos. Os contatos que assinam um contrato e que recebem atualizações podem ser diferentes; o destinatário de cada comunicação precisa ser explícito. Fora da janela de atendimento do WhatsApp, usar o caminho de modelo aprovado. Se vínculo, liberação, arquivo ou destinatário forem ambíguos, manter o envio pendente para revisão.
+
+### Ordem de implementação desta integração
+
+1. Vínculo cliente ↔ contato/conversa, com consulta das propostas, contratos e trabalhos relacionados, sem envio automático.
+2. Liberação e envio da proposta final pelo Notion, com confirmação na conversa e registro do resultado.
+3. Envio para assinatura e confirmação de contrato assinado, após definir o provedor.
+4. Preparação/vínculo dos painéis e comunicação das entregas de projeto, serviço ou obra.
+5. Automação dos marcos escolhidos e acompanhamento das falhas, após validar o piloto.
+
+Essa integração ainda não contém cliente Notion no servidor, token no Render, webhook Notion nem envios de avisos. A conexão usada neste chat não é automaticamente disponibilizada ao aplicativo. Não foram alterados registros, páginas, permissões ou automações do Notion.
 
 ## Entrega 5 — pré-atendimento com IA
 
