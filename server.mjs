@@ -28,6 +28,7 @@ export function createCentral(config = process.env, transport = fetch) {
   const db = new DatabaseSync(database);
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
     CREATE TABLE IF NOT EXISTS agents(id TEXT PRIMARY KEY,name TEXT NOT NULL,email TEXT UNIQUE NOT NULL,password TEXT NOT NULL,role TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1);
+    CREATE TABLE IF NOT EXISTS contacts(id TEXT PRIMARY KEY,name TEXT NOT NULL,phone TEXT UNIQUE NOT NULL,email TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',created INTEGER NOT NULL,updated INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,agent_id TEXT NOT NULL REFERENCES agents(id),expires INTEGER NOT NULL,signature_name TEXT);
     CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,name TEXT NOT NULL,phone TEXT UNIQUE NOT NULL,owner_id TEXT REFERENCES agents(id),status TEXT NOT NULL DEFAULT 'open',pending_since INTEGER,last_inbound INTEGER,last_received INTEGER,followup_at INTEGER,updated INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL REFERENCES conversations(id),provider_id TEXT UNIQUE,request_id TEXT UNIQUE,direction TEXT NOT NULL,body TEXT NOT NULL,agent_id TEXT REFERENCES agents(id),agent_name TEXT,status TEXT NOT NULL,created INTEGER NOT NULL);
@@ -87,7 +88,7 @@ export function createCentral(config = process.env, transport = fetch) {
       const at = Number.isFinite(timestamp) && timestamp > 0 ? Math.min(timestamp, now()) : now();
       let c = get('SELECT * FROM conversations WHERE phone=?', phone);
       if (!c) {
-        const name = clean(value.contacts?.find(p => p.wa_id === phone)?.profile?.name) || phone;
+        const name = get('SELECT name FROM contacts WHERE phone=?',phone)?.name || clean(value.contacts?.find(p => p.wa_id === phone)?.profile?.name) || phone;
         const id = randomUUID();
         run('INSERT INTO conversations(id,name,phone,updated) VALUES(?,?,?,?)', id, name, phone, at);
         c = get('SELECT * FROM conversations WHERE id=?', id);
@@ -253,7 +254,42 @@ export function createCentral(config = process.env, transport = fetch) {
         res.setHeader('set-cookie','central_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');return reply(200,{ok:true});
       }
       if (url.pathname==='/api/state' && req.method==='GET') {
-        tick();return reply(200,{user,mode:live?'live':'demo',connected:!!ready,externalAlerts:!!config.ALERT_WEBHOOK_URL,agents:all('SELECT id,name,email,role,active FROM agents'),conversations:all('SELECT * FROM conversations ORDER BY updated DESC'),messages:all('SELECT * FROM messages ORDER BY created'),settings:get('SELECT minutes FROM settings WHERE id=1')});
+        tick();return reply(200,{user,mode:live?'live':'demo',connected:!!ready,externalAlerts:!!config.ALERT_WEBHOOK_URL,agents:all('SELECT id,name,email,role,active FROM agents'),contacts:all('SELECT * FROM contacts ORDER BY name COLLATE NOCASE'),conversations:all('SELECT * FROM conversations ORDER BY updated DESC'),messages:all('SELECT * FROM messages ORDER BY created'),settings:get('SELECT minutes FROM settings WHERE id=1')});
+      }
+      if (url.pathname === '/api/contacts' && req.method === 'GET') return reply(200,{contacts:all('SELECT * FROM contacts ORDER BY name COLLATE NOCASE')});
+      const contactMatch=url.pathname.match(/^\/api\/contacts\/([^/]+)$/);
+      if ((url.pathname === '/api/contacts' && req.method === 'POST') || (contactMatch && req.method === 'PATCH')) {
+        const existing=contactMatch?get('SELECT * FROM contacts WHERE id=?',contactMatch[1]):null;
+        if(contactMatch&&!existing)fail(404,'Contato não encontrado.');
+        const name=body.name,email=body.email??existing?.email??'',notes=body.notes??existing?.notes??'';
+        const phone=typeof body.phone==='string'?body.phone.replace(/[\s().-]/g,'').replace(/^\+/,''):existing?.phone;
+        if(typeof name!=='string'||!name.trim()||name.trim().length>120)fail(400,'Informe o nome do contato, com até 120 caracteres.');
+        if(!phone||!(/^[1-9]\d{7,14}$/).test(phone))fail(400,'Informe o telefone com código do país e DDD, por exemplo +55 44 99999-9999.');
+        if(existing&&phone!==existing.phone)fail(400,'Para outro número, cadastre um novo contato. O histórico permanece vinculado ao número original.');
+        if(typeof email!=='string'||email.length>254||(email.trim()&&!(/^[^\s@]+@[^\s@]+\.[^\s@]+$/).test(email.trim())))fail(400,'Informe um e-mail válido ou deixe o campo vazio.');
+        if(typeof notes!=='string'||notes.length>2000)fail(400,'Use até 2000 caracteres nas observações.');
+        const duplicate=get('SELECT id FROM contacts WHERE phone=?',phone);
+        if(duplicate&&duplicate.id!==existing?.id)fail(409,'Esse telefone já está salvo nos contatos.');
+        const id=existing?.id||randomUUID(),at=now();
+        db.exec('BEGIN');
+        try{
+          if(existing)run('UPDATE contacts SET name=?,email=?,notes=?,updated=? WHERE id=?',name.trim(),email.trim(),notes.trim(),at,id);
+          else run('INSERT INTO contacts(id,name,phone,email,notes,created,updated) VALUES(?,?,?,?,?,?,?)',id,name.trim(),phone,email.trim(),notes.trim(),at,at);
+          run('UPDATE conversations SET name=? WHERE phone=?',name.trim(),phone);
+          db.exec('COMMIT');
+        }catch(error){db.exec('ROLLBACK');throw error;}
+        return reply(existing?200:201,{contact:get('SELECT * FROM contacts WHERE id=?',id)});
+      }
+      if(url.pathname==='/api/conversations'&&req.method==='POST'){
+        const contact=get('SELECT * FROM contacts WHERE id=?',clean(body.contactId,80));
+        if(!contact)fail(404,'Selecione um contato salvo.');
+        let conversation=get('SELECT * FROM conversations WHERE phone=?',contact.phone);
+        if(!conversation){
+          const id=randomUUID();run('INSERT INTO conversations(id,name,phone,updated) VALUES(?,?,?,?)',id,contact.name,contact.phone,now());
+          conversation=get('SELECT * FROM conversations WHERE id=?',id);
+          return reply(201,{conversation});
+        }
+        return reply(200,{conversation});
       }
       if (url.pathname==='/api/settings' && req.method==='PATCH') {
         if(user.role!=='admin')fail(403,'Somente administradores podem configurar a central.');

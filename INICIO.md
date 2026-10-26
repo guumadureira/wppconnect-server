@@ -90,6 +90,14 @@ A atualização acrescenta uma coluna à tabela de sessões existente; não recr
 
 No campo de resposta, **Enter envia** e **Shift+Enter quebra a linha**. O controle **Enter envia** permite desligar o atalho. Essa preferência é salva neste navegador; não sincroniza entre dispositivos. A composição de caracteres e as combinações Ctrl/Alt/Meta não disparam o envio.
 
+### Emojis e contatos
+
+O botão **Emojis** insere símbolos na posição do cursor, sem disparar o envio. Os rascunhos de cada conversa permanecem durante as atualizações da interface na página aberta, mas não sobrevivem ao fechamento ou recarregamento do navegador.
+
+Em **Contatos**, cadastre nome, telefone com país e DDD, e-mail e observações. **Salvar contato** dentro de uma conversa preenche o número recebido. Alterar o nome do contato atualiza a identificação da conversa sem editar mensagens anteriores. **Abrir conversa** reaproveita o histórico daquele número, sem iniciar um envio. Telefones salvos são normalizados e duplicados são recusados. O cadastro pertence à central e não sincroniza com a agenda do celular. A criação da tabela é aditiva e preserva contas, sessões e conversas existentes.
+
+Os próximos pacotes e o vínculo de atividades do Notion estão detalhados em [plano-sistema-integrado.md](docs/plano-sistema-integrado.md).
+
 ## Informações públicas do aplicativo
 
 `/privacidade` e `/exclusao-de-dados` são páginas públicas, sem login e sem SDK da Meta. Identificam a Domum Engenharia (Rodrigues & Madureira LTDA), com o contato público informado pela empresa: `domumenge@outlook.com`. Atualize esses textos se mudarem o responsável, o contato, os fornecedores, a retenção ou as funcionalidades. A exclusão é solicitada por e-mail e tratada pela empresa; não há exclusão automática implementada.
