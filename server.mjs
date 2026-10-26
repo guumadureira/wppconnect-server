@@ -28,13 +28,14 @@ export function createCentral(config = process.env, transport = fetch) {
   const db = new DatabaseSync(database);
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
     CREATE TABLE IF NOT EXISTS agents(id TEXT PRIMARY KEY,name TEXT NOT NULL,email TEXT UNIQUE NOT NULL,password TEXT NOT NULL,role TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1);
-    CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,agent_id TEXT NOT NULL REFERENCES agents(id),expires INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,agent_id TEXT NOT NULL REFERENCES agents(id),expires INTEGER NOT NULL,signature_name TEXT);
     CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,name TEXT NOT NULL,phone TEXT UNIQUE NOT NULL,owner_id TEXT REFERENCES agents(id),status TEXT NOT NULL DEFAULT 'open',pending_since INTEGER,last_inbound INTEGER,last_received INTEGER,followup_at INTEGER,updated INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL REFERENCES conversations(id),provider_id TEXT UNIQUE,request_id TEXT UNIQUE,direction TEXT NOT NULL,body TEXT NOT NULL,agent_id TEXT REFERENCES agents(id),agent_name TEXT,status TEXT NOT NULL,created INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1),minutes INTEGER NOT NULL DEFAULT 30);
     INSERT OR IGNORE INTO settings(id) VALUES(1);
     CREATE TABLE IF NOT EXISTS alerts(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,kind TEXT NOT NULL,due INTEGER NOT NULL,delivered INTEGER NOT NULL DEFAULT 0,attempted INTEGER);
   `);
+  if (!db.prepare('PRAGMA table_info(sessions)').all().some(column => column.name === 'signature_name')) db.exec('ALTER TABLE sessions ADD COLUMN signature_name TEXT');
   const get = (sql, ...args) => db.prepare(sql).get(...args);
   const all = (sql, ...args) => db.prepare(sql).all(...args);
   const run = (sql, ...args) => db.prepare(sql).run(...args);
@@ -171,6 +172,9 @@ export function createCentral(config = process.env, transport = fetch) {
         '/privacidade': ['privacidade.html', 'text/html; charset=utf-8'],
         '/exclusao-de-dados': ['exclusao-de-dados.html', 'text/html; charset=utf-8'],
         '/assets/app-icon.png': ['app-icon.png', 'image/png'],
+        '/assets/domum-wordmark-dark.png': ['domum-wordmark-dark.png', 'image/png'],
+        '/assets/domum-wordmark-light.png': ['domum-wordmark-light.png', 'image/png'],
+        '/assets/domum-symbol.png': ['domum-symbol.png', 'image/png'],
       };
       if (Object.hasOwn(publicFiles, url.pathname) && ['GET','HEAD'].includes(req.method)) {
         const [file, type] = publicFiles[url.pathname];
@@ -188,7 +192,7 @@ export function createCentral(config = process.env, transport = fetch) {
       let body = {};
       if (['POST','PATCH'].includes(req.method)) {const raw=await readBody();try{body=JSON.parse(raw.toString() || '{}');}catch{fail(400,'Dados inválidos.');}if(!body||typeof body!=='object'||Array.isArray(body))fail(400,'Dados inválidos.');}
       const token = (req.headers.cookie || '').split(';').map(v=>v.trim()).find(v=>v.startsWith('central_session='))?.slice(16);
-      const user = token ? get('SELECT a.id,a.name,a.email,a.role FROM sessions s JOIN agents a ON a.id=s.agent_id WHERE s.token=? AND s.expires>? AND a.active=1',hash(token),now()) : null;
+      const user = token ? get('SELECT a.id,a.name,a.email,a.role,COALESCE(s.signature_name,a.name) AS signatureName FROM sessions s JOIN agents a ON a.id=s.agent_id WHERE s.token=? AND s.expires>? AND a.active=1',hash(token),now()) : null;
       const setupRequired = !get('SELECT id FROM agents LIMIT 1');
       if (url.pathname==='/api/session' && req.method==='GET') return reply(200,{user,setupRequired,mode:live?'live':'demo',connected:!!ready});
       if (url.pathname==='/api/setup' && req.method==='POST') {
@@ -210,13 +214,21 @@ export function createCentral(config = process.env, transport = fetch) {
         counter.count++;attempts.set(key,counter);
         const agent=get('SELECT * FROM agents WHERE email=? AND active=1',clean(body.email).toLowerCase());
         if(!await checkPassword(body.password,agent?.password)) fail(401,'E-mail ou senha incorretos.');
+        const signatureName = body.signatureName === undefined || body.signatureName === '' ? null : body.signatureName;
+        if (signatureName !== null && (typeof signatureName !== 'string' || !signatureName.trim() || signatureName.trim().length > 80 || /[\r\n\x00-\x1f\x7f]/.test(signatureName))) fail(400,'Informe o nome do atendente, com até 80 caracteres.');
         attempts.delete(key);
         const session=randomBytes(32).toString('hex');
-        run('INSERT INTO sessions VALUES(?,?,?)',hash(session),agent.id,now()+12*3600000);
+        run('INSERT INTO sessions(token,agent_id,expires,signature_name) VALUES(?,?,?,?)',hash(session),agent.id,now()+12*3600000,signatureName?.trim() || null);
         res.setHeader('set-cookie',`central_session=${session}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200${origin.startsWith('https:')?'; Secure':''}`);
         return reply(200,{ok:true});
       }
       if (!user) fail(401,'Entre com seu usuário para continuar.');
+      if (url.pathname === '/api/session/signature' && req.method === 'PATCH') {
+        if (typeof body.name !== 'string' || !body.name.trim() || body.name.trim().length > 80 || /[\r\n\x00-\x1f\x7f]/.test(body.name)) fail(400,'Informe o nome do atendente, com até 80 caracteres.');
+        const name = body.name.trim();
+        run('UPDATE sessions SET signature_name=? WHERE token=?',name,hash(token));
+        return reply(200,{signatureName:name});
+      }
       if (signupPage || url.pathname.startsWith('/api/whatsapp/signup')) {
         if (user.role !== 'admin') fail(403,'Somente administradores podem preparar a conexão.');
         if (signupPage && req.method === 'GET') {
@@ -281,8 +293,8 @@ export function createCentral(config = process.env, transport = fetch) {
           if(c.status!=='open')fail(409,'Reabra a conversa antes de responder.');
           if(live&&!ready)fail(503,'A conexão com o WhatsApp ainda não foi configurada.');
           if(live&&(!c.last_inbound||now()-c.last_inbound>24*3600000))fail(409,'A janela de 24 horas terminou. O retorno pela API exige um modelo aprovado; use o aplicativo Business para este contato.');
-          const id=randomUUID(),at=now(),signed=`${user.name}: ${text}`;
-          run('INSERT INTO messages(id,conversation_id,request_id,direction,body,agent_id,agent_name,status,created) VALUES(?,?,?,?,?,?,?,?,?)',id,c.id,requestId,'out',signed,user.id,user.name,live?'sending':'simulated',at);
+          const id=randomUUID(),at=now(),signed=`${user.signatureName}: ${text}`;
+          run('INSERT INTO messages(id,conversation_id,request_id,direction,body,agent_id,agent_name,status,created) VALUES(?,?,?,?,?,?,?,?,?)',id,c.id,requestId,'out',signed,user.id,user.signatureName,live?'sending':'simulated',at);
           if(live) {
             let response;
             try {

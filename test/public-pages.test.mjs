@@ -41,3 +41,19 @@ test('ícone público é PNG quadrado válido para o cadastro Meta', async t => 
   assert.equal(png.readUInt32BE(20),1024);
   assert.ok(png.length < 5*1024*1024);
 });
+
+test('logos oficiais da Domum são servidos como imagens sem abrir arquivos arbitrários', async t => {
+  const app = createCentral({ DATABASE_PATH: ':memory:' });
+  t.after(() => app.close());
+  await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
+  const base = 'http://127.0.0.1:' + app.server.address().port;
+  for (const name of ['domum-wordmark-dark.png', 'domum-wordmark-light.png', 'domum-symbol.png']) {
+    const response = await fetch(base + '/assets/' + name);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'image/png');
+    const png = Buffer.from(await response.arrayBuffer());
+    assert.equal(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+    assert.ok(png.length > 1000);
+  }
+  assert.equal((await fetch(base + '/assets/server.mjs')).status, 404);
+});
