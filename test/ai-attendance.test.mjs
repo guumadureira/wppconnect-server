@@ -5,13 +5,14 @@ import {simulateAttendance} from '../ai-attendance.mjs';
 import {mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {randomUUID} from 'node:crypto';
 const phone='5544000000001';
-const output={reply:'Olá! Em qual município fica o imóvel?',summary:'Contato solicita informações sobre projeto.',missing:'Município e serviço',nextStep:'Entender o serviço solicitado',kind:'orcamento',handoff:false,reason:''};
+const output={reply:'Olá! Em qual município fica o imóvel?',summary:'Contato solicita informações sobre projeto.',missing:'Município e serviço',nextStep:'Entender o serviço solicitado',kind:'orcamento',handoff:false,reason:'',intake:{ready:false,name:'',city:'',service:'',nameMessageId:'',cityMessageId:'',serviceMessageId:''}};
 function fixture(t,extra={},intercept){
   const config={DATABASE_PATH:':memory:',WHATSAPP_MODE:'live',WHATSAPP_PHONE_NUMBER_ID:'test-phone',WHATSAPP_ACCESS_TOKEN:'test-meta-key',META_APP_SECRET:'test-secret',WEBHOOK_VERIFY_TOKEN:'test-verify',META_GRAPH_VERSION:'v25.0',AI_ENABLED:'true',OPENAI_API_KEY:'test-openai-key',AI_ALLOWED_PHONES:phone,AI_MONTHLY_BUDGET_USD:'1',...extra};
   const calls=[];let app;
   const transport=async(url,options)=>{
-    calls.push({url,body:JSON.parse(options.body),headers:options.headers});
+    calls.push({url,body:options.body?JSON.parse(options.body):undefined,headers:options.headers});
     if(intercept){const result=await intercept(url,options,app);if(result)return result;}
     if(url==='https://api.openai.com/v1/responses')return Response.json({status:'completed',usage:{input_tokens:1000,output_tokens:150},output:[{type:'message',content:[{type:'output_text',text:JSON.stringify(output)}]}]});
     assert.match(url,/^https:\/\/graph.facebook.com\//);return Response.json({messages:[{id:'fake-out-'+calls.length}]});
@@ -97,4 +98,66 @@ test('ensaio exige autenticação e administração, sem gravar ou consumir API'
   await req('/api/setup','POST',{name:'Admin teste',email:'ai-test@example.invalid',password:'test-password'});const login=await req('/api/login','POST',{email:'ai-test@example.invalid',password:'test-password'});
   const result=await req('/api/ai/simulate','POST',{message:'Preciso de projeto em Maringá'},login.cookie);assert.equal(result.status,200);assert.equal(result.body.simulation,true);assert.equal(f.calls.length,0);assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM messages').get().n,0);
   const status=await req('/api/ai/status','GET',null,login.cookie);assert.ok(!JSON.stringify(status).includes('test-openai-key'));
+});
+
+test('teto total do teste não renova quando o mês muda',async t=>{
+  const f=fixture(t,{AI_TOTAL_BUDGET_USD:'5',AI_MONTHLY_BUDGET_USD:'5'});f.incoming();await f.app.ai.process();assert.equal(f.calls.length,2);
+  f.app.db.prepare("UPDATE ai_jobs SET cost_usd=5,billing_month='2000-01'").run();f.incoming('Tenho mais uma pergunta');await f.app.ai.process();assert.equal(f.calls.length,2);assert.equal(f.app.ai.status().usedTotalUsd,5);assert.equal(f.app.ai.status().handoffs.length,1);
+});
+
+function notionPilot(t,{existing=null,invalidEvidence=false,commercial=false,pauseBeforeCreate=false,pauseDuringCreate=false}={}){
+  const clients='11111111-1111-4111-8111-111111111111',history='22222222-2222-4222-8222-222222222222';
+  const rows={[clients]:existing?[{id:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',parent:{data_source_id:clients},properties:{'Nome do Cliente':{title:[{text:{content:existing}}]},Telefone:{phone_number:phone}}}]:[],[history]:[]};
+  let clientPosts=0;const rt=p=>(p?.title||p?.rich_text||[]).map(x=>x.text?.content||'').join('');
+  const f=fixture(t,{PUBLIC_ORIGIN:'https://central.example.invalid',AI_AUTO_REGISTER:'true',AI_TOTAL_BUDGET_USD:'5',NOTION_ENABLED:'true',NOTION_TOKEN:'fake-notion-token',NOTION_CLIENTS_DATA_SOURCE_ID:clients,NOTION_HISTORY_DATA_SOURCE_ID:history},async(url,options)=>{
+    if(url.includes('api.notion.com')){
+      const body=options.body?JSON.parse(options.body):null,path=new URL(url).pathname;
+      if(path.startsWith('/v1/pages/'))return Response.json(Object.values(rows).flat().find(p=>p.id===path.split('/').at(-1)));
+      if(path.endsWith('/query')){const list=rows[path.split('/')[3]]||[],filter=body.filter;if(pauseBeforeCreate&&filter?.title?.equals){const chat=f.app.db.prepare('SELECT id FROM conversations WHERE phone=?').get(phone);f.app.ai.pause(chat.id);}return Response.json({results:list.filter(p=>{if(!filter)return true;if(filter.relation)return p.properties[filter.property]?.relation?.some(r=>r.id===filter.relation.contains);const value=filter.phone_number?p.properties[filter.property]?.phone_number||'':rt(p.properties[filter.property]);const cond=filter.phone_number||filter.title||filter.rich_text;return cond?.equals!==undefined?value===cond.equals:value.includes(cond?.contains||'');}),has_more:false});}
+      if(path==='/v1/pages'){
+        const source=body.parent.data_source_id;if(source===clients)clientPosts++;
+        const page={id:randomUUID(),parent:body.parent,properties:body.properties,children:body.children};rows[source].push(page);if(pauseDuringCreate&&source===clients){const chat=f.app.db.prepare('SELECT id FROM conversations WHERE phone=?').get(phone);f.app.ai.pause(chat.id);}return Response.json(page);
+      }
+      throw Error('Unexpected Notion path');
+    }
+    if(url.includes('api.openai.com')){
+      const input=JSON.parse(JSON.parse(options.body).input[0].content),source=input.messages.find(m=>m.text.includes('Meu nome é')),file=input.attachments?.length>0;
+      const intake=source?{ready:true,name:invalidEvidence?'Nome inventado':'Cliente Exemplo',city:'Maringá',service:'projeto residencial',nameMessageId:source.id,cityMessageId:source.id,serviceMessageId:source.id}:{ready:false,name:'',city:'',service:'',nameMessageId:'',cityMessageId:'',serviceMessageId:''};
+      return Response.json({status:'completed',usage:{input_tokens:1500,output_tokens:250},output:[{type:'message',content:[{type:'output_text',text:JSON.stringify({...output,reply:file?'Recebi o arquivo. A equipe vai conferir e seguir com o atendimento.':source?'Você tem matrícula ou cadastro imobiliário? Se não tiver, seguimos com as informações disponíveis.':'Como posso te chamar?',summary:file?'Solicitação de projeto em Maringá; arquivo recebido, sem validação.':'Solicitação de projeto residencial em Maringá.',kind:commercial?'comercial':'orcamento',handoff:file,reason:file?'Conferir documento e preparar orçamento.':'',intake})}]}]});
+    }
+  });
+  let registrationError;const register=f.app.customerContext.registerFromAI;f.app.customerContext.registerFromAI=async(...args)=>{try{return await register(...args);}catch(error){registrationError=error.message;throw error;}};
+  return{...f,rows,clients,history,get clientPosts(){return clientPosts;},get registrationError(){return registrationError;}};
+}
+
+test('jornada do novo contato cria cadastro com origem conferida e vincula documento ao histórico privado',async t=>{
+  const f=notionPilot(t);const c=f.incoming('Gostaria de um projeto');await f.app.ai.process();assert.equal(f.clientPosts,0);
+  f.incoming('Meu nome é Cliente Exemplo. Preciso de projeto residencial em Maringá.');await f.app.ai.process();assert.equal(f.clientPosts,1);
+  let ctx=f.app.customerContext.view(c.id);assert.ok(ctx.client_id,f.registrationError);assert.equal(ctx.client_name,'Cliente Exemplo');assert.ok(ctx.history.some(e=>e.summary.includes('Município do serviço: Maringá')&&e.source==='IA'));
+  f.incoming('',phone,{type:'document',document:{id:'fake-document-id',filename:'cadastro-imobiliario.pdf',mime_type:'application/pdf'}});await f.app.ai.process();await f.app.customerContext.processQueue(true);
+  ctx=f.app.customerContext.view(c.id);assert.equal(ctx.mode,'human');assert.equal(f.clientPosts,1);assert.ok(ctx.requests.some(r=>r.status==='Aguardando equipe'));
+  const file=f.rows[f.history].find(p=>p.children?.length);assert.ok(file);const paragraph=JSON.stringify(file.children);assert.match(paragraph,/api\/media\//);assert.match(paragraph,/ainda não validado/);assert.ok(!paragraph.includes('fake-notion-token'));
+  assert.equal(f.app.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE direction='out' AND agent_name='Domum · IA'").get().n,3);
+});
+
+test('nome inventado, contato comercial e cadastro divergente não criam cliente automaticamente',async t=>{
+  for(const variant of [{invalidEvidence:true},{commercial:true},{existing:'Outra Pessoa'}]){
+    const f=notionPilot(t,variant);f.incoming('Meu nome é Cliente Exemplo. Preciso de projeto residencial em Maringá.');await f.app.ai.process();assert.equal(f.clientPosts,0);assert.equal(f.app.ai.status().handoffs.length,1);
+  }
+});
+
+test('telefone e nome exatos reaproveitam cadastro único sem criar outra página',async t=>{
+  const f=notionPilot(t,{existing:'Cliente Exemplo'});const c=f.incoming('Meu nome é Cliente Exemplo. Preciso de projeto residencial em Maringá.');await f.app.ai.process();assert.equal(f.clientPosts,0);assert.equal(f.app.customerContext.view(c.id).client_name,'Cliente Exemplo',f.registrationError);assert.equal(f.app.customerContext.view(c.id).history.find(e=>e.kind==='cliente').source,'IA');
+});
+test('nome do proprietário mencionado na conversa não vira cadastro do solicitante',async t=>{
+  const f=notionPilot(t);f.incoming('Meu nome é Maria. O proprietário é Cliente Exemplo. Preciso de projeto residencial em Maringá.');await f.app.ai.process();assert.equal(f.clientPosts,0);assert.equal(f.app.ai.status().handoffs.length,1);
+});
+test('saldo esgotado da OpenAI tem diagnóstico específico sem expor o texto privado do fornecedor',async t=>{
+  const f=fixture(t,{},async url=>url.includes('openai.com')?Response.json({error:{code:'credit_balance_exhausted',type:'insufficient_quota',message:'test-openai-key'}},{status:429}):undefined);const c=f.incoming();await f.app.ai.process();assert.match(f.app.ai.result(c.id).error,/saldo de API esgotado/);assert.ok(!JSON.stringify(f.app.ai.result(c.id)).includes('test-openai-key'));assert.equal(f.calls.length,1);
+});
+test('tomada humana durante cadastro impede novas escritas e conserva resultado já despachado para conferência',async t=>{
+  for(const stage of ['pauseBeforeCreate','pauseDuringCreate']){
+    const f=notionPilot(t,{[stage]:true});const c=f.incoming('Meu nome é Cliente Exemplo. Preciso de projeto residencial em Maringá.');await f.app.ai.process();const ctx=f.app.customerContext.view(c.id);assert.equal(ctx.mode,'human');assert.equal(ctx.client_id,null);assert.equal(f.app.ai.result(c.id).state,'cancelled');assert.equal(f.clientPosts,stage==='pauseBeforeCreate'?0:1);assert.equal(f.app.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE direction='out'").get().n,0);
+    if(stage==='pauseDuringCreate')assert.ok(f.app.db.prepare('SELECT client_id FROM notion_client_operations').get().client_id);
+  }
 });

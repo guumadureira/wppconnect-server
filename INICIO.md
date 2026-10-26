@@ -95,7 +95,7 @@ As alterações de contexto e situação usam versões para evitar sobrescrita p
 
 ## Limites atuais
 
-O piloto opcional de IA e o ensaio sem consumo estão descritos em [docs/atendimento-ia.md](docs/atendimento-ia.md). A configuração padrão permanece desligada e sem consumo; a existência de uma chave não ativa respostas. A liberação real exige telefone de teste, limite de gasto autorizado e configuração privada no servidor. O cadastro automático de clientes e a interpretação de documentos não fazem parte desse piloto.
+O piloto opcional de IA e o ensaio sem consumo estão descritos em [docs/atendimento-ia.md](docs/atendimento-ia.md). A configuração padrão permanece desligada e sem consumo; a existência de uma chave não ativa respostas. A liberação real exige telefone de teste, limite de gasto autorizado e configuração privada no servidor. O cadastro inicial automático pode ser habilitado com AI_AUTO_REGISTER, somente no piloto e com fonte dos dados e duplicidade conferidas. A interpretação de documentos continua com a equipe.
 
 - A assinatura automática se aplica às mensagens enviadas pela central. Ecos do aplicativo Business não identificam automaticamente o atendente.
 - O prazo de alerta usa tempo corrido, sem calendário de horário comercial. O padrão é 30 minutos.
