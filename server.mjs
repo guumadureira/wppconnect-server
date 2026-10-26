@@ -6,6 +6,7 @@ import { randomBytes, randomUUID, createHash, createHmac, timingSafeEqual, scryp
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { createWhatsAppSignup } from './whatsapp-signup.mjs';
+import { createMediaStore } from './media.mjs';
 
 const derive = promisify(scrypt);
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -41,6 +42,7 @@ export function createCentral(config = process.env, transport = fetch) {
   const all = (sql, ...args) => db.prepare(sql).all(...args);
   const run = (sql, ...args) => db.prepare(sql).run(...args);
   const live = config.WHATSAPP_MODE === 'live';
+  const media = createMediaStore(db,config,transport,live);
   const ready = live && ['WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_ACCESS_TOKEN','META_APP_SECRET','WEBHOOK_VERIFY_TOKEN','META_GRAPH_VERSION'].every(k => config[k]);
   // Only operational counts and timestamps; no payload, phone or credentials.
   // These observations start again with each server process.
@@ -93,8 +95,10 @@ export function createCentral(config = process.env, transport = fetch) {
         run('INSERT INTO conversations(id,name,phone,updated) VALUES(?,?,?,?)', id, name, phone, at);
         c = get('SELECT * FROM conversations WHERE id=?', id);
       }
-      const body = clean(m.text?.body, 4096) || `[${clean(m.type,40) || 'Mensagem não textual'} — consulte o aplicativo WhatsApp Business]`;
-      const received = run('INSERT INTO messages(id,conversation_id,provider_id,direction,body,agent_name,status,created) VALUES(?,?,?,?,?,?,?,?)',randomUUID(),c.id,m.id,echo?'out':'in',body,echo?'Aplicativo Business (atendente não identificado)':null,echo?'sent':'received',at).lastInsertRowid;
+      const body = clean(m.text?.body, 4096) || clean(m[m.type]?.caption,1024) || ({image:'[Imagem]',document:'[Documento]',sticker:'[Figurinha]'})[m.type] || `[${clean(m.type,40) || 'Mensagem não textual'} — consulte o aplicativo WhatsApp Business]`;
+      const messageId=randomUUID();
+      const received = run('INSERT INTO messages(id,conversation_id,provider_id,direction,body,agent_name,status,created) VALUES(?,?,?,?,?,?,?,?)',messageId,c.id,m.id,echo?'out':'in',body,echo?'Aplicativo Business (atendente não identificado)':null,echo?'sent':'received',at).lastInsertRowid;
+      media.incoming(messageId,m);
       result.recordedMessages++;
       if (echo) {
         run('UPDATE conversations SET pending_since=CASE WHEN last_inbound<? THEN NULL ELSE pending_since END,updated=MAX(updated,?) WHERE id=?', at, at, c.id);
@@ -166,6 +170,7 @@ export function createCentral(config = process.env, transport = fetch) {
         tick();
         webhook.acceptedRequests++;webhook.lastCompletedAt=now();
         webhook.lastResult=observed.recordedMessages?'recorded':observed.ignoredNumberEvents?'other_number':observed.duplicates?'duplicate':observed.invalidMessages?'invalid_message':'no_new_message';
+        setImmediate(()=>media.processPending().catch(()=>{}));
         return reply(200,{ok:true});
       }
       const publicFiles = {
@@ -191,7 +196,7 @@ export function createCentral(config = process.env, transport = fetch) {
       if (!url.pathname.startsWith('/api/') && !signupPage) fail(404,'Página não encontrada.');
       if (!['GET','HEAD'].includes(req.method) && req.headers.origin !== origin) fail(403,'Origem não autorizada.');
       let body = {};
-      if (['POST','PATCH'].includes(req.method)) {const raw=await readBody();try{body=JSON.parse(raw.toString() || '{}');}catch{fail(400,'Dados inválidos.');}if(!body||typeof body!=='object'||Array.isArray(body))fail(400,'Dados inválidos.');}
+      if (['POST','PATCH'].includes(req.method) && !(url.pathname==='/api/media'&&req.method==='POST')) {const raw=await readBody();try{body=JSON.parse(raw.toString() || '{}');}catch{fail(400,'Dados inválidos.');}if(!body||typeof body!=='object'||Array.isArray(body))fail(400,'Dados inválidos.');}
       const token = (req.headers.cookie || '').split(';').map(v=>v.trim()).find(v=>v.startsWith('central_session='))?.slice(16);
       const user = token ? get('SELECT a.id,a.name,a.email,a.role,COALESCE(s.signature_name,a.name) AS signatureName FROM sessions s JOIN agents a ON a.id=s.agent_id WHERE s.token=? AND s.expires>? AND a.active=1',hash(token),now()) : null;
       const setupRequired = !get('SELECT id FROM agents LIMIT 1');
@@ -224,6 +229,25 @@ export function createCentral(config = process.env, transport = fetch) {
         return reply(200,{ok:true});
       }
       if (!user) fail(401,'Entre com seu usuário para continuar.');
+      if(url.pathname==='/api/media'&&req.method==='POST')return reply(201,{attachment:await media.upload(req,url.searchParams)});
+      if(url.pathname==='/api/stickers'&&req.method==='GET')return reply(200,{stickers:media.favorites()});
+      const mediaMatch=url.pathname.match(/^\/api\/media\/([a-f\d-]{36})\/(content|retry|favorite)$/);
+      if(mediaMatch){
+        const [,id,action]=mediaMatch;
+        if(action==='retry'&&req.method==='POST')return reply(200,{attachment:await media.ensure(id,true)});
+        if(action==='favorite'&&req.method==='PATCH'){
+          if(typeof body.favorite!=='boolean')fail(400,'Informe se deseja salvar a figurinha.');
+          return reply(200,{attachment:media.favorite(id,body.favorite)});
+        }
+        if(action==='content'&&['GET','HEAD'].includes(req.method)){
+          const file=media.content(id),inline=!url.searchParams.has('download')&&['image','sticker'].includes(file.kind);
+          res.setHeader('content-security-policy',"default-src 'none'; sandbox; frame-ancestors 'none'");
+          const encodedName=encodeURIComponent(file.name).replace(/['()*]/g,char=>'%'+char.charCodeAt(0).toString(16).toUpperCase());
+          res.writeHead(200,{'content-type':file.mime,'content-length':file.byte_size,'cache-control':'private, no-store','content-disposition':(inline?'inline':'attachment')+`; filename="arquivo"; filename*=UTF-8''${encodedName}`});
+          return res.end(req.method==='HEAD'?undefined:Buffer.from(file.data));
+        }
+        fail(405,'Método não permitido.');
+      }
       if (url.pathname === '/api/session/signature' && req.method === 'PATCH') {
         if (typeof body.name !== 'string' || !body.name.trim() || body.name.trim().length > 80 || /[\r\n\x00-\x1f\x7f]/.test(body.name)) fail(400,'Informe o nome do atendente, com até 80 caracteres.');
         const name = body.name.trim();
@@ -254,7 +278,7 @@ export function createCentral(config = process.env, transport = fetch) {
         res.setHeader('set-cookie','central_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');return reply(200,{ok:true});
       }
       if (url.pathname==='/api/state' && req.method==='GET') {
-        tick();return reply(200,{user,mode:live?'live':'demo',connected:!!ready,externalAlerts:!!config.ALERT_WEBHOOK_URL,agents:all('SELECT id,name,email,role,active FROM agents'),contacts:all('SELECT * FROM contacts ORDER BY name COLLATE NOCASE'),conversations:all('SELECT * FROM conversations ORDER BY updated DESC'),messages:all('SELECT * FROM messages ORDER BY created'),settings:get('SELECT minutes FROM settings WHERE id=1')});
+        tick();return reply(200,{user,mode:live?'live':'demo',connected:!!ready,externalAlerts:!!config.ALERT_WEBHOOK_URL,agents:all('SELECT id,name,email,role,active FROM agents'),contacts:all('SELECT * FROM contacts ORDER BY name COLLATE NOCASE'),conversations:all('SELECT * FROM conversations ORDER BY updated DESC'),messages:media.messages(all('SELECT * FROM messages ORDER BY created')),mediaStorage:media.stats(),settings:get('SELECT minutes FROM settings WHERE id=1')});
       }
       if (url.pathname === '/api/contacts' && req.method === 'GET') return reply(200,{contacts:all('SELECT * FROM contacts ORDER BY name COLLATE NOCASE')});
       const contactMatch=url.pathname.match(/^\/api\/contacts\/([^/]+)$/);
@@ -322,19 +346,25 @@ export function createCentral(config = process.env, transport = fetch) {
           run('UPDATE conversations SET owner_id=?,status=?,followup_at=?,updated=? WHERE id=?',owner===undefined?c.owner_id:owner,status,follow,now(),c.id);return reply(200,{ok:true});
         }
         if(req.method==='POST'&&chatMatch[2]) {
-          const text=clean(body.text,3900),requestId=clean(body.requestId,80);
-          if(!text||!requestId)fail(400,'Escreva uma mensagem.');
+          const text=clean(body.text,3900),requestId=clean(body.requestId,80),attachmentId=clean(body.attachmentId,80);
+          if((!text&&!attachmentId)||!requestId)fail(400,'Escreva uma mensagem ou selecione um anexo.');
           const previous=get('SELECT * FROM messages WHERE request_id=?',requestId);
-          if(previous) {if(previous.conversation_id!==c.id||previous.agent_id!==user.id)fail(409,'Identificador de envio já utilizado.');return reply(200,{message:previous});}
+          if(previous) {if(previous.conversation_id!==c.id||previous.agent_id!==user.id)fail(409,'Identificador de envio já utilizado.');return reply(200,{message:media.messages([previous])[0]});}
+          const attachment=attachmentId?media.find(attachmentId):null;
+          if(attachmentId&&(!attachment||attachment.state!=='ready'))fail(409,'Selecione um anexo disponível.');
+          if(attachment&&text.length+user.signatureName.length+2>1024)fail(400,'A legenda do anexo deve ter até 1024 caracteres, incluindo a assinatura.');
+          if(attachment?.kind==='sticker'&&text)fail(400,'Envie a figurinha sem legenda. A mensagem de texto pode ser enviada separadamente.');
           if(c.status!=='open')fail(409,'Reabra a conversa antes de responder.');
           if(live&&!ready)fail(503,'A conexão com o WhatsApp ainda não foi configurada.');
           if(live&&(!c.last_inbound||now()-c.last_inbound>24*3600000))fail(409,'A janela de 24 horas terminou. O retorno pela API exige um modelo aprovado; use o aplicativo Business para este contato.');
-          const id=randomUUID(),at=now(),signed=`${user.signatureName}: ${text}`;
+          const id=randomUUID(),at=now(),signed=`${user.signatureName}: ${text||({image:'[Imagem]',document:'[Documento]',sticker:'[Figurinha]'})[attachment?.kind]}`;
           run('INSERT INTO messages(id,conversation_id,request_id,direction,body,agent_id,agent_name,status,created) VALUES(?,?,?,?,?,?,?,?,?)',id,c.id,requestId,'out',signed,user.id,user.signatureName,live?'sending':'simulated',at);
+          if(attachment)media.link(id,attachmentId);
           if(live) {
             let response;
             try {
-              response=await transport(`https://graph.facebook.com/${config.META_GRAPH_VERSION}/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,{method:'POST',headers:{authorization:`Bearer ${config.WHATSAPP_ACCESS_TOKEN}`,'content-type':'application/json'},body:JSON.stringify({messaging_product:'whatsapp',to:c.phone,type:'text',text:{body:signed}}),signal:AbortSignal.timeout(15000)});
+              const content=attachment?await media.payload(attachmentId,signed):{type:'text',text:{body:signed}};
+              response=await transport(`https://graph.facebook.com/${config.META_GRAPH_VERSION}/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,{method:'POST',headers:{authorization:`Bearer ${config.WHATSAPP_ACCESS_TOKEN}`,'content-type':'application/json'},body:JSON.stringify({messaging_product:'whatsapp',to:c.phone,...content}),signal:AbortSignal.timeout(15000)});
               const result=await response.json();
               if(!response.ok||!result.messages?.[0]?.id) {
                 lastSendFailure={at:now(),source:'api',code:metaCode(result.error?.code)};
@@ -346,7 +376,7 @@ export function createCentral(config = process.env, transport = fetch) {
               if(echoed&&echoed.id!==id)run('DELETE FROM messages WHERE id=?',echoed.id);
               run("UPDATE messages SET status='sent',provider_id=? WHERE id=?",pid,id);
             } catch(e) {
-              if(e.status)throw e;
+              if(e.status){run("UPDATE messages SET status='failed' WHERE id=?",id);throw e;}
               lastSendFailure={at:now(),source:'transport',code:null};
               run("UPDATE messages SET status='unknown' WHERE id=?",id);fail(502,'Não foi possível confirmar o envio. Confira no Business antes de tentar novamente; a pendência foi mantida.');
             }
@@ -354,7 +384,7 @@ export function createCentral(config = process.env, transport = fetch) {
           // Clear only the inbound message observed before this send started.
           // A new reply arriving while the provider request is in flight stays pending.
           run("UPDATE conversations SET pending_since=CASE WHEN last_received IS ? THEN NULL ELSE pending_since END,owner_id=COALESCE(owner_id,?),updated=MAX(updated,?) WHERE id=?",c.last_received,user.id,at,c.id);
-          return reply(201,{message:get('SELECT * FROM messages WHERE id=?',id)});
+          return reply(201,{message:media.messages([get('SELECT * FROM messages WHERE id=?',id)])[0]});
         }
       }
       if (url.pathname==='/api/demo/incoming' && req.method==='POST') {
@@ -383,12 +413,13 @@ export function createCentral(config = process.env, transport = fetch) {
   const timer=setInterval(async()=>{
     if(delivering)return;
     delivering=true;
-    try{await deliverAlerts();}catch{console.error('Falha ao verificar os lembretes.');}finally{delivering=false;}
+    try{await deliverAlerts();await media.processPending();}catch{console.error('Falha ao verificar os lembretes ou anexos.');}finally{delivering=false;}
   },60000);
   timer.unref();
-  return {server,db,intake,tick,deliverAlerts,close:()=>{
+  return {server,db,intake,tick,deliverAlerts,media,close:()=>{
     clearInterval(timer);
-    return new Promise((resolve,reject)=>server.close(error=>{
+    return new Promise((resolve,reject)=>server.close(async error=>{
+      await media.close();
       db.close();
       if(error&&error.code!=='ERR_SERVER_NOT_RUNNING')reject(error);else resolve();
     }));

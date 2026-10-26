@@ -37,12 +37,21 @@ Use `.env.example` como referência e crie `.env` somente quando precisar altera
 | `META_COEXISTENCE_PHONE_NUMBER` | Número do Business esperado, com país e DDD, somente dígitos conforme a Meta; não altera `WHATSAPP_PHONE_NUMBER_ID`. |
 | `PUBLIC_ORIGIN` | Origem HTTPS pública da central, sem caminho nem barra final. |
 | `SETUP_TOKEN` | Código privado para cadastrar o administrador em uma instalação remota. |
+| `MEDIA_STORAGE_MAX_MB` | Limite lógico de anexos no SQLite, de 1 a 500 MB; padrão 500. Não apaga arquivos automaticamente. |
 | `ALERT_WEBHOOK_URL` | Destino opcional, sob seu controle, para entregar lembretes fora do navegador. |
 | `ALERT_WEBHOOK_TOKEN` | Credencial opcional do destino de alertas. |
 
 Em **Conexão → Verificar configuração**, o administrador vê os nomes das configurações pendentes, sem seus valores. O diagnóstico não faz requisições à Meta. Credenciais preenchidas não comprovam conexão real.
 
 `META_APP_SECRET` e `WEBHOOK_VERIFY_TOKEN` precisam estar disponíveis como valores originais no processo do servidor, pois são comparados localmente. Marcadores de credenciais substituídos somente por um proxy de rede não servem para essa validação. Configure-os pelo gerenciador de segredos da hospedagem ou por arquivo privado, com acesso restrito.
+
+## Imagens, documentos e figurinhas
+
+Em uma conversa, use **Anexar arquivo**, escolha o tipo e prepare o arquivo. A prévia permite revisar antes de clicar em **Enviar**. Imagens JPEG/PNG aceitam até 5 MB; documentos PDF, Office e TXT, até 20 MB. Figurinhas devem ser WebP 512 × 512, com até 100 KB estáticas ou 500 KB animadas, e são enviadas sem legenda. Use **Salvar figurinha** em uma mensagem para adicioná-la à biblioteca compartilhada da equipe e **Figurinhas salvas** para preparar seu reenvio. O botão **Baixar arquivo** salva o original no computador; documentos são servidos como download.
+
+Anexos ficam em tabelas adicionais no mesmo banco `DATABASE_PATH`, sem recriar contas ou conversas. Em produção, esse banco precisa estar no disco persistente, por exemplo `/var/data/central.sqlite`. O limite inicial de 500 MB deixa espaço para outros dados no disco de 1 GB, mas acompanhe também o uso físico do disco no Render. Em **Conexão**, a central mostra o uso lógico de anexos. Ao atingir o limite, mantém os arquivos e registra a falha; não há exclusão automática. Arquivos preparados sem envio também consomem espaço.
+
+O recebimento primeiro registra a mensagem e depois baixa o arquivo pela API oficial, com tentativas limitadas e opção manual de tentar novamente. A central não recupera anexos de mensagens antigas que não tenham sido registrados pela integração. Não há suporte a áudio/vídeo nesta entrega. Testes usam arquivos fictícios e transporte simulado; a publicação e a entrega real ao WhatsApp devem ser verificadas separadamente.
 
 ## Retomar a conexão à Meta
 
