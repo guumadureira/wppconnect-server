@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 const fail=(status,message,extra={})=>{throw Object.assign(new Error(message),{status,...extra});};
 const norm=value=>String(value||'').replace(/\D/g,'');
-const uuid=value=>{const raw=String(value||'').replace(/-/g,'');if(!/^[a-f\d]{32}$/i.test(raw))fail(400,'Identificador de registro inválido.');return raw.toLowerCase().replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/,'$1-$2-$3-$4-$5');};
+const uuid=value=>{const raw=String(value||'').trim().replace(/-/g,'');if(!/^[a-f\d]{32}$/i.test(raw))fail(400,'Identificador de registro inválido.');return raw.toLowerCase().replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/,'$1-$2-$3-$4-$5');};
 const url=id=>'https://app.notion.com/p/'+uuid(id).replace(/-/g,'');
 const text=(value,max=2000)=>{if(typeof value!=='string'||value.length>max||/\x00/.test(value))fail(400,'Texto inválido ou acima do limite permitido.');return value.trim();};
 const plain=property=>(property?.title||property?.rich_text||[]).map(part=>part.plain_text??part.text?.content??'').join('').slice(0,2000);
@@ -23,11 +23,16 @@ export function createNotionContext(db,config,transport,options={}){
   // A process restart during creation leaves an uncertain outcome. Reconcile before another write.
   run("UPDATE service_events SET sync_state='uncertain',sync_error='Resultado anterior não confirmado; aguardando conferência no Notion.' WHERE sync_state='sending'");
   run("UPDATE notion_client_operations SET state='uncertain' WHERE state='creating'");
-  const sources={clients:config.NOTION_CLIENTS_DATA_SOURCE_ID,history:config.NOTION_HISTORY_DATA_SOURCE_ID,works:config.NOTION_WORKS_DATA_SOURCE_ID,proposals:config.NOTION_PROPOSALS_DATA_SOURCE_ID,projects:config.NOTION_PROJECTS_DATA_SOURCE_ID,tasks:config.NOTION_TASKS_DATA_SOURCE_ID};
+  const sourceFields={clients:'NOTION_CLIENTS_DATA_SOURCE_ID',history:'NOTION_HISTORY_DATA_SOURCE_ID',works:'NOTION_WORKS_DATA_SOURCE_ID',proposals:'NOTION_PROPOSALS_DATA_SOURCE_ID',projects:'NOTION_PROJECTS_DATA_SOURCE_ID',tasks:'NOTION_TASKS_DATA_SOURCE_ID'};
+  // Configuration errors are reported by the diagnostic, never thrown during startup.
+  const present=name=>!!String(config[name]||'').trim();
+  const sources=Object.fromEntries(Object.entries(sourceFields).map(([key,name])=>{try{return[key,present(name)?uuid(String(config[name]).trim().replace(/^collection:\/\//i,'')):null];}catch{return[key,null];}}));
+  const invalidSources=()=>Object.entries(sourceFields).filter(([key,name])=>present(name)&&!sources[key]).map(([,name])=>name);
+  const activated=()=>String(config.NOTION_ENABLED||'').trim().toLowerCase()==='true';
   const required=['NOTION_TOKEN','NOTION_CLIENTS_DATA_SOURCE_ID','NOTION_HISTORY_DATA_SOURCE_ID'];
-  const configured=()=>required.every(name=>!!config[name]);
-  const enabled=()=>config.NOTION_ENABLED==='true'&&configured();
-  const ensureEnabled=()=>{if(!enabled())fail(503,'A integração própria da central com o Notion ainda precisa ser configurada. O histórico continua salvo na central.');};
+  const configured=()=>required.every(present);
+  const enabled=()=>activated()&&configured()&&!!sources.clients&&!!sources.history;
+  const ensureEnabled=()=>{const invalid=invalidSources().filter(name=>required.includes(name));if(invalid.length)fail(400,'Identificador de fonte inválido em '+invalid.join(', ')+'. Use somente o ID da fonte, sem nome da variável, sinal de igual ou URL da página.');if(!enabled())fail(503,'A integração própria da central com o Notion ainda precisa ser configurada. O histórico continua salvo na central.');};
   const context=id=>{run('INSERT OR IGNORE INTO conversation_context(conversation_id,updated) VALUES(?,?)',id,Date.now());return get('SELECT * FROM conversation_context WHERE conversation_id=?',id);};
   const transaction=fn=>{db.exec('BEGIN');try{const result=fn();db.exec('COMMIT');return result;}catch(error){db.exec('ROLLBACK');throw error;}};
   const checkVersion=(id,version)=>{const row=context(id);if(!Number.isInteger(version)||row.version!==version)fail(409,'O contexto mudou em outra sessão. Atualize antes de salvar.');return row;};
@@ -43,16 +48,20 @@ export function createNotionContext(db,config,transport,options={}){
     const c=context(id),snapshot=c.snapshot?JSON.parse(c.snapshot):null;
     return {...c,snapshot,clientUrl:c.client_id?url(c.client_id):null,history:all('SELECT id,request_id,kind,summary,missing,next_step,status,qualification,actor,source,message_id,created,sync_state,sync_error,notion_page_id FROM service_events WHERE conversation_id=? ORDER BY created DESC,rowid DESC LIMIT 40',id).map(e=>({...e,notionUrl:e.notion_page_id?url(e.notion_page_id):null})),requests:all('SELECT * FROM service_requests WHERE conversation_id=? ORDER BY updated DESC LIMIT 100',id),integration:status()};
   }
-  function status(){return {enabled:enabled(),configured:configured(),missing:required.filter(name=>!config[name]),activationPending:config.NOTION_ENABLED!=='true',aiEnabled:false,optionalSources:Object.fromEntries(Object.entries(sources).filter(([k])=>!['clients','history'].includes(k)).map(([k,v])=>[k,!!v])),pendingEvents:get("SELECT COUNT(*) AS n FROM service_events WHERE sync_state IN ('pending','error')").n,uncertainEvents:get("SELECT COUNT(*) AS n FROM service_events WHERE sync_state='uncertain'").n};}
+  function status(){return {enabled:enabled(),configured:configured(),missing:required.filter(name=>!present(name)),invalid:invalidSources(),activationPending:!activated(),aiEnabled:false,optionalSources:Object.fromEntries(Object.entries(sources).filter(([k])=>!['clients','history'].includes(k)).map(([k,v])=>[k,!!v])),pendingEvents:get("SELECT COUNT(*) AS n FROM service_events WHERE sync_state IN ('pending','error')").n,uncertainEvents:get("SELECT COUNT(*) AS n FROM service_events WHERE sync_state='uncertain'").n};}
   let stopped=false,serial=Promise.resolve(),nextAt=0;const interval=options.requestIntervalMs??350;
   async function api(path,method='GET',body){
     ensureEnabled();
     const slot=serial.then(async()=>{if(stopped)fail(503,'A central está reiniciando.');const delay=nextAt-Date.now();if(delay>0)await new Promise(resolve=>setTimeout(resolve,delay));nextAt=Date.now()+interval;});
     serial=slot.catch(()=>{});await slot;
     let response;
-    try{response=await transport('https://api.notion.com/v1/'+path,{method,headers:{authorization:'Bearer '+config.NOTION_TOKEN,'Notion-Version':'2026-03-11','content-type':'application/json'},body:body?JSON.stringify(body):undefined,redirect:'error',signal:AbortSignal.timeout(20000)});}
+    try{response=await transport('https://api.notion.com/v1/'+path,{method,headers:{authorization:'Bearer '+String(config.NOTION_TOKEN).trim(),'Notion-Version':'2026-03-11','content-type':'application/json'},body:body?JSON.stringify(body):undefined,redirect:'error',signal:AbortSignal.timeout(20000)});}
     catch{fail(502,'Não foi possível confirmar a resposta do Notion.',{uncertain:method==='POST'&&path==='pages'});}
-    if(!response.ok){const retry=Number(response.headers?.get('retry-after'));fail(502,response.status===429?'O Notion pediu uma pausa. A sincronização será retomada.':'O Notion não concluiu a operação. Confira o acesso da integração e a estrutura das bases.',{uncertain:method==='POST'&&path==='pages'&&response.status>=500,retryAfter:Number.isFinite(retry)?Math.max(1,retry)*1000:60000});}
+    if(!response.ok){
+      const retry=Number(response.headers?.get('retry-after')),source=path.match(/^data_sources\/([a-f\d-]+)/i)?.[1],field=Object.entries(sources).find(([,id])=>id===source)?.[0];
+      const message=response.status===429?'O Notion pediu uma pausa. A sincronização será retomada.':response.status===404&&field?'O Notion não encontrou a fonte definida em '+sourceFields[field]+'. Confira o ID de fonte e o acesso da conexão a essa base.':[401,403].includes(response.status)?'O Notion recusou o acesso ('+response.status+'). Confira a credencial e as permissões da conexão.':'O Notion não concluiu a operação. Confira o acesso da integração e a estrutura das bases.';
+      fail(502,message,{uncertain:method==='POST'&&path==='pages'&&response.status>=500,retryAfter:Number.isFinite(retry)?Math.max(1,retry)*1000:60000});
+    }
     try{const result=await response.json();if(method==='POST'&&path==='pages'&&!/^[a-f\d-]{32,36}$/i.test(result.id||''))throw new Error('Missing page ID');return result;}catch{fail(502,'Resposta inválida do Notion.',{uncertain:method==='POST'&&path==='pages'});}
   }
   async function query(source,filter,{maxPages=10,pageSize=100,sorts}={}){
@@ -197,7 +206,7 @@ export function createNotionContext(db,config,transport,options={}){
     })().finally(()=>{worker=null;});return worker;
   }
   async function verify(){
-    ensureEnabled();const clients=await api('data_sources/'+uuid(sources.clients)),history=await api('data_sources/'+uuid(sources.history));
+    ensureEnabled();const invalid=invalidSources();if(invalid.length)fail(400,'Confira os identificadores de fonte em '+invalid.join(', ')+'.');const clients=await api('data_sources/'+uuid(sources.clients)),history=await api('data_sources/'+uuid(sources.history));
     const expected={clients:{'Nome do Cliente':'title',Telefone:'phone_number','ID de criação na central':'rich_text'},history:{Registro:'title','ID do evento':'rich_text','Cliente cadastrado':'relation','Data do acontecimento':'date',Resumo:'rich_text',Qualificação:'select'}};
     const missing=[];for(const [name,schema]of Object.entries(expected))for(const [property,type]of Object.entries(schema))if(({clients,history})[name].properties?.[property]?.type!==type)missing.push(name+': '+property);
     if(missing.length)fail(409,'Confira as propriedades das bases: '+missing.join(', '));

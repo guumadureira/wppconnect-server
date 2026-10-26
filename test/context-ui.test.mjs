@@ -42,6 +42,7 @@ test('diagnóstico fica disponível sem configuração e explica pendências sem
   let card=vm.runInContext('notionConnectionCard()',c);
   assert.match(card,/id="verify-notion">Verificar configuração/);assert.match(card,/id="sync-notion" disabled/);assert.match(card,/NOTION_ENABLED=true/);assert.match(card,/NOTION_CLIENTS_DATA_SOURCE_ID/);assert.match(card,/NOTION_HISTORY_DATA_SOURCE_ID/);
   assert.doesNotMatch(card,/Credencial de acesso ausente/);
+  vm.runInContext("state.notion.invalid=['NOTION_HISTORY_DATA_SOURCE_ID'];",c);card=vm.runInContext('notionConnectionCard()',c);assert.match(card,/Identificador de fonte inválido em NOTION_HISTORY_DATA_SOURCE_ID/);
   vm.runInContext("state.notion={enabled:true,activationPending:false,missing:[],pendingEvents:0,uncertainEvents:0};notionDiagnostic={accessVerified:true};",c);card=vm.runInContext('notionConnectionCard()',c);
   assert.match(card,/id="verify-notion">Verificar acesso ao Notion/);assert.match(card,/Acesso às bases principais do Notion conferido/);assert.doesNotMatch(card,/id="sync-notion" disabled/);
 });
