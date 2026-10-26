@@ -98,11 +98,142 @@ Quando essa etapa for retomada, avaliar a utilidade e o acesso da conta antes de
 5. Automação dos marcos escolhidos e acompanhamento das falhas, após validar o piloto.
 6. Avaliação posterior da integração opcional com o Autentique.
 
-Essa integração ainda não contém cliente Notion no servidor, token no Render, webhook Notion nem envios de avisos. A conexão usada neste chat não é automaticamente disponibilizada ao aplicativo. Não foram alterados registros, páginas, permissões ou automações do Notion.
+### Primeira entrega implementada — contexto e histórico
 
-## Entrega 5 — pré-atendimento com IA
+Implementados no código: adaptador próprio para a API do Notion, vínculo conferido entre conversa e cliente, cadastro inicial por administrador com reconciliação de tentativas, consulta operacional de trabalhos/propostas/projetos/atividades, resumo interno com pendências e próximo passo, solicitações por assunto e histórico persistente com fila de sincronização. O painel **Cliente e histórico** permite usar esses registros localmente antes de configurar o Notion. As referências de conversa abrem o atendimento correto, inclusive fora do período inicial de 15 dias; um ID ausente não seleciona outro cliente.
 
-Pendente: integração de IA no servidor para saudação, coleta inicial da necessidade, cidade e tipo de serviço, perguntas de triagem e resumo para a equipe. A IA deve ter acesso apenas ao contexto e aos documentos autorizados e pausar quando um atendente assumir a conversa. Questões que dependem de avaliação técnica, proposta ou compromisso comercial seguem para a equipe.
+O botão **Assumir atendimento** registra controle humano e responsável; **Permitir assistência** prepara o estado para a fase seguinte, sem ativar IA ou respostas. Novas mensagens não desfazem o controle humano. Eventos de recebimento de imagem/documento são registrados como recebidos, não como documentos validados. A autoria dos lançamentos manuais vem da sessão, não do conteúdo enviado pelo navegador.
+
+Criada no Notion a base privada **Histórico de atendimentos — Central Domum**, com relação de retorno **Histórico de atendimentos** no cadastro de Clientes e uma visão por cliente. Acrescentada também a chave **ID de criação na central** para reconciliar a criação de cadastros após resultados incertos. Nenhum cliente foi criado, nenhum atendimento fictício foi lançado, nenhum conteúdo existente foi substituído e nenhum compartilhamento foi ampliado nesta implantação.
+
+A ativação do servidor depende de credencial própria e IDs das fontes no ambiente privado, com `NOTION_ENABLED=true`. A conexão usada neste chat não é automaticamente disponibilizada ao aplicativo. Os testes usam transporte falso; publicação e acesso real pelo servidor ainda exigem verificação. Esta entrega não envia avisos ao cliente, não altera status técnicos/comerciais no Notion, não interpreta documentos por IA e não tem webhook de atualização do Notion. Alterações feitas no Notion aparecem na próxima consulta explícita, com data de referência.
+
+O histórico é acrescentado por ID de evento, sem reescrever confirmações humanas anteriores. Uma criação incerta é pesquisada antes de outra tentativa; se não for possível determinar o resultado, fica para conferência, sem repetição automática. Cadastros ambíguos, nomes já existentes sem telefone correspondente e associação por telefone diferente exigem revisão. Orientações de ativação estão em `docs/notion-integracao.md`; os IDs reais das fontes são mantidos fora do Git.
+
+## Entrega 5 — assistente geral de atendimento do WhatsApp
+
+Pendente: integração de IA no servidor para **assistência geral às demandas recebidas pelo WhatsApp da Domum**, incluindo clientes existentes, novos contatos, pedidos de orçamento, acompanhamento de trabalhos e contatos comerciais. Orçamento é um dos caminhos, não o objetivo obrigatório de todo atendimento. A preferência do usuário é uma conversa natural, sem apresentação inicial padronizada como “assistente virtual” e sem formulário de triagem. A IA não deve se passar por Gustavo ou por outro atendente específico; se perguntarem sobre a automação, deve responder com clareza. A autoria automática deve continuar identificada no registro interno, separada das assinaturas de pessoas por sessão.
+
+### Ciclo de entendimento, contexto, ação e retorno
+
+Para cada demanda, seguir **entender o pedido → identificar o contexto → consultar a situação pertinente → decidir a próxima ação permitida → executar/registrar → dar um retorno adequado → acompanhar ou encaminhar**. Não conduzir todo contato ao cadastro de cliente, à coleta de documentos de imóvel ou a um orçamento. A classificação é da demanda atual: uma mesma pessoa pode ser cliente em um assunto e fornecedor em outro, e um cliente existente pode abrir uma demanda nova.
+
+Cada decisão relevante deve ter uma consequência útil: responder, esclarecer, solicitar uma informação/arquivo pertinente, consultar um andamento liberado, registrar uma solicitação, executar uma ação já autorizada, encerrar o assunto resolvido ou avisar o atendente. Registrar internamente o contexto usado, a ação e seu resultado. A mensagem ao contato deve ser natural e orientada ao próximo passo, sem expor classificações internas ou produzir uma nova mensagem para cada classificação feita em segundo plano.
+
+Consultar o contexto atual da central e do Notion, quando houver vínculo confirmado. Para um cliente existente, verificar se o assunto diz respeito a proposta em análise, documentação pendente, contratação com ou sem contrato, projeto/obra em andamento, trabalho suspenso ou concluído, entre outras situações realmente registradas. A resposta e a ação dependem dessa situação e da pergunta atual; não presumir que todo cliente está pedindo orçamento ou repetir o cadastro inicial.
+
+Confirmar a conclusão de uma ação somente após o sistema de destino confirmar. Se a consulta estiver indisponível ou não houver informação atual, reconhecer a solicitação, registrar a pendência e encaminhar quando necessário, sem inventar andamento. Recebimento de arquivo, aceite comercial, assinatura, conclusão técnica e entrega são fatos distintos. Um documento recebido não altera automaticamente a situação de um trabalho.
+
+### Conversa e identificação progressiva
+
+1. Começar pelo que a pessoa disse, reconhecer sua necessidade e fazer uma pergunta pertinente por vez. Evitar pedir nome, telefone e endereço em sequência ou repetir dados já fornecidos. Usar mensagens curtas e permitir que o cliente explique o caso livremente.
+2. Aproveitar o telefone recebido pela integração, normalizado com país e DDD, sem pedir que o contato o digite novamente. Em clientes existentes, usar o vínculo confirmado para consultar a situação antes de avançar. Para uma nova demanda de imóvel, a associação ao cadastro também pode acontecer depois da conversa inicial e do recebimento dos documentos-chave. Telefone, nome de perfil ou endereço isolados não são comprovação absoluta de identidade nem autorização para revelar todos os dados vinculados.
+3. Fazer perguntas conforme a intenção. Para um novo interessado em serviço ligado a imóvel, entender o serviço e o município, pedir endereço quando ajudar e solicitar um documento-chave conforme a seção abaixo. Para um cliente existente, retomar o assunto e a situação registrada; para uma oferta comercial, entender a oferta e a empresa. Perguntar como prefere ser chamado quando isso faltar e for útil. Cadastro incompleto ou ausência de documentos não devem bloquear o atendimento geral.
+4. Cruzar os dados pertinentes com os registros existentes para associar o atendimento ou criar o cadastro progressivo adequado ao tipo de contato quando não houver correspondência. Não criar um cliente de engenharia para todo vendedor que entrar em contato. Telefone novo, cadastro compartilhado, vários trabalhos possíveis ou divergência de nome/endereço ficam para conferência da equipe; não fundir cadastros, trocar telefones ou escolher o projeto por aproximação automaticamente. Não revelar dados de um cadastro candidato para tentar confirmar quem está falando.
+5. A consulta ao Notion deve ser limitada no servidor ao cliente/trabalho já vinculado e aos campos liberados para comunicação. Endereço ajuda a distinguir a demanda, mas não funciona como senha para acessar documentos ou informações restritas. Antes de uma confirmação adequada, a IA pode continuar com orientações gerais e coleta do pedido.
+
+### Caminho específico: nova demanda de imóvel ou pedido de orçamento
+
+Aplicar esta coleta quando o pedido realmente envolver uma nova demanda de imóvel/projeto ou orçamento. O assistente deve avançar automaticamente até entender a demanda real e organizar os dados mínimos para avaliação comercial. Não encerrar a conversa ao primeiro pedido de orçamento; fazer a coleta breve que ajude a equipe a orçar, sem transformar o atendimento em uma entrevista documental detalhada. Este caminho não deve ser aplicado indiscriminadamente a clientes com outros assuntos ou a contatos comerciais recebidos.
+
+- Confirmar o serviço pretendido e o **município do imóvel/projeto**. Não confundir a cidade onde o cliente mora com a cidade do serviço. Se o dado já estiver na conversa ou legível no documento, aproveitar essa informação e esclarecer apenas inconsistências.
+- Para uma demanda de imóvel em que isso ajude, fazer uma solicitação curta de **matrícula do imóvel ou cadastro imobiliário do lote**. Começar por um documento-chave disponível; não exigir ambos por padrão, uma lista extensa de arquivos, documentos pessoais ou uma documentação completa para preparar o pedido de orçamento. Outras demandas e ofertas de fornecedores seguem sua própria condução.
+- Se o cliente não tiver o arquivo, não souber encontrá-lo ou quiser avançar diretamente ao orçamento, continuar com município, descrição do serviço e informações básicas do imóvel que ele conseguir fornecer. Registrar a pendência e encaminhar uma solicitação preliminar, sem insistência repetida nem promessa de que já existe informação suficiente para um preço definitivo.
+- Receber o PDF ou imagem pela central, guardar a referência ao arquivo original e extrair os dados úteis para a demanda, como município, endereço, identificação do lote/quadra, matrícula ou inscrição imobiliária quando presentes e legíveis. Não inventar campos ausentes ou tratar extração incerta como informação conferida. Dúvidas devem aparecer no resumo da equipe.
+- Separar **quem está pedindo o serviço**, **qual é o imóvel** e **quem aparece como proprietário no documento**. O nome de proprietário extraído não deve substituir automaticamente o nome do contato nem criar outra pessoa como cliente do atendimento. Um cliente pode ter vários imóveis e trabalhos.
+- Assim que houver contexto útil para a equipe preparar o orçamento, avisar o responsável e entregar o resumo. A coleta de documentos pode ser concluída pela IA antes da passagem, mas não pode prolongar a triagem sem necessidade. Definição de preço, escopo técnico e prazo continua com a equipe.
+
+### Associação e cadastro automático no Notion
+
+Associar a demanda conforme seu contexto. Para cliente existente, aproveitar o vínculo e a situação já registrados; para uma nova demanda, usar os dados mínimos disponíveis, incluindo documentos-chave quando pertinentes e recebidos. O sistema deverá:
+
+1. Pesquisar o cadastro existente usando telefone normalizado e os demais dados realmente fornecidos. Relacionar os dados do imóvel à solicitação correspondente; endereço ou matrícula identificam um imóvel, não necessariamente o solicitante.
+2. Quando houver vínculo seguro e único, associar conversa e solicitação ao cliente/contato existente. Reutilizar a solicitação em andamento quando se tratar da mesma demanda. Um cliente existente pode ter um assunto de acompanhamento e outro de novo orçamento simultaneamente; separar as solicitações sem duplicar o cliente.
+3. Quando não houver correspondência e o contexto for de cliente/novo interessado, criar automaticamente um **cadastro progressivo** em Clientes e registrar a demanda relacionada, seguindo a estrutura existente. Criar solicitação de orçamento apenas quando esse for o assunto. Levar nome informado, telefone do atendimento, município/endereço do serviço quando pertinentes, descrição da demanda, origem da conversa e referências privadas aos documentos recebidos. Não exigir dados de contrato para cadastrar um interessado; não preencher nome civil, CPF ou outras informações com suposições. Para fornecedores e outros contatos, manter o registro da central e usar o destino correspondente no Notion quando esse mapeamento for definido, sem inseri-los automaticamente em Clientes.
+4. Se a correspondência for ambígua ou o nome do solicitante não estiver definido, manter a solicitação vinculada à conversa e sinalizar conferência, sem criar clientes duplicados ou sobrescrever um cadastro. Essa pendência de associação não impede o encaminhamento comercial.
+5. Guardar IDs estáveis da conversa, cliente e solicitação no banco da central. Repetições de mensagens, reenvio do mesmo arquivo, retomada de conversa ou nova tentativa da integração não devem criar outra pessoa ou repetir a mesma solicitação. Um pedido diferente do mesmo cliente pode gerar outra solicitação, preservando a anterior.
+6. Registrar o que veio da conversa, o que foi extraído do arquivo e o que foi confirmado pela equipe. Manter o documento original em armazenamento restrito e disponibilizar ao Notion uma referência autenticada ou permitida para a equipe, sem criar links públicos automaticamente. Uma URL privada da central não deve ser tratada como arquivo já copiado ao Notion.
+7. Usar fila persistente para falhas de integração. Se o Notion estiver indisponível, preservar documentos e solicitação na central, informar a pendência internamente e sincronizar depois sem duplicação.
+
+Esse cadastro inicial não equivale a proposta aprovada, contrato assinado ou autorização para iniciar o serviço. Páginas formais de projeto/obra e comunicações de avanço continuam seguindo os marcos da Entrega 4. Este fluxo é requisito da integração; as consultas, criações e a extração por IA ainda não estão implementadas nem ativadas no servidor.
+
+### Tratamento conforme a intenção
+
+| Demanda e contexto | Ação e retorno adequados |
+| --- | --- |
+| Cliente existente pedindo andamento | Identificar o trabalho e consultar a situação atual liberada. Responder sobre o ponto solicitado e indicar o próximo passo conhecido. Sem informação suficiente/atual, registrar a pergunta para o responsável. |
+| Cliente existente com documentação pendente | Conferir a pendência real, pedir ou receber o arquivo correspondente e registrar o recebimento. Distinguir arquivo recebido de documentação validada pela equipe. |
+| Cliente existente com nova solicitação, alteração ou problema | Entender o pedido no contexto do trabalho, registrar uma solicitação relacionada e responder sobre o encaminhamento. Alterações técnicas, comerciais ou compromissos dependem da equipe. |
+| Cliente com proposta em análise | Entender se deseja esclarecimento, revisão, aceite ou outro assunto; consultar a proposta correta e encaminhar a decisão que exigir a equipe. Não reiniciar toda a triagem de novo cliente. |
+| Cliente com trabalho concluído | Identificar se é dúvida sobre entrega, pedido de documento, problema ou nova contratação, e seguir o caminho correspondente. Trabalho concluído não significa que toda mensagem seja nova venda. |
+| Novo contato com dúvida geral | Responder com informação aprovada e entender o próximo passo desejado. Criar solicitação/cadastro apenas quando necessário ao atendimento, sem obrigar pedido de orçamento. |
+| Novo interessado pedindo serviço/orçamento | Entender o serviço, realizar a coleta breve pertinente e registrar o cadastro progressivo/solicitação. Avisar a equipe quando houver contexto para avaliação comercial. |
+| Fornecedor, vendedor, parceiro ou oferta comercial recebida | Entender empresa, assunto e material ofertado, registrar a demanda no contexto comercial adequado, responder sobre seu recebimento e encaminhar ao responsável quando necessário. Não assumir compromisso de compra ou criar uma oportunidade de cliente automaticamente. |
+| Assunto administrativo ou financeiro | Entender a solicitação e encaminhar ao responsável; consultar ou enviar apenas dados/documentos autorizados para aquele contato. Não confirmar pagamento ou quitação apenas por imagem de comprovante. |
+| Intenção ainda incerta ou várias demandas na mesma mensagem | Fazer uma pergunta breve de esclarecimento ou separar os assuntos em solicitações vinculadas. Permitir correção da classificação pela pessoa ou pelo atendente. |
+
+### Regras de decisão para implementação
+
+Configurar por tipo de demanda quais fontes podem ser consultadas, quais campos/documentos podem ser devolvidos, quais registros a IA pode criar ou atualizar, qual retorno corresponde ao resultado e quando avisar a equipe. Usar ferramentas limitadas a essas operações; o entendimento do modelo não deve dar permissão genérica para alterar o Notion ou enviar documentos. Reutilizar os controles de liberação da Entrega 4 para comunicações e arquivos que exigem aprovação.
+
+O registro interno da demanda deve conter contexto do contato, assunto atual, vínculo com cliente/trabalho quando confirmado, situação consultada e fonte/data, dados pendentes, próximo passo, resultado da ação e responsável quando encaminhada. Esse registro é um resumo operacional verificável, sem expor raciocínio interno do modelo. A IA deve reconhecer correções, mudança de assunto e pedidos já resolvidos, evitando perguntas ou cadastros repetidos.
+
+### Histórico integrado por cliente e continuidade do atendimento
+
+Requisito do usuário: a central e o Notion devem se retroalimentar para que uma retomada, mesmo depois de algum tempo, aproveite o que já foi informado, recebido, feito e confirmado. A finalidade inclui **entender e preparar o atendimento humano**, mesmo quando não houver resposta automática ao contato.
+
+Conferência inicial: Clientes — Cadastro restrito já continha `Telefone`, `Etapa do Atendimento`, `Etapa do cadastro`, `Atividades do cliente` e `Projetos e serviços`. Na fonte consultada e na amostra de página de cliente, não foi identificado um registro estruturado próprio de atendimentos/ações da IA. A busca foi limitada à estrutura integrada, aos termos de atendimento e a uma página de cliente; não comprova ausência de estruturas equivalentes em todo o workspace. Na implantação autorizada, foi criada a base privada de histórico e acrescentadas a relação de retorno e a chave de criação, preservando as propriedades e os registros anteriores.
+
+#### Organização proposta na página privada do cliente
+
+- **Resumo atual do atendimento:** assuntos em aberto, situação confirmada dos trabalhos pertinentes, documentos recebidos/pendentes, responsável e próximo passo, com fonte e data da atualização.
+- **Histórico de atendimentos e ações:** linha do tempo relacionada ao cliente e, quando couber, à proposta, trabalho e demanda específicos. Reutilizar uma fonte equivalente se descoberta na implantação; caso contrário, criar uma fonte privada de registros de atendimento e mostrar seus registros relacionados na página de cada cliente. Não criar uma base independente para cada pessoa nem copiar o cadastro completo a cada atendimento.
+- **Pendências e solicitações:** acesso às solicitações em aberto e às atividades já existentes. Uma entrada de histórico registra um fato/ação; uma atividade representa o trabalho a fazer. Relacioná-las quando necessário, sem duplicar tarefas na Gestão de Atividades.
+
+Essa seção deve ser incluída no modelo utilizado pela integração para novos clientes e acrescentada aos existentes sem substituir seu conteúdo. Páginas com vários trabalhos devem permitir distinguir os assuntos por frente. Fornecedores e outros contatos que ainda não pertencem a Clientes mantêm a continuidade na central e recebem o vínculo adequado quando o destino comercial for definido; não criar clientes fictícios para registrar ofertas.
+
+#### Unidade de registro e informações úteis
+
+Uma entrada de histórico corresponde a um acontecimento relevante: solicitação identificada, documento solicitado/recebido, dado confirmado/corrigido, ação efetivamente executada, retorno enviado, encaminhamento humano, pendência resolvida ou mudança de situação confirmada na fonte. Não gerar uma entrada para cada classificação intermediária do modelo nem replicar toda mensagem do WhatsApp no corpo da página.
+
+| Informação do registro | Uso |
+| --- | --- |
+| ID estável do evento, conversa e demanda | Vincular as fontes e impedir repetição por reenvio ou nova tentativa. |
+| Data do acontecimento e data de sincronização | Distinguir quando algo ocorreu de quando chegou ao Notion. |
+| Cliente/contato e trabalho/proposta relacionados | Recuperar o contexto correto sem misturar frentes. |
+| Tipo e resumo objetivo do acontecimento | Mostrar o que aconteceu e o que o contato pediu. |
+| Autor/origem: IA, atendente, cliente ou sistema | Distinguir quem informou ou realizou cada ação. |
+| Qualificação: informado, extraído, interpretado, confirmado ou corrigido | Evitar tratar uma interpretação da IA como fato verificado. |
+| Fonte/evidência e resultado da ação | Referenciar mensagem, arquivo ou registro atual, distinguindo intenção, tentativa, sucesso, falha e entrega confirmada. |
+| O que falta, próximo passo e responsável | Preparar continuidade e encaminhamento humano. |
+
+Manter as referências aos originais em local privado e acessível à equipe autorizada. O histórico deve conter apenas o necessário ao atendimento; não replicar CPF, dados financeiros completos ou outros dados restritos em resumos operacionais. Uma visualização filtrada por cliente não é controle de acesso: o histórico interno fica separado do portal do cliente e do material liberado para envio.
+
+#### Consulta na retomada e retorno para o atendente
+
+1. Identificar o contato e recuperar os vínculos confirmados. Usar o assunto atual para selecionar o trabalho/demanda pertinente, sem carregar indiscriminadamente todos os documentos do cliente.
+2. Ler o resumo atual, as solicitações abertas, os registros relevantes do histórico e os estados atuais das fontes do Notion. A informação atual confirmada pode substituir um resumo antigo; manter a origem e a data de cada informação.
+3. Comparar a nova solicitação ao que já existe: o que foi pedido, o que chegou, o que foi resolvido, o que falta e qual é a próxima ação permitida. Pedir esclarecimento apenas para o que estiver ausente, ambíguo ou desatualizado.
+4. Produzir um resumo interno para o atendente com **situação atual, nova solicitação, itens já disponíveis, pendências, próximo passo e referências**. A preparação desse contexto não obriga o envio de uma mensagem ao cliente. Respostas externas continuam dependentes do modo IA/humano e das regras de ação/liberação.
+5. Registrar a ação ou encaminhamento ocorrido. A confirmação/correção humana deve alimentar o mesmo contexto para o próximo atendimento; manter o registro anterior e a correção, em vez de apagar ou perpetuar uma interpretação equivocada.
+
+#### Sincronização e atualização confiáveis
+
+Persistir primeiro o evento na central e sincronizá-lo com o Notion por fila, usando o mesmo ID em novas tentativas. Guardar no banco os IDs retornados pelo Notion e conferir o destino antes de repetir uma criação após resultado incerto. Registrar a origem das alterações e não transformar o espelhamento de um evento em outro evento idêntico, evitando ciclos entre central e Notion.
+
+Alterações humanas ou automações autorizadas no Notion precisam ser consultadas na retomada ou reconciliadas por evento. Não confiar exclusivamente no último resumo escrito pela IA. Interpretações e extrações não confirmadas não podem sobrescrever dados validados nem virar fonte de verdade apenas por terem sido registradas anteriormente. O histórico é memória operacional consultável, com evidências e correções, e não uma autorização para a IA mudar suas próprias regras.
+
+O filtro de 15 dias na central organiza a visualização inicial; não elimina o contexto relevante de atendimentos anteriores. Prazos de retenção e eventual exclusão continuam sendo uma decisão separada. A fonte privada de registros e a relação no cadastro foram criadas. O painel da central, os registros e a fila estão implementados no código, com ativação dependente da configuração do servidor. A recuperação e interpretação por IA, inclusão de blocos personalizados em todos os clientes e criação automática de atividades técnicas permanecem para etapas seguintes.
+
+### Aviso para a equipe e momento de assumir
+
+A IA deve resolver os assuntos que estiverem dentro das ações e informações aprovadas e sinalizar **pronto para assumir** quando o próximo passo exigir uma pessoa, sem exigir que todas as perguntas possíveis tenham sido respondidas. Entender uma demanda não exige encaminhá-la sempre: o retorno pode ser uma resposta suficiente, a confirmação de uma ação concluída, uma pergunta pertinente ou a passagem à equipe. O aviso interno deve conter tipo de contato, necessidade, situação atual consultada, trabalho vinculado ou dúvida de identificação, informações já fornecidas, ação realizada e motivo do encaminhamento. Notificações fora da central serão definidas separadamente; este plano não ativa envio de alertas por outros canais.
+
+Encaminhar antes disso quando houver pedido por uma pessoa, avaliação técnica, necessidade de definir ou confirmar preço/prazo/condição comercial, negociação, reclamação, urgência, identidade ambígua, resposta incerta ou conversa que não esteja avançando. O pedido inicial de orçamento pode ser conduzido pela IA até a coleta breve descrita acima; definir o valor é outra etapa. Situações que exigem uma pessoa não devem esperar a conclusão de uma triagem rígida. Valores e compromissos não aprovados não podem ser inventados nem confirmados pela IA.
+
+Estados propostos por demanda: **em atendimento pela IA, aguardando contato, aguardando equipe, em atendimento humano ou resolvida**. Manter o controle de IA/humano por conversa para evitar respostas simultâneas quando houver vários assuntos. O botão **Assumir atendimento** deve estar disponível a qualquer momento. Ao assumir, pausar a IA e cancelar respostas automáticas em preparação ou na fila; conferir novamente o estado imediatamente antes de qualquer envio. Uma nova mensagem do cliente não reativa a IA em uma conversa assumida. O retorno exige uma ação explícita de **Devolver à IA**, com o contexto atualizado. A passagem à equipe não deve prometer presença imediata ou um horário de resposta que não esteja configurado.
+
+A primeira versão deve atender os diferentes tipos de demanda recebida, com acolhimento, entendimento de contexto, consulta à situação existente, respostas aprovadas, registro/associação de solicitações e retornos adequados a cada resultado. Solicitação de documentos-chave, extração de dados e organização de orçamento/cadastro progressivo são caminhos específicos dentro desse assistente geral. A definição e aprovação de orçamento, orientações técnicas, aprovação de minutas e compromissos comerciais permanecem com a equipe. A consulta de andamento e as notificações do Notion dependem da integração e das liberações descritas na Entrega 4. O assistente geral ainda não está implementado nem ativado no servidor.
 
 Definir instruções Domum, dados enviados, base de conhecimento e orçamento antes de preparar credenciais ou ativar consumo da API. A conversa atual e os conectores deste chat não são transferidos automaticamente ao atendimento. Nenhum serviço de IA é ativado por este plano.
 
@@ -112,6 +243,9 @@ Definir instruções Domum, dados enviados, base de conhecimento e orçamento an
 - Meta, carregamento de figurinhas: <https://www.postman.com/meta/whatsapp-business-platform/request/fd2syvj/upload-sticker>.
 - Meta, download de mídia: <https://www.postman.com/meta/whatsapp-business-platform/request/zsq66eh/download-media>.
 - Notion, webhooks: <https://developers.notion.com/reference/webhooks>.
+- Notion, consulta de fontes: <https://developers.notion.com/reference/query-a-data-source>.
+- Notion, criação de páginas: <https://developers.notion.com/reference/post-page>.
+- Notion, versão da API: <https://developers.notion.com/reference/versioning>.
 - Autentique, criação de documentos e links individuais: <https://docs.autentique.com.br/api/2/mutations/criando-um-documento>.
 - Autentique, eventos, conclusão e validação dos webhooks: <https://docs.autentique.com.br/api/integration-basics/webhooks>.
 - Autentique, opções de envio: <https://ajuda.autentique.com.br/pt-BR/articles/9718602-opcoes-de-envio>.
