@@ -48,7 +48,7 @@ export function createNotionContext(db,config,transport,options={}){
     const c=context(id),snapshot=c.snapshot?JSON.parse(c.snapshot):null;
     return {...c,snapshot,clientUrl:c.client_id?url(c.client_id):null,history:all('SELECT id,request_id,kind,summary,missing,next_step,status,qualification,actor,source,message_id,created,sync_state,sync_error,notion_page_id FROM service_events WHERE conversation_id=? ORDER BY created DESC,rowid DESC LIMIT 40',id).map(e=>({...e,notionUrl:e.notion_page_id?url(e.notion_page_id):null})),requests:all('SELECT * FROM service_requests WHERE conversation_id=? ORDER BY updated DESC LIMIT 100',id),integration:status()};
   }
-  function status(){return {enabled:enabled(),configured:configured(),missing:required.filter(name=>!present(name)),invalid:invalidSources(),activationPending:!activated(),aiEnabled:false,optionalSources:Object.fromEntries(Object.entries(sources).filter(([k])=>!['clients','history'].includes(k)).map(([k,v])=>[k,!!v])),pendingEvents:get("SELECT COUNT(*) AS n FROM service_events WHERE sync_state IN ('pending','error')").n,uncertainEvents:get("SELECT COUNT(*) AS n FROM service_events WHERE sync_state='uncertain'").n};}
+  function status(){return {enabled:enabled(),configured:configured(),missing:required.filter(name=>!present(name)),invalid:invalidSources(),activationPending:!activated(),aiEnabled:!!options.aiEnabled?.(),optionalSources:Object.fromEntries(Object.entries(sources).filter(([k])=>!['clients','history'].includes(k)).map(([k,v])=>[k,!!v])),pendingEvents:get("SELECT COUNT(*) AS n FROM service_events WHERE sync_state IN ('pending','error')").n,uncertainEvents:get("SELECT COUNT(*) AS n FROM service_events WHERE sync_state='uncertain'").n};}
   let stopped=false,serial=Promise.resolve(),nextAt=0;const interval=options.requestIntervalMs??350;
   async function api(path,method='GET',body){
     ensureEnabled();
@@ -155,9 +155,21 @@ export function createNotionContext(db,config,transport,options={}){
   function control(conversation,body,actor){
     const eventKey=key(conversation.id,actor,body.requestId);if(get('SELECT id FROM service_events WHERE event_key=?',eventKey))return localView(conversation.id);
     if(!['human','assisted'].includes(body.mode))fail(400,'Modo de atendimento inválido.');
-    transaction(()=>{checkVersion(conversation.id,body.version);run('UPDATE conversation_context SET mode=?,version=version+1,updated=? WHERE conversation_id=?',body.mode,Date.now(),conversation.id);if(body.mode==='human')run('UPDATE conversations SET owner_id=? WHERE id=?',actor.id,conversation.id);addEvent(conversation.id,{key:eventKey,kind:body.mode==='human'?'humano':'assistencia',summary:body.mode==='human'?'Atendimento assumido por '+actor.signatureName:'Assistência liberada; respostas automáticas de IA ainda não estão ativas.',actor:actor.signatureName,source:'Atendente',qualification:'Confirmado'});});return localView(conversation.id);
+    transaction(()=>{checkVersion(conversation.id,body.version);run('UPDATE conversation_context SET mode=?,version=version+1,updated=? WHERE conversation_id=?',body.mode,Date.now(),conversation.id);if(body.mode==='human')run('UPDATE conversations SET owner_id=? WHERE id=?',actor.id,conversation.id);addEvent(conversation.id,{key:eventKey,kind:body.mode==='human'?'humano':'assistencia',summary:body.mode==='human'?'Atendimento assumido por '+actor.signatureName:'Assistência liberada; a execução depende da configuração e dos telefones autorizados no piloto de IA.',actor:actor.signatureName,source:'Atendente',qualification:'Confirmado'});});return localView(conversation.id);
   }
   function receivedFile(conversationId,messageId,kind){addEvent(conversationId,{key:'file:'+messageId,kind:'arquivo',summary:({image:'Imagem recebida',document:'Documento recebido',sticker:'Figurinha recebida'})[kind]||'Arquivo recebido',source:'Cliente',actor:'Contato do WhatsApp',messageId});}
+  function aiRecord(id,jobId,result,handoff=false){
+    const eventKey='ai:'+jobId;if(get('SELECT id FROM service_events WHERE event_key=?',eventKey))return;
+    const record=()=>{
+      const c=context(id);let requestId=null;
+      if(handoff){
+        const existing=get("SELECT id FROM service_requests WHERE conversation_id=? AND owner_id IS NULL AND status='Aguardando equipe'",id);
+        requestId=existing?.id||randomUUID();
+        if(!existing)run('INSERT INTO service_requests(id,conversation_id,client_id,work_id,title,kind,status,summary,missing,next_step,owner_id,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',requestId,id,c.client_id,c.work_id,'Atendimento encaminhado pela IA',result.kind,'Aguardando equipe',result.summary,result.missing,result.nextStep,null,Date.now(),Date.now());
+      }
+      addEvent(id,{key:eventKey,kind:'contexto',requestId,summary:result.summary,missing:result.missing,nextStep:result.nextStep,status:handoff?'Aguardando equipe':'Em atendimento',actor:'Domum · IA',source:'IA',qualification:'Interpretado'});
+    };if(db.isTransaction)record();else transaction(record);
+  }
   const creating=new Map();
   async function createClient(conversation,body,actor){
     ensureEnabled();if(actor.role!=='admin')fail(403,'Somente administradores podem criar cadastros no Notion nesta etapa.');
@@ -212,7 +224,7 @@ export function createNotionContext(db,config,transport,options={}){
     if(missing.length)fail(409,'Confira as propriedades das bases: '+missing.join(', '));
     return {...status(),accessVerified:true,verifiedAt:Date.now()};
   }
-  return{status,view:localView,lookup,link,refresh,save,request,updateRequest,control,receivedFile,createClient,processQueue,verify,
+  return{status,view:localView,lookup,link,refresh,save,request,updateRequest,control,receivedFile,aiRecord,createClient,processQueue,verify,
     close:async()=>{stopped=true;await Promise.allSettled([worker,...refreshing.values(),...creating.values(),serial].filter(Boolean));},
   };
 }
