@@ -77,12 +77,28 @@ Se apenas o login do Facebook retornar, a tela informa que ainda aguarda a confi
 
 Referência do protocolo: [exemplo oficial da Meta](https://github.com/fbsamples/business-messaging-sample-tech-provider-app/tree/14703a3e1fdba9bcf75b2360b00817b6fcc9f79b), em especial `app/components/ClientDashboard.tsx`, `Fbl4bLauncher.tsx` e `app/publicConfig.ts`. Os testes locais simulam a Meta e não usam o número real.
 
+## Contexto, solicitações e histórico no Notion
+
+Em uma conversa, abra **Cliente e histórico**. O painel interno permite salvar resumo, pendências, próximo passo e solicitações por assunto, incluindo acompanhamento, documentos, contatos comerciais e pedidos de orçamento. Esses registros ficam no SQLite persistente, mesmo sem Notion configurado. Arquivos novos recebidos geram registro de recebimento, sem afirmar que a documentação foi validada. Não há importação automática das conversas antigas.
+
+**Assumir atendimento** registra a pessoa da sessão como responsável e mantém o controle humano. **Permitir assistência** apenas prepara o controle para a etapa seguinte; não ativa modelo de IA, consumo de API ou resposta automática. Uma nova mensagem não retira o controle humano. As solicitações têm situação própria e podem ser atualizadas sem fechar a conversa inteira.
+
+Para conectar o servidor, configure `NOTION_TOKEN`, `NOTION_CLIENTS_DATA_SOURCE_ID` e `NOTION_HISTORY_DATA_SOURCE_ID`, depois `NOTION_ENABLED=true`. O token deve ser configurado diretamente no ambiente privado do Render e ter acesso próprio às bases necessárias. O conector do chat não é transferido para a aplicação. As fontes opcionais `NOTION_WORKS_DATA_SOURCE_ID`, `NOTION_PROPOSALS_DATA_SOURCE_ID`, `NOTION_PROJECTS_DATA_SOURCE_ID` e `NOTION_TASKS_DATA_SOURCE_ID` permitem consultar a situação operacional atual. Use os IDs de **data source**, não os IDs das páginas que contêm as bases. A implementação usa a versão fixa `2026-03-11` da API do Notion, sem dependências externas.
+
+Em **Conexão → Histórico integrado com o Notion**, use **Verificar acesso ao Notion**. Na conversa, **Buscar cliente no Notion** localiza candidatos e exige confirmação do vínculo. Telefones diferentes e troca de cliente exigem justificativa de administrador; nomes semelhantes não são associados automaticamente. **Criar cadastro inicial**, disponível ao administrador, reaproveita telefone coincidente único ou cria apenas o cadastro inicial com nome informado e telefone; cadastros com nome já existente exigem conferência. Não cria contrato, preço ou autorização de início. O município informado na criação fica no conteúdo da página, sem alterar opções existentes da base.
+
+**Consultar situação no Notion** traz cliente, trabalhos, propostas/contratos, projetos, atividades e os últimos registros de histórico. O painel inclui data da consulta e avisa fontes ausentes, erros ou resultados parciais. Valores, CPF/CNPJ, dados bancários e pastas restritas não são retornados pelo adaptador à interface. As consultas não enviam mensagem ao cliente nem modificam seus status operacionais. Abrir um cache de contexto não substitui uma nova consulta à fonte para confirmar a situação atual.
+
+O histórico é sincronizado em fila, por ID estável de evento, usando a base privada criada para atendimento e a relação com Clientes. Ao ocorrer falha, o registro permanece na central. Se uma criação no Notion ficar sem resposta, a aplicação pesquisa seu ID antes de tentar outra operação; resultados incertos sem correspondência visível ficam para conferência, sem recriar automaticamente. **Sincronizar histórico pendente** permite ao administrador antecipar a fila. Uma alteração humana no Notion aparece na próxima consulta; esta entrega não tem webhook de atualização do Notion.
+
+As alterações de contexto e situação usam versões para evitar sobrescrita por sessões simultâneas. O cliente vinculado, os eventos, as solicitações e a fila sobrevivem ao reinício. Campos recebidos de páginas e mensagens são dados, não instruções de execução. O adaptador possui operações específicas; não oferece ao navegador uma API genérica de leitura/escrita do workspace. A IA, interpretação automática de documentos e respostas autônomas permanecem para a próxima etapa.
+
 ## Limites atuais
 
 - A assinatura automática se aplica às mensagens enviadas pela central. Ecos do aplicativo Business não identificam automaticamente o atendente.
 - O prazo de alerta usa tempo corrido, sem calendário de horário comercial. O padrão é 30 minutos.
 - Notificações do navegador exigem permissão e a central aberta. Avisos com a página fechada dependem de um destino externo de alertas; nenhum está configurado neste ambiente.
-- Mensagens livres são bloqueadas após a janela de 24 horas. Modelos aprovados, anexos, recuperação de senha e importação do histórico ainda não estão implementados.
+- Mensagens livres são bloqueadas após a janela de 24 horas. Modelos aprovados, recuperação de senha, importação do histórico e respostas automáticas de IA ainda não estão implementados. Anexos e contexto de atendimento têm suas próprias seções acima.
 - O fluxo local foi validado com API simulada. No serviço publicado, o webhook foi cadastrado e o campo `messages` assinado; o usuário optou por adiar o teste de recebimento na central. O envio do número de teste retornou `130497`, restrição informada pela Meta para o país do destinatário. A coexistência e a ativação do número Business real permanecem pendentes.
 
 Mais detalhes da versão anterior estão em [docs/projeto-original.md](docs/projeto-original.md). O código legado do WPPConnect foi removido por solicitação do usuário; o nome do repositório não define o adaptador usado pela nova central.

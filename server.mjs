@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { createWhatsAppSignup } from './whatsapp-signup.mjs';
 import { createMediaStore } from './media.mjs';
+import { createNotionContext } from './notion-context.mjs';
 
 const derive = promisify(scrypt);
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -23,7 +24,7 @@ async function checkPassword(password, encoded) {
   return safeEqual(calculated, encoded || '');
 }
 
-export function createCentral(config = process.env, transport = fetch) {
+export function createCentral(config = process.env, transport = fetch, options = {}) {
   const database = config.DATABASE_PATH || './data/central.sqlite';
   if (database !== ':memory:') mkdirSync(dirname(resolve(database)), { recursive: true });
   const db = new DatabaseSync(database);
@@ -43,6 +44,7 @@ export function createCentral(config = process.env, transport = fetch) {
   const run = (sql, ...args) => db.prepare(sql).run(...args);
   const live = config.WHATSAPP_MODE === 'live';
   const media = createMediaStore(db,config,transport,live);
+  const customerContext = createNotionContext(db,config,transport,{requestIntervalMs:options.notionRequestIntervalMs});
   const ready = live && ['WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_ACCESS_TOKEN','META_APP_SECRET','WEBHOOK_VERIFY_TOKEN','META_GRAPH_VERSION'].every(k => config[k]);
   // Only operational counts and timestamps; no payload, phone or credentials.
   // These observations start again with each server process.
@@ -99,6 +101,7 @@ export function createCentral(config = process.env, transport = fetch) {
       const messageId=randomUUID();
       const received = run('INSERT INTO messages(id,conversation_id,provider_id,direction,body,agent_name,status,created) VALUES(?,?,?,?,?,?,?,?)',messageId,c.id,m.id,echo?'out':'in',body,echo?'Aplicativo Business (atendente não identificado)':null,echo?'sent':'received',at).lastInsertRowid;
       media.incoming(messageId,m);
+      if(!echo&&['image','document'].includes(m.type)&&get('SELECT media_id FROM message_media WHERE message_id=?',messageId))customerContext.receivedFile(c.id,messageId,m.type);
       result.recordedMessages++;
       if (echo) {
         run('UPDATE conversations SET pending_since=CASE WHEN last_inbound<? THEN NULL ELSE pending_since END,updated=MAX(updated,?) WHERE id=?', at, at, c.id);
@@ -171,6 +174,7 @@ export function createCentral(config = process.env, transport = fetch) {
         webhook.acceptedRequests++;webhook.lastCompletedAt=now();
         webhook.lastResult=observed.recordedMessages?'recorded':observed.ignoredNumberEvents?'other_number':observed.duplicates?'duplicate':observed.invalidMessages?'invalid_message':'no_new_message';
         setImmediate(()=>media.processPending().catch(()=>{}));
+        setImmediate(()=>customerContext.processQueue().catch(()=>{}));
         return reply(200,{ok:true});
       }
       const publicFiles = {
@@ -229,6 +233,32 @@ export function createCentral(config = process.env, transport = fetch) {
         return reply(200,{ok:true});
       }
       if (!user) fail(401,'Entre com seu usuário para continuar.');
+      if(url.pathname==='/api/notion/status'&&req.method==='GET')return reply(200,customerContext.status());
+      if(url.pathname==='/api/notion/verify'&&req.method==='POST'){
+        if(user.role!=='admin')fail(403,'Somente administradores podem verificar a integração.');
+        return reply(200,await customerContext.verify());
+      }
+      if(url.pathname==='/api/notion/sync'&&req.method==='POST'){
+        if(user.role!=='admin')fail(403,'Somente administradores podem sincronizar a fila.');
+        if(!customerContext.status().enabled)fail(503,'Configure a integração própria da central com o Notion antes de sincronizar.');
+        await customerContext.processQueue(true);return reply(200,customerContext.status());
+      }
+      const contextMatch=url.pathname.match(/^\/api\/conversations\/([^/]+)\/context(?:\/(lookup|link|refresh|client|requests|control)(?:\/([^/]+))?)?$/);
+      if(contextMatch){
+        const c=get('SELECT * FROM conversations WHERE id=?',contextMatch[1]);if(!c)fail(404,'Conversa não encontrada.');
+        const action=contextMatch[2],requestId=contextMatch[3];let result;
+        if(!action&&req.method==='GET')return reply(200,customerContext.view(c.id));
+        if(!action&&req.method==='PATCH')result=await customerContext.save(c,body,user);
+        else if(action==='lookup'&&req.method==='POST')return reply(200,await customerContext.lookup(c,body.query||''));
+        else if(action==='link'&&req.method==='POST')result=await customerContext.link(c,body,user);
+        else if(action==='refresh'&&req.method==='POST')return reply(200,await customerContext.refresh(c));
+        else if(action==='client'&&req.method==='POST')result=await customerContext.createClient(c,body,user);
+        else if(action==='control'&&req.method==='POST')result=customerContext.control(c,body,user);
+        else if(action==='requests'&&!requestId&&req.method==='POST')result=customerContext.request(c,body,user);
+        else if(action==='requests'&&requestId&&req.method==='PATCH')result=customerContext.updateRequest(c,requestId,body,user);
+        else if(!result)fail(405,'Método não permitido.');
+        setImmediate(()=>customerContext.processQueue().catch(()=>{}));return reply(200,result);
+      }
       if(url.pathname==='/api/media'&&req.method==='POST')return reply(201,{attachment:await media.upload(req,url.searchParams)});
       if(url.pathname==='/api/stickers'&&req.method==='GET')return reply(200,{stickers:media.favorites()});
       const mediaMatch=url.pathname.match(/^\/api\/media\/([a-f\d-]{36})\/(content|retry|favorite)$/);
@@ -278,7 +308,7 @@ export function createCentral(config = process.env, transport = fetch) {
         res.setHeader('set-cookie','central_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');return reply(200,{ok:true});
       }
       if (url.pathname==='/api/state' && req.method==='GET') {
-        tick();return reply(200,{user,mode:live?'live':'demo',connected:!!ready,externalAlerts:!!config.ALERT_WEBHOOK_URL,agents:all('SELECT id,name,email,role,active FROM agents'),contacts:all('SELECT * FROM contacts ORDER BY name COLLATE NOCASE'),conversations:all('SELECT * FROM conversations ORDER BY updated DESC'),messages:media.messages(all('SELECT * FROM messages ORDER BY created')),mediaStorage:media.stats(),settings:get('SELECT minutes FROM settings WHERE id=1')});
+        tick();return reply(200,{user,mode:live?'live':'demo',connected:!!ready,externalAlerts:!!config.ALERT_WEBHOOK_URL,agents:all('SELECT id,name,email,role,active FROM agents'),contacts:all('SELECT * FROM contacts ORDER BY name COLLATE NOCASE'),conversations:all('SELECT * FROM conversations ORDER BY updated DESC'),messages:media.messages(all('SELECT * FROM messages ORDER BY created')),mediaStorage:media.stats(),contexts:all('SELECT conversation_id,client_name,kind,mode,version FROM conversation_context'),notion:customerContext.status(),settings:get('SELECT minutes FROM settings WHERE id=1')});
       }
       if (url.pathname === '/api/contacts' && req.method === 'GET') return reply(200,{contacts:all('SELECT * FROM contacts ORDER BY name COLLATE NOCASE')});
       const contactMatch=url.pathname.match(/^\/api\/contacts\/([^/]+)$/);
@@ -413,13 +443,14 @@ export function createCentral(config = process.env, transport = fetch) {
   const timer=setInterval(async()=>{
     if(delivering)return;
     delivering=true;
-    try{await deliverAlerts();await media.processPending();}catch{console.error('Falha ao verificar os lembretes ou anexos.');}finally{delivering=false;}
+    try{await deliverAlerts();await media.processPending();await customerContext.processQueue();}catch{console.error('Falha ao verificar lembretes, anexos ou integração.');}finally{delivering=false;}
   },60000);
   timer.unref();
-  return {server,db,intake,tick,deliverAlerts,media,close:()=>{
+  return {server,db,intake,tick,deliverAlerts,media,customerContext,close:()=>{
     clearInterval(timer);
     return new Promise((resolve,reject)=>server.close(async error=>{
       await media.close();
+      await customerContext.close();
       db.close();
       if(error&&error.code!=='ERR_SERVER_NOT_RUNNING')reject(error);else resolve();
     }));
