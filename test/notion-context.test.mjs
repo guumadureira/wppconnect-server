@@ -88,6 +88,26 @@ test('busca por telefone normalizado, confirma vínculo e retorna somente contex
   const doc=f.remote.calls.find(c=>c.path==='pages').body;assert.equal(doc.notifications.mode,'silent');assert.ok(!JSON.stringify(doc).includes('PRIVATE-CPF'));
 });
 
+test('configuração aceita UUID com espaços e prefixo collection sem expor seus valores',async t=>{
+  const f=await fixture(t,{config:{NOTION_ENABLED:' true ',NOTION_TOKEN:' private-test-notion-token ',NOTION_CLIENTS_DATA_SOURCE_ID:'  collection://'+ids.clients+'  ',NOTION_HISTORY_DATA_SOURCE_ID:' '+ids.history+' '}});
+  const status=(await f.request('/api/notion/status','GET',undefined,f.cookie)).body;assert.equal(status.enabled,true);assert.deepEqual(status.invalid,[]);
+  const verified=await f.request('/api/notion/verify','POST',{},f.cookie);assert.equal(verified.status,200);assert.equal(verified.body.accessVerified,true);
+  assert.ok(!JSON.stringify(status).includes('private-test-notion-token'));
+});
+
+test('ID configurado inválido informa o campo exato e não impede a saúde do servidor',async t=>{
+  const f=await fixture(t,{config:{NOTION_CLIENTS_DATA_SOURCE_ID:'NOTION_CLIENTS_DATA_SOURCE_ID=private-test-value'}});
+  assert.equal((await f.request('/healthz')).status,200);
+  const status=(await f.request('/api/notion/status','GET',undefined,f.cookie)).body;assert.equal(status.enabled,false);assert.deepEqual(status.invalid,['NOTION_CLIENTS_DATA_SOURCE_ID']);
+  const verified=await f.request('/api/notion/verify','POST',{},f.cookie);assert.equal(verified.status,400);assert.match(verified.body.error,/NOTION_CLIENTS_DATA_SOURCE_ID/);assert.ok(!JSON.stringify({status,verified}).includes('private-test-value'));assert.equal(f.remote.calls.length,0);
+});
+
+test('erro de acesso à fonte identifica a variável sem reproduzir resposta privada do Notion',async t=>{
+  const remoteServer=remote();remoteServer.transport=async()=>Response.json({message:'private-test-value'},{status:404});
+  const f=await fixture(t,{remoteServer});const result=await f.request('/api/notion/verify','POST',{},f.cookie);
+  assert.equal(result.status,502);assert.match(result.body.error,/NOTION_CLIENTS_DATA_SOURCE_ID/);assert.ok(!JSON.stringify(result).includes('private-test-value'));
+});
+
 test('telefone divergente exige administrador e motivo; trabalho de outro cliente é recusado',async t=>{
   const f=await fixture(t);f.remote.rows[ids.clients].push(page(ids.other,ids.clients,{'Nome do Cliente':title('Outro cadastro'),Telefone:{phone_number:'5544000000000'}}));
   assert.equal((await f.action('/link',{clientId:ids.other,confirmed:true,version:0,requestId:'different'})).status,409);
