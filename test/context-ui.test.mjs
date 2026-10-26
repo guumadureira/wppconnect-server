@@ -9,6 +9,13 @@ function fixture(){
   const c=vm.createContext({location:{protocol:'https:'},localStorage:{getItem:()=>null},setInterval(){},document:{querySelector:selector=>selector==='#root'?root:selector==='#reply'?reply:null,querySelectorAll:()=>[]}});
   new vm.Script(code).runInContext(c);vm.runInContext("state=seed();active='c1';",c);return{c,root};
 }
+
+test('painel IA distingue ensaio gratuito, piloto e encaminhamento sem executar HTML recebido',()=>{
+  const {c}=fixture();vm.runInContext("state.ai={enabled:false,credentialPresent:false,pilotConfigured:false,budgetUsd:0,usedUsd:0,activationPending:true,whatsappReady:false,handoffs:[{conversation_id:'c1',name:'<Cliente>',handoff:'Pedido <script>alert(1)</script>'}]};aiDemoResult={reply:'Resposta <script>alert(2)</script>',handoff:true};",c);
+  let card=vm.runInContext('aiConnectionCard()',c);assert.match(card,/Demonstração roteirizada/);assert.match(card,/AI_MONTHLY_BUDGET_USD/);assert.match(card,/Testar fluxo sem consumo/);assert.match(card,/&lt;Cliente&gt;/);assert.doesNotMatch(card,/<script>alert/);
+  assert.match(vm.runInContext('badge(state.conversations[0])',c),/Pronto para assumir/);
+  vm.runInContext('state.ai.enabled=true;state.ai.budgetUsd=1;',c);card=vm.runInContext('aiConnectionCard()',c);assert.match(card,/Piloto ativo somente/);
+});
 test('painel interno separa cliente, fontes, pendências e histórico sem iniciar resposta automática',()=>{
   const {c,root}=fixture();
   vm.runInContext(`

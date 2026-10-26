@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { createWhatsAppSignup } from './whatsapp-signup.mjs';
 import { createMediaStore } from './media.mjs';
 import { createNotionContext } from './notion-context.mjs';
+import { createAIAttendance, simulateAttendance } from './ai-attendance.mjs';
 
 const derive = promisify(scrypt);
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -44,8 +45,10 @@ export function createCentral(config = process.env, transport = fetch, options =
   const run = (sql, ...args) => db.prepare(sql).run(...args);
   const live = config.WHATSAPP_MODE === 'live';
   const media = createMediaStore(db,config,transport,live);
-  const customerContext = createNotionContext(db,config,transport,{requestIntervalMs:options.notionRequestIntervalMs});
+  let ai;
+  const customerContext = createNotionContext(db,config,transport,{requestIntervalMs:options.notionRequestIntervalMs,aiEnabled:()=>ai?.status().enabled||false});
   const ready = live && ['WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_ACCESS_TOKEN','META_APP_SECRET','WEBHOOK_VERIFY_TOKEN','META_GRAPH_VERSION'].every(k => config[k]);
+  ai = createAIAttendance(db,config,transport,customerContext,{ready:!!ready,debounceMs:options.aiDebounceMs});
   // Only operational counts and timestamps; no payload, phone or credentials.
   // These observations start again with each server process.
   const metaCode = value => Number.isSafeInteger(value) && value > 0 ? value : null;
@@ -91,6 +94,7 @@ export function createCentral(config = process.env, transport = fetch, options =
       const timestamp = Number(m.timestamp) * 1000;
       const at = Number.isFinite(timestamp) && timestamp > 0 ? Math.min(timestamp, now()) : now();
       let c = get('SELECT * FROM conversations WHERE phone=?', phone);
+      const fresh=!c;
       if (!c) {
         const name = get('SELECT name FROM contacts WHERE phone=?',phone)?.name || clean(value.contacts?.find(p => p.wa_id === phone)?.profile?.name) || phone;
         const id = randomUUID();
@@ -112,6 +116,7 @@ export function createCentral(config = process.env, transport = fetch, options =
         const pending = at >= Math.floor(lastOut/1000)*1000 ? Math.min(c.pending_since || at, at) : c.pending_since;
         run("UPDATE conversations SET pending_since=?,last_inbound=MAX(COALESCE(last_inbound,0),?),last_received=?,updated=MAX(updated,?),status=CASE WHEN ?>=CAST(updated/1000 AS INTEGER)*1000 THEN 'open' ELSE status END WHERE id=?", pending,at,received,at,at,c.id);
       }
+      ai.incoming(get('SELECT * FROM conversations WHERE id=?',c.id),get('SELECT * FROM messages WHERE id=?',messageId),{fresh,echo,type:m.type});
     }
     for (const s of value.statuses || []) {
       if (!['sent','delivered','read','failed'].includes(s.status)) continue;
@@ -233,6 +238,11 @@ export function createCentral(config = process.env, transport = fetch, options =
         return reply(200,{ok:true});
       }
       if (!user) fail(401,'Entre com seu usuário para continuar.');
+      if(url.pathname==='/api/ai/status'&&req.method==='GET')return reply(200,ai.status());
+      if(url.pathname==='/api/ai/simulate'&&req.method==='POST'){
+        if(user.role!=='admin')fail(403,'Somente administradores podem abrir o teste.');
+        return reply(200,simulateAttendance(body.message));
+      }
       if(url.pathname==='/api/notion/status'&&req.method==='GET')return reply(200,customerContext.status());
       if(url.pathname==='/api/notion/verify'&&req.method==='POST'){
         if(user.role!=='admin')fail(403,'Somente administradores podem verificar a integração.');
@@ -247,13 +257,17 @@ export function createCentral(config = process.env, transport = fetch, options =
       if(contextMatch){
         const c=get('SELECT * FROM conversations WHERE id=?',contextMatch[1]);if(!c)fail(404,'Conversa não encontrada.');
         const action=contextMatch[2],requestId=contextMatch[3];let result;
-        if(!action&&req.method==='GET')return reply(200,customerContext.view(c.id));
+        if(!action&&req.method==='GET')return reply(200,{...customerContext.view(c.id),ai:ai.result(c.id)});
         if(!action&&req.method==='PATCH')result=await customerContext.save(c,body,user);
         else if(action==='lookup'&&req.method==='POST')return reply(200,await customerContext.lookup(c,body.query||''));
         else if(action==='link'&&req.method==='POST')result=await customerContext.link(c,body,user);
         else if(action==='refresh'&&req.method==='POST')return reply(200,await customerContext.refresh(c));
         else if(action==='client'&&req.method==='POST')result=await customerContext.createClient(c,body,user);
-        else if(action==='control'&&req.method==='POST')result=customerContext.control(c,body,user);
+        else if(action==='control'&&req.method==='POST'){
+          if(body.mode==='assisted'&&ai.status().enabled)ai.release(c);
+          result=customerContext.control(c,body,user);
+          if(body.mode==='human')ai.pause(c.id);
+        }
         else if(action==='requests'&&!requestId&&req.method==='POST')result=customerContext.request(c,body,user);
         else if(action==='requests'&&requestId&&req.method==='PATCH')result=customerContext.updateRequest(c,requestId,body,user);
         else if(!result)fail(405,'Método não permitido.');
@@ -308,7 +322,7 @@ export function createCentral(config = process.env, transport = fetch, options =
         res.setHeader('set-cookie','central_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');return reply(200,{ok:true});
       }
       if (url.pathname==='/api/state' && req.method==='GET') {
-        tick();return reply(200,{user,mode:live?'live':'demo',connected:!!ready,externalAlerts:!!config.ALERT_WEBHOOK_URL,agents:all('SELECT id,name,email,role,active FROM agents'),contacts:all('SELECT * FROM contacts ORDER BY name COLLATE NOCASE'),conversations:all('SELECT * FROM conversations ORDER BY updated DESC'),messages:media.messages(all('SELECT * FROM messages ORDER BY created')),mediaStorage:media.stats(),contexts:all('SELECT conversation_id,client_name,kind,mode,version FROM conversation_context'),notion:customerContext.status(),settings:get('SELECT minutes FROM settings WHERE id=1')});
+        tick();return reply(200,{user,mode:live?'live':'demo',connected:!!ready,externalAlerts:!!config.ALERT_WEBHOOK_URL,agents:all('SELECT id,name,email,role,active FROM agents'),contacts:all('SELECT * FROM contacts ORDER BY name COLLATE NOCASE'),conversations:all('SELECT * FROM conversations ORDER BY updated DESC'),messages:media.messages(all('SELECT * FROM messages ORDER BY created')),mediaStorage:media.stats(),contexts:all('SELECT conversation_id,client_name,kind,mode,version FROM conversation_context'),notion:customerContext.status(),ai:ai.status(),settings:get('SELECT minutes FROM settings WHERE id=1')});
       }
       if (url.pathname === '/api/contacts' && req.method === 'GET') return reply(200,{contacts:all('SELECT * FROM contacts ORDER BY name COLLATE NOCASE')});
       const contactMatch=url.pathname.match(/^\/api\/contacts\/([^/]+)$/);
@@ -373,6 +387,7 @@ export function createCentral(config = process.env, transport = fetch, options =
           const status=body.status || c.status;if(!['open','closed'].includes(status))fail(400,'Situação inválida.');
           const follow=body.followup_at===null?null:body.followup_at===undefined?c.followup_at:Number(body.followup_at);
           if(body.followup_at!==undefined&&follow!==null&&(!Number.isFinite(follow)||follow<=now()))fail(400,'Escolha uma data futura para o retorno.');
+          if(status==='closed'||body.owner_id!==undefined)ai.pause(c.id);
           run('UPDATE conversations SET owner_id=?,status=?,followup_at=?,updated=? WHERE id=?',owner===undefined?c.owner_id:owner,status,follow,now(),c.id);return reply(200,{ok:true});
         }
         if(req.method==='POST'&&chatMatch[2]) {
@@ -387,6 +402,7 @@ export function createCentral(config = process.env, transport = fetch, options =
           if(c.status!=='open')fail(409,'Reabra a conversa antes de responder.');
           if(live&&!ready)fail(503,'A conexão com o WhatsApp ainda não foi configurada.');
           if(live&&(!c.last_inbound||now()-c.last_inbound>24*3600000))fail(409,'A janela de 24 horas terminou. O retorno pela API exige um modelo aprovado; use o aplicativo Business para este contato.');
+          ai.pause(c.id);
           const id=randomUUID(),at=now(),signed=`${user.signatureName}: ${text||({image:'[Imagem]',document:'[Documento]',sticker:'[Figurinha]'})[attachment?.kind]}`;
           run('INSERT INTO messages(id,conversation_id,request_id,direction,body,agent_id,agent_name,status,created) VALUES(?,?,?,?,?,?,?,?,?)',id,c.id,requestId,'out',signed,user.id,user.signatureName,live?'sending':'simulated',at);
           if(attachment)media.link(id,attachmentId);
@@ -439,6 +455,7 @@ export function createCentral(config = process.env, transport = fetch, options =
     }
   }
   const server=http.createServer(handler);
+  const aiTimer=setInterval(()=>ai.process().catch(()=>{}),1500);aiTimer.unref();
   let delivering=false;
   const timer=setInterval(async()=>{
     if(delivering)return;
@@ -446,10 +463,12 @@ export function createCentral(config = process.env, transport = fetch, options =
     try{await deliverAlerts();await media.processPending();await customerContext.processQueue();}catch{console.error('Falha ao verificar lembretes, anexos ou integração.');}finally{delivering=false;}
   },60000);
   timer.unref();
-  return {server,db,intake,tick,deliverAlerts,media,customerContext,close:()=>{
+  return {server,db,intake,tick,deliverAlerts,media,customerContext,ai,close:()=>{
     clearInterval(timer);
+    clearInterval(aiTimer);
     return new Promise((resolve,reject)=>server.close(async error=>{
       await media.close();
+      await ai.close();
       await customerContext.close();
       db.close();
       if(error&&error.code!=='ERR_SERVER_NOT_RUNNING')reject(error);else resolve();
