@@ -51,6 +51,32 @@ test('código de instalação é exigido quando configurado, sem criar conta em 
   assert.equal((await request('/api/setup', 'POST', { ...account, setupToken: 'test-only-setup-code' })).status, 201);
 });
 
+test('administrador e atendente aceitam senha curta, exigem preenchimento e autenticam a senha exata', async t => {
+  const { app, request } = await start({ DATABASE_PATH: ':memory:' });
+  t.after(() => app.close());
+  const admin = { name: 'Admin', email: 'short-admin@example.invalid', password: 'a' };
+  for (const password of ['', null, 123, 'a'.repeat(513)]) {
+    assert.equal((await request('/api/setup', 'POST', { ...admin, password })).status, 400);
+  }
+  assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM agents').get().n, 0);
+  assert.equal((await request('/api/setup', 'POST', admin)).status, 201);
+  const login = await request('/api/login', 'POST', admin);
+  assert.equal(login.status, 200);
+  assert.equal((await request('/api/login', 'POST', { ...admin, password: 'b' })).status, 401);
+  const agent = { name: 'Agent', email: 'short-agent@example.invalid', password: '!' };
+  for (const password of ['', null, 123, 'a'.repeat(513)]) {
+    assert.equal((await request('/api/agents', 'POST', { ...agent, password }, login.cookie)).status, 400);
+  }
+  assert.equal((await request('/api/agents', 'POST', agent, login.cookie)).status, 201);
+  const agentLogin = await request('/api/login', 'POST', agent);
+  assert.equal(agentLogin.status, 200);
+  const state = await request('/api/state', 'GET', undefined, agentLogin.cookie);
+  assert.equal(state.body.user.name, agent.name);
+  assert.equal(state.body.user.role, 'agent');
+  const stored = app.db.prepare('SELECT password FROM agents WHERE email=?').get(agent.email).password;
+  assert.notEqual(stored, agent.password);
+});
+
 test('contas, mensagens e retornos persistem após reiniciar o servidor', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'central-persistence-'));
   const config = { DATABASE_PATH: join(dir, 'central.sqlite') };
