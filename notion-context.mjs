@@ -14,6 +14,7 @@ const qualifications=['Informado','Extraído','Interpretado','Confirmado','Corri
 const eventTypes={contexto:'Contexto atualizado',solicitacao:'Solicitação registrada',situacao:'Situação da solicitação atualizada',cliente:'Cliente vinculado',humano:'Atendimento assumido',assistencia:'Assistência liberada',arquivo:'Arquivo recebido'};
 
 export function createNotionContext(db,config,transport,options={}){
+  const aiActor=Object.freeze({id:'domum-ai-registration',signatureName:'Domum · IA',role:'internal_ai'});
   const get=(sql,...args)=>db.prepare(sql).get(...args),all=(sql,...args)=>db.prepare(sql).all(...args),run=(sql,...args)=>db.prepare(sql).run(...args);
   db.exec(`CREATE TABLE IF NOT EXISTS conversation_context(conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),client_id TEXT,client_name TEXT,work_id TEXT,kind TEXT NOT NULL DEFAULT 'atendimento',summary TEXT NOT NULL DEFAULT '',missing TEXT NOT NULL DEFAULT '',next_step TEXT NOT NULL DEFAULT '',mode TEXT NOT NULL DEFAULT 'human',version INTEGER NOT NULL DEFAULT 0,snapshot TEXT,checked_at INTEGER,last_error TEXT,updated INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS service_requests(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL REFERENCES conversations(id),client_id TEXT,work_id TEXT,title TEXT NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL,summary TEXT NOT NULL,missing TEXT NOT NULL,next_step TEXT NOT NULL,owner_id TEXT,version INTEGER NOT NULL DEFAULT 0,created INTEGER NOT NULL,updated INTEGER NOT NULL);
@@ -89,6 +90,7 @@ export function createNotionContext(db,config,transport,options={}){
     const eventKey=key(conversation.id,actor,body.requestId);
     if(get('SELECT id FROM service_events WHERE event_key=?',eventKey))return localView(conversation.id);
     checkVersion(conversation.id,body.version);const selected=await client(body.clientId);
+    if(actor===aiActor&&(!body.guard?.()||norm(selected.phone)!==norm(conversation.phone)||selected.name.normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().trim()!==String(body.name).normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().trim()))fail(409,'O cadastro automático foi interrompido para conferência.');
     const reason=text(body.reason||'',500);
     if(norm(selected.phone)!==norm(conversation.phone)&&(!reason||actor.role!=='admin'))fail(409,'Telefone diferente: a associação exige conferência e justificativa de um administrador.');
     transaction(()=>{
@@ -98,7 +100,7 @@ export function createNotionContext(db,config,transport,options={}){
       // Only previously unbound events are associated; older confirmed bindings are preserved.
       run("UPDATE service_events SET client_id=?,sync_state='pending' WHERE conversation_id=? AND client_id IS NULL AND sync_state='waiting_link'",selected.id,conversation.id);
       run('UPDATE service_requests SET client_id=? WHERE conversation_id=? AND client_id IS NULL',selected.id,conversation.id);
-      addEvent(conversation.id,{key:eventKey,kind:'cliente',summary:'Cliente vinculado: '+selected.name+(reason?' — '+reason:''),actor:actor.signatureName,source:'Atendente',qualification:'Confirmado'});
+      addEvent(conversation.id,{key:eventKey,kind:'cliente',summary:'Cliente vinculado: '+selected.name+(reason?' — '+reason:''),actor:actor.signatureName,source:actor===aiActor?'IA':'Atendente',qualification:actor===aiActor?'Informado':'Confirmado'});
     });return localView(conversation.id);
   }
   const refreshing=new Map();
@@ -172,18 +174,20 @@ export function createNotionContext(db,config,transport,options={}){
   }
   const creating=new Map();
   async function createClient(conversation,body,actor){
-    ensureEnabled();if(actor.role!=='admin')fail(403,'Somente administradores podem criar cadastros no Notion nesta etapa.');
+    ensureEnabled();if(actor.role!=='admin'&&actor!==aiActor)fail(403,'Somente administradores podem criar cadastros no Notion nesta etapa.');
     if(creating.has(conversation.id))fail(409,'Uma criação de cadastro já está em andamento.');
     const operation=(async()=>{
-      checkVersion(conversation.id,body.version);const name=text(body.name,120),city=text(body.city||'',120);if(!name||!/[A-Za-zÀ-ÿ]/.test(name))fail(400,'Informe o nome do solicitante, sem usar apenas o telefone.');
+      const checkGuard=()=>{checkVersion(conversation.id,body.version);if(actor===aiActor&&!body.guard?.())fail(409,'Cadastro automático interrompido: o atendimento mudou.');};
+      checkGuard();const name=text(body.name,120),city=text(body.city||'',120);if(!name||!/[A-Za-zÀ-ÿ]/.test(name))fail(400,'Informe o nome do solicitante, sem usar apenas o telefone.');
       const opKey=key(conversation.id,actor,body.requestId);
       let op=get('SELECT * FROM notion_client_operations WHERE operation_key=?',opKey)||get("SELECT * FROM notion_client_operations WHERE conversation_id=? AND state IN ('creating','uncertain') ORDER BY created LIMIT 1",conversation.id);
       if(op?.client_id)return link(conversation,{...body,clientId:op.client_id,confirmed:true},actor);
       if(op){const found=await query(sources.clients,{property:'ID de criação na central',rich_text:{equals:op.id}});if(found.rows.length===1&&found.complete){run("UPDATE notion_client_operations SET state='done',client_id=?,error=NULL WHERE id=?",uuid(found.rows[0].id),op.id);return link(conversation,{...body,clientId:found.rows[0].id,confirmed:true},actor);}if(op.state==='uncertain'||found.rows.length)fail(409,'Uma criação anterior ficou sem confirmação. Confira o Notion e vincule o cadastro existente; não foi criado outro.');}
       const existing=await lookup(conversation);if(!existing.complete||existing.matches.length>1)fail(409,'Há correspondências ambíguas. Busque e confirme o cliente antes de criar outro.');
-      if(existing.matches.length===1)return link(conversation,{...body,clientId:existing.matches[0].id,confirmed:true},actor);
+      if(existing.matches.length===1){if(actor===aiActor&&existing.matches[0].name.normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().trim()!==name.normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().trim())fail(409,'O telefone possui cadastro com outro nome; exige conferência humana.');return link(conversation,{...body,clientId:existing.matches[0].id,confirmed:true},actor);}
       const sameName=await query(sources.clients,{property:'Nome do Cliente',title:{equals:name}});
       if(!sameName.complete||sameName.rows.length)fail(409,'Já há cadastro com esse nome. Busque e confira a associação antes de criar outro.');
+      checkGuard();
       const id=op?.id||randomUUID();if(op)run("UPDATE notion_client_operations SET state='creating',error=NULL WHERE id=?",id);else run("INSERT INTO notion_client_operations(id,conversation_id,operation_key,state,created) VALUES(?,?,?,'creating',?)",id,conversation.id,opKey,Date.now());
       try{
         const created=await api('pages','POST',{parent:{type:'data_source_id',data_source_id:uuid(sources.clients)},properties:{'Nome do Cliente':{title:[{text:{content:name}}]},Telefone:{phone_number:conversation.phone},'Etapa do cadastro':{select:{name:'Inicial'}},'ID de criação na central':rt(id)},children:[{object:'block',type:'paragraph',paragraph:{rich_text:[{type:'text',text:{content:'Cadastro inicial criado a partir de atendimento na Central Domum.'+(city?' Município informado para o serviço: '+city+'.':'')}}]}}],notifications:{mode:'silent'}});
@@ -191,6 +195,20 @@ export function createNotionContext(db,config,transport,options={}){
         return await link(conversation,{...body,clientId,confirmed:true},actor);
       }catch(e){const completed=get('SELECT client_id FROM notion_client_operations WHERE id=?',id);if(!completed?.client_id)run('UPDATE notion_client_operations SET state=?,error=? WHERE id=?',e.uncertain?'uncertain':'error',e.message,id);throw e;}
     })();creating.set(conversation.id,operation);try{return await operation;}finally{creating.delete(conversation.id);}
+  }
+  async function registerFromAI(conversation,intake,guard){
+    if(String(config.AI_AUTO_REGISTER)!=='true'||!guard?.())fail(403,'Cadastro automático não está liberado para este atendimento.');
+    const result=await createClient(conversation,{name:intake.name,city:intake.city,version:context(conversation.id).version,requestId:'initial-client',guard},aiActor);
+    addEvent(conversation.id,{key:'ai-registration:'+conversation.id,kind:'cadastro inicial',summary:'Solicitante informou: '+intake.name+'. Município do serviço: '+intake.city+'. Necessidade: '+intake.service+'.',actor:aiActor.signatureName,source:'IA',qualification:'Informado',messageId:intake.nameMessageId});
+    return result;
+  }
+  function eventChildren(e){
+    if(!e.message_id)return [];
+    const attachment=get('SELECT m.id,m.name,m.state FROM message_media mm JOIN media m ON m.id=mm.media_id WHERE mm.message_id=?',e.message_id);
+    if(!attachment)return [];
+    const origin=config.PUBLIC_ORIGIN||config.RENDER_EXTERNAL_URL||'';if(!/^https:\/\//.test(origin))return [];
+    const privateLink=new URL('/api/media/'+attachment.id+'/content',origin);privateLink.searchParams.set('download','1');
+    return [{object:'block',type:'paragraph',paragraph:{rich_text:[{type:'text',text:{content:'Arquivo recebido: '+attachment.name+'. Acesso restrito à equipe autenticada na central; disponibilidade depende da conclusão do download. Conteúdo ainda não validado. ' }},{type:'text',text:{content:'Abrir arquivo na central',link:{url:privateLink.href}}}]}}];
   }
   function eventProperties(e){
     const assignee=e.request_id?get('SELECT a.name FROM service_requests r LEFT JOIN agents a ON a.id=r.owner_id WHERE r.id=?',e.request_id):get('SELECT a.name FROM conversations c LEFT JOIN agents a ON a.id=c.owner_id WHERE c.id=?',e.conversation_id);
@@ -211,7 +229,8 @@ export function createNotionContext(db,config,transport,options={}){
           if(found.rows.length===1){run("UPDATE service_events SET notion_page_id=?,sync_state='synced',sync_error=NULL WHERE id=?",uuid(found.rows[0].id),e.id);continue;}
           if(e.sync_state==='uncertain'){run("UPDATE service_events SET sync_error='Criação anterior sem confirmação. Verifique o Notion antes de autorizar outra criação.',next_attempt=? WHERE id=?",Date.now()+300000,e.id);continue;}
           run("UPDATE service_events SET sync_state='sending' WHERE id=?",e.id);
-          const result=await api('pages','POST',{parent:{type:'data_source_id',data_source_id:uuid(sources.history)},properties:eventProperties(e),notifications:{mode:'silent'}});
+          const children=eventChildren(e);
+          const result=await api('pages','POST',{parent:{type:'data_source_id',data_source_id:uuid(sources.history)},properties:eventProperties(e),...(children.length?{children}:{}),notifications:{mode:'silent'}});
           run("UPDATE service_events SET notion_page_id=?,sync_state='synced',sync_error=NULL WHERE id=?",uuid(result.id),e.id);
         }catch(error){run('UPDATE service_events SET sync_state=?,sync_error=?,attempts=attempts+1,next_attempt=? WHERE id=?',error.uncertain||e.sync_state==='uncertain'?'uncertain':'error',error.message,Date.now()+Math.max(error.retryAfter||0,Math.min(3600000,60000*2**Math.min(e.attempts,5))),e.id);}
       }
@@ -224,7 +243,7 @@ export function createNotionContext(db,config,transport,options={}){
     if(missing.length)fail(409,'Confira as propriedades das bases: '+missing.join(', '));
     return {...status(),accessVerified:true,verifiedAt:Date.now()};
   }
-  return{status,view:localView,lookup,link,refresh,save,request,updateRequest,control,receivedFile,aiRecord,createClient,processQueue,verify,
+  return{status,view:localView,lookup,link,refresh,save,request,updateRequest,control,receivedFile,aiRecord,createClient,registerFromAI,processQueue,verify,
     close:async()=>{stopped=true;await Promise.allSettled([worker,...refreshing.values(),...creating.values(),serial].filter(Boolean));},
   };
 }
