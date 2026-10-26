@@ -78,9 +78,17 @@ Referência do protocolo: [exemplo oficial da Meta](https://github.com/fbsamples
 
 Mais detalhes da versão anterior estão em [docs/projeto-original.md](docs/projeto-original.md). O código legado do WPPConnect foi removido por solicitação do usuário; o nome do repositório não define o adaptador usado pela nova central.
 
-## Personalização planejada
+## Personalização da central
 
-Após a implantação, alinhar cores, fontes e componentes à identidade visual da Domum Engenharia, conforme pedido do usuário. Usar materiais e referências oficiais da empresa; a personalização visual ainda não foi feita.
+### Identidade Domum e assinatura por sessão
+
+A central usa os logos originais de `DOCUMENTOS-DOMUM/DOMUM-IDENTIDADE VISUAL` no OneDrive: `APENAS NOME PRETO.png`, `APENAS NOME BRANCO.png` e `APENAS LOGO PRETO.png`, copiados sem edição. As cores-base `#EE935C` e `#201E1E` foram extraídas desses arquivos. O laranja é usado como destaque; textos e controles usam tons com contraste adequado.
+
+No login, **Quem está atendendo?** permite escolher a assinatura desta sessão. **Trocar atendente** altera esse nome sem mudar a conta, as demais sessões ou o histórico. Se nenhum nome for escolhido, a assinatura usa o nome cadastrado na conta. Pessoas em dispositivos, perfis ou navegadores diferentes podem usar o mesmo e-mail com nomes distintos. Abas do mesmo perfil compartilham o cookie e, portanto, a sessão. A seleção do nome é uma declaração de quem está atendendo; a autenticação continua sendo a da conta compartilhada. As mensagens guardam o ID da conta e uma cópia do nome usado no envio.
+
+A atualização acrescenta uma coluna à tabela de sessões existente; não recria o banco nem importa conversas. Nomes personalizados duram enquanto a respectiva sessão existir. Arquivos, exclusão de histórico, Notion e IA não são adicionados por esta mudança.
+
+No campo de resposta, **Enter envia** e **Shift+Enter quebra a linha**. O controle **Enter envia** permite desligar o atalho. Essa preferência é salva neste navegador; não sincroniza entre dispositivos. A composição de caracteres e as combinações Ctrl/Alt/Meta não disparam o envio.
 
 ## Informações públicas do aplicativo
 
