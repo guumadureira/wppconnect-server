@@ -40,6 +40,7 @@ let emojiOpen=false,contactQuery='',historyDays=15;
 const expandedHistory=new Set();
 const attachmentDrafts=new Map();
 const contextCache=new Map(),contextOpen=new Set();
+let notionDiagnostic=null;
 let requestedConversation=null,navigationMissing=false;
 const contextKinds={atendimento:'Atendimento geral',orcamento:'Orçamento',andamento:'Andamento',documentos:'Documentação',alteracao:'Alteração ou problema',comercial:'Contato comercial/fornecedor',administrativo:'Administrativo',outro:'Outro assunto'};
 const requestStates=['Em atendimento','Aguardando contato','Aguardando equipe','Resolvida'];
@@ -47,7 +48,10 @@ const contextPath=id=>'/api/conversations/'+encodeURIComponent(id)+'/context';
 async function loadContext(id){const result=await api(contextPath(id));contextCache.set(id,result);return result;}
 function notionConnectionCard(){
   const notion=state.notion;if(!notion)return '';
-  return '<div class="card full"><h2>Histórico integrado com o Notion</h2><p>'+(notion.enabled?'Conexão configurada. Use a verificação de acesso antes do primeiro vínculo.':'O contexto, as solicitações e o histórico já podem ser salvos na central. A administração precisa configurar o acesso próprio ao Notion para sincronizá-los.')+'</p><p>Registros na fila: '+notion.pendingEvents+' · Resultados a conferir: '+notion.uncertainEvents+'.</p><p>As respostas automáticas da IA ainda não estão ativas.</p>'+(state.user.role==='admin'?'<div class="context-actions"><button id="verify-notion" '+(!notion.enabled?'disabled':'')+'>Verificar acesso ao Notion</button><button id="sync-notion" '+(!notion.enabled?'disabled':'')+'>Sincronizar histórico pendente</button></div>':'')+'</div>';
+  const labels={NOTION_TOKEN:'Credencial de acesso',NOTION_CLIENTS_DATA_SOURCE_ID:'Fonte de clientes',NOTION_HISTORY_DATA_SOURCE_ID:'Fonte de histórico'};
+  const pending=[...(notion.activationPending?['Ativar a conexão no Render: NOTION_ENABLED=true.']:[]),...(notion.missing||[]).map(name=>(labels[name]||'Configuração')+' ausente no servidor: '+name+'.')];
+  const diagnosis=notionDiagnostic?'<div class="hint" role="status">'+(notionDiagnostic.error?esc(notionDiagnostic.error):notionDiagnostic.accessVerified?'Acesso às bases principais do Notion conferido.':notionDiagnostic.enabled?'Configuração presente. A confirmação de acesso ainda precisa ser concluída.':'Ainda há configurações pendentes no Render. Confira os itens acima.')+'</div>':'';
+  return '<div class="card full"><h2>Histórico integrado com o Notion</h2><p>'+(notion.enabled?'Conexão configurada. Use a verificação de acesso antes do primeiro vínculo.':'O contexto, as solicitações e o histórico já podem ser salvos na central. A administração precisa configurar o acesso próprio ao Notion para sincronizá-los.')+'</p>'+(state.user.role==='admin'&&pending.length?'<div class="hint"><strong>Para habilitar a integração</strong><ul>'+pending.map(line=>'<li>'+esc(line)+'</li>').join('')+'</ul><p>Salve as configurações no Render, aguarde a atualização concluir e recarregue esta página. Nenhum valor de credencial é exibido aqui.</p></div>':'')+'<p>Registros na fila: '+notion.pendingEvents+' · Resultados a conferir: '+notion.uncertainEvents+'.</p><p>As respostas automáticas da IA ainda não estão ativas.</p>'+(state.user.role==='admin'?'<div class="context-actions"><button id="verify-notion">'+(notion.enabled?'Verificar acesso ao Notion':'Verificar configuração')+'</button><button id="sync-notion" '+(!notion.enabled?'disabled':'')+'>Sincronizar histórico pendente</button></div>'+diagnosis:'')+'</div>';
 }
 function contextPanel(c){
   const cached=contextCache.get(c.id),mode=cached?.mode||(state.contexts||[]).find(item=>item.conversation_id===c.id)?.mode||'human';
@@ -298,7 +302,12 @@ function bindView(){
   const changeControl=mode=>act(async()=>{if(localMode){toast('Entre na central conectada para assumir o atendimento.');return;}const id=active,c=await loadContext(id);contextCache.set(id,await api(contextPath(id)+'/control','POST',{mode,version:c.version,requestId:uid()}));await refresh();});
   $('#take-conversation')?.addEventListener('click',()=>changeControl('human'));
   $('#release-assistance')?.addEventListener('click',()=>changeControl('assisted'));
-  $('#verify-notion')?.addEventListener('click',()=>act(async()=>{await api('/api/notion/verify','POST',{});toast('Acesso às bases principais do Notion conferido.');await refresh();}));
+  $('#verify-notion')?.addEventListener('click',()=>act(async()=>{
+    notionDiagnostic=await api('/api/notion/status');
+    if(!notionDiagnostic.enabled){await refresh();toast('Confira os itens de configuração indicados na tela.');return;}
+    try{notionDiagnostic=await api('/api/notion/verify','POST',{});toast('Acesso às bases principais do Notion conferido.');await refresh();}
+    catch(error){notionDiagnostic={...notionDiagnostic,error:error.message};render();throw error;}
+  }));
   $('#sync-notion')?.addEventListener('click',()=>act(async()=>{const result=await api('/api/notion/sync','POST',{});toast('Sincronização consultada. Pendentes: '+result.pendingEvents+'; a conferir: '+result.uncertainEvents+'.');await refresh();}));
   $('#attach-file')?.addEventListener('click',attachmentForm);
   $('#saved-stickers')?.addEventListener('click',()=>act(stickerLibrary));
@@ -371,7 +380,7 @@ function connectionDiagnostic(status){
   return lines.map(line=>'<p>'+esc(line)+'</p>').join('');
 }
 function auth(setupRequired){
-  replyDrafts.clear();attachmentDrafts.clear();contextCache.clear();contextOpen.clear();emojiOpen=false;
+  replyDrafts.clear();attachmentDrafts.clear();contextCache.clear();contextOpen.clear();notionDiagnostic=null;emojiOpen=false;
   view='inbox';active=null;filter='open';query='';mobileChat=false;outgoingRequest=null;connectionReport=null;historyDays=15;expandedHistory.clear();
   $('#root').innerHTML='<main class="auth"><div class="brand"><img class="brand-wordmark" src="/assets/domum-wordmark-dark.png" alt="Domum Engenharia"></div><p class="auth-kicker">Central de atendimento</p><h1>'+(setupRequired?'Prepare sua central.':'Bem-vindo de volta.')+'</h1><p>'+(setupRequired?'Cadastre o primeiro administrador para começar.':'Entre com sua conta e escolha quem está atendendo.')+'</p><form id="auth-form">'+(setupRequired?'<label class="field">Nome na assinatura<input name="name" maxlength="80" autocomplete="name" required></label>':'')+'<label class="field">E-mail<input name="email" type="email" autocomplete="username" required></label><label class="field">Senha<input name="password" type="password" maxlength="512" autocomplete="'+(setupRequired?'new-password':'current-password')+'" required></label>'+(setupRequired?'<label class="field">Código de instalação<input name="setupToken" type="password" autocomplete="off"><small>Necessário para instalação remota.</small></label>':'')+(!setupRequired?'<label class="field">Quem está atendendo?<input name="signatureName" maxlength="80" autocomplete="name" placeholder="Seu nome para assinar as mensagens"><small>Se deixar vazio, será usado o nome cadastrado na conta.</small></label>':'')+'<button class="primary">'+(setupRequired?'Criar administrador':'Entrar')+'</button></form><p class="fineprint">A assinatura identifica quem está atendendo nesta sessão.</p><p class="fineprint"><a href="/sobre" target="_blank" rel="noopener">Domum Engenharia</a> · <a href="/privacidade" target="_blank" rel="noopener">Privacidade</a> · <a href="/exclusao-de-dados" target="_blank" rel="noopener">Exclusão de dados</a></p></main>';
   $('#auth-form').onsubmit=e=>{e.preventDefault();const button=e.submitter;button.disabled=true;act(async()=>{try{const data=Object.fromEntries(new FormData(e.target));if(setupRequired)await api('/api/setup','POST',data);await api('/api/login','POST',data);await refresh();}finally{button.disabled=false;}});};
