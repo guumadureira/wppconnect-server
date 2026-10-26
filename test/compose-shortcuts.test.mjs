@@ -8,7 +8,7 @@ test('Enter envia uma vez; Shift+Enter, composição e preferência desligada pr
   const code = html.match(/<script>([\s\S]*?)<\/script>/)[1].replace(/boot\(\);\s*$/, '');
   let submits = 0, prevented = 0;
   const button = { disabled: false };
-  const form = { querySelector: () => button, requestSubmit: submitter => { assert.equal(submitter, button); submits++; } };
+  const form = { querySelector: selector => { assert.equal(selector, 'button[type="submit"]'); return button; }, requestSubmit: submitter => { assert.equal(submitter, button); submits++; } };
   const context = vm.createContext({
     location: { protocol: 'https:' },
     document: { querySelector: selector => selector === '#reply-form' ? form : null },

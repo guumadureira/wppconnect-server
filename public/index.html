@@ -10,6 +10,7 @@
 button:hover:not(:disabled){background:#f7eee7}button.primary{background:var(--brand-orange);border-color:var(--brand-orange);color:var(--brand-dark);font-weight:600}button.primary:hover:not(:disabled){background:#e78448}.sidebar{background:var(--brand-dark);color:#efe5dd;gap:25px}.brand{padding:0;letter-spacing:0}.brand-wordmark{display:block;width:168px;max-width:100%;height:auto}.brand-compact{display:none;width:40px;height:40px;object-fit:contain;background:#fff;border-radius:6px}.brand small{color:#d4bba8;letter-spacing:2px;margin-top:10px}.nav{color:#ddd2c9}.nav:hover:not(:disabled),.nav.active{background:#3a2d26;color:#fff}.nav.active:before{background:var(--brand-orange)}.aside-foot{border-color:#51423a;color:#c5b8ad}.aside-foot strong{color:#fff0e5}.avatar{background:#f4e7dc;color:#824322}.eyebrow{color:#8b4a28}.profile strong{display:block}.profile small{max-width:200px;overflow-wrap:anywhere}.profile button{font-size:11px}.profile{flex-wrap:wrap;justify-content:flex-end}.topbar{border-bottom:1px solid var(--line);padding-bottom:18px}.conversation:hover:not(:disabled){background:#fdf7f2}.conversation.active{background:#fff0e5;border-left-color:var(--brand-orange)}.count,.filter.active{background:#ffeadb;color:#84421e}.search,.compose-row textarea{background:#fdfbf9}.chat{background:#fffdfb}.messages{background-image:none;background-color:#f7f3ef}.message{border-color:#e7dfd7}.message.out{background:#ffeadb;border-color:#f2d3be}.message time{color:#786b61}.chat-tools select{background:#f5ece4;color:#75472d}.stat-icon{background:#fff0e6;color:#a45427}.signature{color:#865333}.hint{background:#f7f0e9;color:#6b5442}.hint a{color:#92401d}.team-row small,.card p,.card li{color:#6d6864}.toast{background:var(--brand-dark)}.auth{max-width:440px;border-top:4px solid var(--brand-orange);box-shadow:0 12px 45px #201e1e0a}.auth .brand{justify-content:center;margin-bottom:28px}.auth .brand-wordmark{width:230px}.auth .auth-kicker{color:#895438;text-align:center;letter-spacing:1.4px;text-transform:uppercase;font-size:11px;margin:0 0 22px}.auth .auth-brand-footer{text-align:center;margin-top:24px;color:#6d6864}.card{border-color:var(--line)}
 @media(max-width:1100px){.brand-wordmark{width:140px}.topbar{align-items:flex-start}}@media(max-width:850px){.sidebar .brand-full{display:none}.sidebar .brand-compact{display:block}.sidebar .brand{justify-content:center}}@media(max-width:650px){.topbar{gap:8px}.profile{gap:6px}.profile small{max-width:130px}.profile #change-signature{padding:6px 8px;font-size:10px}.auth .brand-full{display:block}.auth .brand-compact{display:none}.auth{margin:5vh 15px;padding:26px}.sidebar .brand-compact{width:35px;height:35px}.main .eyebrow{max-width:110px}.profile strong{font-size:12px}}
 .enter-preference{display:flex;align-items:center;gap:5px;color:#6d6864;font-size:10px}.enter-preference input{accent-color:#a64217}.composer footer{flex-wrap:wrap}.signature{font-size:11px}
+.emoji-toolbar{margin-bottom:10px}.emoji-toolbar>button{font-size:12px;padding:6px 10px}.emoji-picker{display:grid;grid-template-columns:repeat(auto-fit,minmax(40px,1fr));gap:4px;padding:10px 0;max-width:400px}.emoji-picker[hidden]{display:none}.emoji-picker button{font-size:21px;padding:5px;min-height:40px;min-width:40px;background:transparent;border-color:transparent}.emoji-picker button:hover{background:var(--mint)}.chat-tools{flex-wrap:wrap}.chat-tools button{font-size:11px;padding:6px 9px}.contact-row{flex-wrap:wrap}.contact-row>div{min-width:130px;overflow-wrap:anywhere}.field textarea{width:100%;font:inherit;border:1px solid var(--line);border-radius:7px;padding:10px;resize:vertical}
 </style>
 </head>
 <body>
@@ -24,7 +25,7 @@ try{sendWithEnter=localStorage.getItem('domum-send-with-enter')!=='false';}catch
 function handleReplyKey(event){
   if(!sendWithEnter||event.key!=='Enter'||event.shiftKey||event.ctrlKey||event.altKey||event.metaKey||event.isComposing)return;
   event.preventDefault();
-  const form=$('#reply-form'),button=form?.querySelector('button');
+  const form=$('#reply-form'),button=form?.querySelector('button[type="submit"]');
   if(!sending&&!event.target.disabled&&button&&!button.disabled)form.requestSubmit(button);
 }
 const uid = () => globalThis.crypto?.randomUUID?.() || 'id-'+Date.now()+'-'+Math.random().toString(36).slice(2);
@@ -33,9 +34,26 @@ const formatDate = value => new Date(value).toLocaleString('pt-BR',{day:'2-digit
 const initials = name => name.split(/\s+/).filter(Boolean).slice(0,2).map(s=>s[0]).join('').toUpperCase();
 let state, localMode=location.protocol==='file:', view='inbox', active=null, filter='open', query='', mobileChat=false, sending=false, currentAgent='a1', notified=new Set();
 const storageKey='central-demonstracao-v1';
+const emojiChoices=['😊','😄','👋','👍','🙏','✅','❤️','🎉','🤝','💬','📞','📍','📅','📄','📎','📷','🏠','🏗️','📐','🧱','🛠️','👷','🚧','💡'];
+const replyDrafts=new Map();
+let emojiOpen=false,contactQuery='';
+function insertEmoji(emoji){
+  const reply=$('#reply');
+  if(!reply||reply.disabled||sending)return;
+  const start=reply.selectionStart??reply.value.length,end=reply.selectionEnd??start;
+  if(reply.value.length-(end-start)+emoji.length>(reply.maxLength||3900)){toast('A mensagem atingiu o limite de caracteres.');return;}
+  reply.setRangeText(emoji,start,end,'end');
+  replyDrafts.set(reply.dataset.chatId,reply.value);
+  reply.focus();
+}
+function finishReplyDraft(chatId,text){
+  if((replyDrafts.get(chatId)||'').trim()===text)replyDrafts.delete(chatId);
+  const reply=$('#reply');
+  if(reply?.dataset.chatId===chatId&&reply.value.trim()===text)reply.value='';
+}
 function seed(){
   const n=Date.now(),agents=[{id:'a1',name:'Ana',email:'Exemplo de atendente',role:'admin',active:1},{id:'a2',name:'Bruno',email:'Exemplo de atendente',role:'agent',active:1}];
-  return {mode:'demo',connected:false,externalAlerts:false,agents,user:agents[0],settings:{minutes:30},conversations:[
+  return {mode:'demo',connected:false,externalAlerts:false,agents,user:agents[0],contacts:[],settings:{minutes:30},conversations:[
     {id:'c1',name:'Mariana Costa',phone:'Número fictício',owner_id:'a1',status:'open',pending_since:n-42*60000,last_inbound:n-38*60000,updated:n-38*60000,followup_at:null},
     {id:'c2',name:'Rafael Oliveira',phone:'Número fictício',owner_id:'a2',status:'open',pending_since:n-12*60000,last_inbound:n-12*60000,updated:n-12*60000,followup_at:null},
     {id:'c3',name:'Luiza Almeida',phone:'Número fictício',owner_id:'a1',status:'open',pending_since:null,last_inbound:n-65*60000,updated:n-55*60000,followup_at:n+60*60000}
@@ -47,7 +65,7 @@ function seed(){
     {id:'m5',conversation_id:'c3',direction:'out',body:'Ana: Claro, Luiza! Vou organizar as informações e te retorno.',agent_id:'a1',agent_name:'Ana',created:n-55*60000,status:'simulated'}]};
 }
 function persist(){if(!localMode)return;try{localStorage.setItem(storageKey,JSON.stringify(state));}catch{toast('Seu navegador não permitiu salvar a demonstração.');}}
-function loadDemo(){try{const saved=JSON.parse(localStorage.getItem(storageKey));if(saved?.agents?.length&&saved?.conversations&&saved?.messages&&saved?.settings)state=saved;else state=seed();}catch{state=seed();}currentAgent=state.user?.id||state.agents[0].id;state.user=state.agents.find(a=>a.id===currentAgent)||state.agents[0];active=state.conversations[0]?.id;render();}
+function loadDemo(){try{const saved=JSON.parse(localStorage.getItem(storageKey));if(saved?.agents?.length&&saved?.conversations&&saved?.messages&&saved?.settings)state=saved;else state=seed();}catch{state=seed();}state.contacts=state.contacts||[];currentAgent=state.user?.id||state.agents[0].id;state.user=state.agents.find(a=>a.id===currentAgent)||state.agents[0];active=state.conversations[0]?.id;render();}
 async function api(path,method='GET',data){
   const response=await fetch(path,{method,credentials:'same-origin',headers:method!=='GET'?{'content-type':'application/json'}:{},body:data?JSON.stringify(data):undefined});
   if(!response.headers.get('content-type')?.includes('application/json'))throw new Error('O endereço aberto não respondeu como uma central de atendimento.');
@@ -69,9 +87,10 @@ function badge(c){
   return '<span class="badge '+(isOverdue(c)?'orange':'')+'">'+esc(waiting(c)||(c.followup_at?'Retorno agendado':'Em dia'))+'</span>';
 }
 function render(){
-  const t={inbox:['Seu atendimento, em dia.','Cada conversa com um responsável. Cada cliente com atenção.'],reminders:['Nenhum retorno esquecido.','Acompanhe os clientes que precisam de atenção.'],team:['Uma equipe. Cada um com seu nome.','Configure os atendentes e as assinaturas das mensagens.'],connection:['Conexão com o WhatsApp.','Acompanhe o recebimento e as etapas para ativar a integração.']}[view];
+  const draft=$('#reply');if(draft?.dataset.chatId)replyDrafts.set(draft.dataset.chatId,draft.value);
+  const t={contacts:['Contatos da Domum.','Organize os clientes e abra a conversa certa.'],inbox:['Seu atendimento, em dia.','Cada conversa com um responsável. Cada cliente com atenção.'],reminders:['Nenhum retorno esquecido.','Acompanhe os clientes que precisam de atenção.'],team:['Uma equipe. Cada um com seu nome.','Configure os atendentes e as assinaturas das mensagens.'],connection:['Conexão com o WhatsApp.','Acompanhe o recebimento e as etapas para ativar a integração.']}[view];
   const n=state.conversations.filter(c=>c.status==='open').length;
-  $('#root').innerHTML='<div class="app"><aside class="sidebar"><div class="brand"><span class="brand-full"><img class="brand-wordmark" src="/assets/domum-wordmark-light.png" alt="Domum Engenharia"><small>CENTRAL DE ATENDIMENTO</small></span><img class="brand-compact" src="/assets/domum-symbol.png" alt="Domum Engenharia"></div><nav>'+navItem('inbox','▤','Conversas')+navItem('reminders','◷','Lembretes')+navItem('team','♧','Equipe')+navItem('connection','⚭','Conexão')+'</nav><div class="aside-foot"><strong>Domum Engenharia</strong>Clareza em cada atendimento.</div></aside><main class="main"><header class="topbar"><span class="eyebrow">CENTRAL DE ATENDIMENTO</span><div class="profile"><span class="avatar small">'+esc(initials(signedName()))+'</span><div>'+(localMode?'<small>Simular atendente</small><select id="demo-agent" aria-label="Simular atendente">'+state.agents.map(a=>'<option value="'+esc(a.id)+'" '+(a.id===state.user.id?'selected':'')+'>'+esc(a.name)+'</option>').join('')+'</select>':'<strong>'+esc(signedName())+'</strong><small>'+esc(state.user.email)+'</small>')+'</div>'+(!localMode?'<button id="change-signature">Trocar atendente</button><button id="logout">Sair</button>':'')+'</div></header><div class="intro"><div><h1>'+esc(t[0])+'</h1><p>'+esc(t[1])+'</p></div>'+(state.mode==='demo'?'<button id="simulate">＋ Simular cliente</button>':'')+'</div>'+(state.mode==='demo'?'<div class="notice"><span>Demonstração · Nenhuma mensagem é enviada ao WhatsApp.</span><button id="view-connection">Ver conexão</button></div>':'<div class="notice"><span>Modo real · A conexão precisa ser validada com um contato de teste autorizado.</span></div>')+'<div class="stats"><div class="stat"><div><strong>'+n+'</strong><span>Conversas abertas</span></div><span class="stat-icon">▤</span></div><div class="stat"><div><strong>'+state.conversations.filter(isOverdue).length+'</strong><span>Precisam de atenção</span></div><span class="stat-icon orange">◷</span></div><div class="stat"><div><strong>'+state.conversations.filter(c=>c.status==='open'&&c.followup_at).length+'</strong><span>Retornos agendados</span></div><span class="stat-icon">↗</span></div></div><section id="view-content">'+(view==='inbox'?inbox():view==='team'?team():view==='reminders'?reminders():connection())+'</section></main></div>';
+  $('#root').innerHTML='<div class="app"><aside class="sidebar"><div class="brand"><span class="brand-full"><img class="brand-wordmark" src="/assets/domum-wordmark-light.png" alt="Domum Engenharia"><small>CENTRAL DE ATENDIMENTO</small></span><img class="brand-compact" src="/assets/domum-symbol.png" alt="Domum Engenharia"></div><nav>'+navItem('inbox','▤','Conversas')+navItem('contacts','☏','Contatos')+navItem('reminders','◷','Lembretes')+navItem('team','♧','Equipe')+navItem('connection','⚭','Conexão')+'</nav><div class="aside-foot"><strong>Domum Engenharia</strong>Clareza em cada atendimento.</div></aside><main class="main"><header class="topbar"><span class="eyebrow">CENTRAL DE ATENDIMENTO</span><div class="profile"><span class="avatar small">'+esc(initials(signedName()))+'</span><div>'+(localMode?'<small>Simular atendente</small><select id="demo-agent" aria-label="Simular atendente">'+state.agents.map(a=>'<option value="'+esc(a.id)+'" '+(a.id===state.user.id?'selected':'')+'>'+esc(a.name)+'</option>').join('')+'</select>':'<strong>'+esc(signedName())+'</strong><small>'+esc(state.user.email)+'</small>')+'</div>'+(!localMode?'<button id="change-signature">Trocar atendente</button><button id="logout">Sair</button>':'')+'</div></header><div class="intro"><div><h1>'+esc(t[0])+'</h1><p>'+esc(t[1])+'</p></div>'+(state.mode==='demo'?'<button id="simulate">＋ Simular cliente</button>':'')+'</div>'+(state.mode==='demo'?'<div class="notice"><span>Demonstração · Nenhuma mensagem é enviada ao WhatsApp.</span><button id="view-connection">Ver conexão</button></div>':'<div class="notice"><span>Modo real · A conexão precisa ser validada com um contato de teste autorizado.</span></div>')+'<div class="stats"><div class="stat"><div><strong>'+n+'</strong><span>Conversas abertas</span></div><span class="stat-icon">▤</span></div><div class="stat"><div><strong>'+state.conversations.filter(isOverdue).length+'</strong><span>Precisam de atenção</span></div><span class="stat-icon orange">◷</span></div><div class="stat"><div><strong>'+state.conversations.filter(c=>c.status==='open'&&c.followup_at).length+'</strong><span>Retornos agendados</span></div><span class="stat-icon">↗</span></div></div><section id="view-content">'+(view==='inbox'?inbox():view==='contacts'?contactsView():view==='team'?team():view==='reminders'?reminders():connection())+'</section></main></div>';
   document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>{view=b.dataset.view;render();});
   $('#view-connection')?.addEventListener('click',()=>{view='connection';render();});
   $('#demo-agent')?.addEventListener('change',e=>{state.user=state.agents.find(a=>a.id===e.target.value);persist();render();});
@@ -91,7 +110,35 @@ function inbox(){
 }
 function chat(c){
   const messages=state.messages.filter(m=>m.conversation_id===c.id);
-  return '<header class="chat-head"><button class="mobile-back" id="back" aria-label="Voltar para conversas">←</button><span class="avatar">'+esc(initials(c.name))+'</span><div class="contact"><strong>'+esc(c.name)+'</strong><span>'+esc(c.phone)+'</span></div><button id="followup">Agendar retorno</button><button id="close-chat">'+(c.status==='open'?'Concluir':'Reabrir')+'</button></header><div class="chat-tools"><label>Responsável <select id="owner" aria-label="Responsável"><option value="">Sem responsável</option>'+state.agents.map(a=>'<option value="'+esc(a.id)+'" '+(a.id===c.owner_id?'selected':'')+'>'+esc(a.name)+'</option>').join('')+'</select></label><span>'+badge(c)+'</span></div>'+(c.followup_at?'<div class="return-strip"><span>Retorno: '+formatDate(c.followup_at)+'</span><button id="remove-followup">Remover retorno</button></div>':'')+'<div class="messages" role="log" aria-label="Mensagens">'+messages.map(m=>'<div class="message '+(m.direction==='out'?'out ':'')+esc(m.status)+'">'+esc(m.body)+'<time>'+formatTime(m.created)+' · '+esc(({simulated:'simulado',received:'recebida',sent:'enviada',delivered:'entregue',read:'lida',failed:'falhou',unknown:'envio não confirmado',sending:'enviando'})[m.status]||m.status)+'</time></div>').join('')+'</div><form id="reply-form" class="composer"><div class="signature">Assinando como '+esc(signedName())+':</div><div class="compose-row"><textarea id="reply" aria-label="Sua mensagem" placeholder="Escreva sua mensagem..." maxlength="3900" '+(c.status==='closed'?'disabled':'')+'></textarea><button class="primary" '+(c.status==='closed'||sending?'disabled':'')+'>Enviar</button></div><footer><label class="enter-preference"><input id="enter-sends" type="checkbox" '+(sendWithEnter?'checked':'')+'> Enter envia · Shift+Enter quebra linha</label><span>'+esc(state.mode==='demo'?'Envio simulado':'Janela de resposta: 24 horas')+'</span></footer></form>';
+  return '<header class="chat-head"><button class="mobile-back" id="back" aria-label="Voltar para conversas">←</button><span class="avatar">'+esc(initials(c.name))+'</span><div class="contact"><strong>'+esc(c.name)+'</strong><span>'+esc(c.phone)+'</span></div><button id="followup">Agendar retorno</button><button id="close-chat">'+(c.status==='open'?'Concluir':'Reabrir')+'</button></header><div class="chat-tools"><label>Responsável <select id="owner" aria-label="Responsável"><option value="">Sem responsável</option>'+state.agents.map(a=>'<option value="'+esc(a.id)+'" '+(a.id===c.owner_id?'selected':'')+'>'+esc(a.name)+'</option>').join('')+'</select></label><button id="save-contact">'+((state.contacts||[]).some(contact=>contact.phone===c.phone)?'Editar contato':'Salvar contato')+'</button><span>'+badge(c)+'</span></div>'+(c.followup_at?'<div class="return-strip"><span>Retorno: '+formatDate(c.followup_at)+'</span><button id="remove-followup">Remover retorno</button></div>':'')+'<div class="messages" role="log" aria-label="Mensagens">'+messages.map(m=>'<div class="message '+(m.direction==='out'?'out ':'')+esc(m.status)+'">'+esc(m.body)+'<time>'+formatTime(m.created)+' · '+esc(({simulated:'simulado',received:'recebida',sent:'enviada',delivered:'entregue',read:'lida',failed:'falhou',unknown:'envio não confirmado',sending:'enviando'})[m.status]||m.status)+'</time></div>').join('')+'</div><form id="reply-form" class="composer"><div class="signature">Assinando como '+esc(signedName())+':</div><div class="emoji-toolbar"><button id="emoji-toggle" type="button" aria-label="Adicionar emoji" aria-controls="emoji-picker" aria-expanded="'+emojiOpen+'" '+(c.status==='closed'||sending?'disabled':'')+'>☺ Emojis</button><div id="emoji-picker" class="emoji-picker" aria-label="Emojis" '+(emojiOpen?'':'hidden')+'>'+emojiChoices.map(emoji=>'<button type="button" data-emoji="'+esc(emoji)+'" aria-label="Inserir '+esc(emoji)+'">'+emoji+'</button>').join('')+'</div></div><div class="compose-row"><textarea id="reply" data-chat-id="'+esc(c.id)+'" aria-label="Sua mensagem" placeholder="Escreva sua mensagem..." maxlength="3900" '+(c.status==='closed'?'disabled':'')+'>'+esc(replyDrafts.get(c.id)||'')+'</textarea><button type="submit" class="primary" '+(c.status==='closed'||sending?'disabled':'')+'>Enviar</button></div><footer><label class="enter-preference"><input id="enter-sends" type="checkbox" '+(sendWithEnter?'checked':'')+'> Enter envia · Shift+Enter quebra linha</label><span>'+esc(state.mode==='demo'?'Envio simulado':'Janela de resposta: 24 horas')+'</span></footer></form>';
+}
+function contactsView(){
+  const contacts=(state.contacts||[]).filter(contact=>(contact.name+' '+contact.phone+' '+contact.email).toLowerCase().includes(contactQuery.toLowerCase()));
+  return '<div class="card"><div class="section-head"><h2>Contatos</h2><button id="add-contact" class="primary">Novo contato</button></div><input id="contact-search" class="search" aria-label="Buscar contato" placeholder="Buscar nome, telefone ou e-mail" value="'+esc(contactQuery)+'">'+contacts.map(contact=>'<div class="team-row contact-row"><span class="avatar">'+esc(initials(contact.name))+'</span><div><strong>'+esc(contact.name)+'</strong><small>+'+esc(contact.phone)+'</small>'+(contact.email?'<small>'+esc(contact.email)+'</small>':'')+'</div><button data-edit-contact="'+esc(contact.id)+'">Editar</button><button data-contact-chat="'+esc(contact.id)+'">Abrir conversa</button></div>').join('')+(contacts.length?'':'<p class="muted" style="margin-top:20px">Nenhum contato encontrado. Cadastre um novo ou salve o contato de uma conversa.</p>')+'<div class="hint">Contatos salvos nesta central. O cadastro não envia mensagens nem altera a agenda do celular.</div></div>';
+}
+function contactForm(contact,conversation){
+  const name=contact?.name||conversation?.name||'',phone=contact?.phone||conversation?.phone||'';
+  modal(contact?'Editar contato':'Salvar contato','<label class="field">Nome<input name="name" value="'+esc(name)+'" maxlength="120" required></label><label class="field">Telefone com país e DDD<input name="phone" type="tel" value="'+esc(phone)+'" placeholder="+55 44 99999-9999" '+(contact?'readonly':'required')+'></label><label class="field">E-mail<input name="email" type="email" value="'+esc(contact?.email||'')+'" maxlength="254"></label><label class="field">Observações<textarea name="notes" rows="3" maxlength="2000">'+esc(contact?.notes||'')+'</textarea></label>','Salvar contato',async data=>{
+    const values=Object.fromEntries(data);
+    if(localMode){
+      const normalized=String(values.phone||'').replace(/[\s().-]/g,'').replace(/^\+/,'');
+      if(!/^[1-9]\d{7,14}$/.test(normalized))throw new Error('Informe o telefone com código do país e DDD.');
+      if((state.contacts||[]).some(item=>item.phone===normalized&&item.id!==contact?.id))throw new Error('Esse telefone já está salvo.');
+      state.contacts=state.contacts||[];
+      if(contact)Object.assign(contact,values,{phone:normalized,updated:Date.now()});
+      else state.contacts.push({...values,id:uid(),phone:normalized,created:Date.now(),updated:Date.now()});
+      for(const chat of state.conversations)if(chat.phone===normalized)chat.name=values.name;
+      persist();render();
+    }else{await api('/api/contacts'+(contact?'/'+encodeURIComponent(contact.id):''),contact?'PATCH':'POST',values);await refresh();}
+    toast('Contato salvo.');
+  });
+}
+async function openContact(id){
+  const contact=(state.contacts||[]).find(item=>item.id===id);if(!contact)return;
+  let conversation;
+  if(localMode){conversation=state.conversations.find(item=>item.phone===contact.phone);if(!conversation){conversation={id:uid(),name:contact.name,phone:contact.phone,status:'open',updated:Date.now(),pending_since:null,last_inbound:null,followup_at:null,owner_id:null};state.conversations.unshift(conversation);}persist();}
+  else{conversation=(await api('/api/conversations','POST',{contactId:id})).conversation;state=await api('/api/state');}
+  active=conversation.id;view='inbox';filter=conversation.status==='closed'?'closed':'open';mobileChat=true;render();
 }
 function team(){
   const admin=state.user.role==='admin';
@@ -134,6 +181,12 @@ function simulate(){
 let outgoingRequest=null;
 let connectionReport=null;
 function bindView(){
+  $('#add-contact')?.addEventListener('click',()=>contactForm());
+  $('#contact-search')?.addEventListener('input',event=>{contactQuery=event.target.value;render();const input=$('#contact-search');input.focus();input.setSelectionRange(contactQuery.length,contactQuery.length);});
+  document.querySelectorAll('[data-edit-contact]').forEach(button=>button.onclick=()=>contactForm((state.contacts||[]).find(contact=>contact.id===button.dataset.editContact)));
+  document.querySelectorAll('[data-contact-chat]').forEach(button=>button.onclick=()=>act(()=>openContact(button.dataset.contactChat)));
+  $('#emoji-toggle')?.addEventListener('click',()=>{emojiOpen=!emojiOpen;$('#emoji-picker').hidden=!emojiOpen;$('#emoji-toggle').setAttribute('aria-expanded',String(emojiOpen));});
+  document.querySelectorAll('[data-emoji]').forEach(button=>button.onclick=()=>insertEmoji(button.dataset.emoji));
   $('#reply')?.addEventListener('keydown',handleReplyKey);
   $('#enter-sends')?.addEventListener('change',event=>{sendWithEnter=event.target.checked;try{localStorage.setItem('domum-send-with-enter',String(sendWithEnter));}catch{toast('A preferência vale nesta página; o navegador não permitiu salvá-la.');}});
   document.querySelectorAll('[data-chat],[data-open-chat]').forEach(b=>b.onclick=()=>{active=b.dataset.chat||b.dataset.openChat;mobileChat=true;view='inbox';render();});
@@ -141,6 +194,7 @@ function bindView(){
   $('#search')?.addEventListener('input',e=>{query=e.target.value;render();const el=$('#search');el.focus();el.setSelectionRange(query.length,query.length);});
   $('#back')?.addEventListener('click',()=>{mobileChat=false;render();});
   const c=state.conversations.find(c=>c.id===active);
+  $('#save-contact')?.addEventListener('click',()=>contactForm((state.contacts||[]).find(contact=>contact.phone===c.phone),c));
   $('#owner')?.addEventListener('change',e=>act(()=>patchChat(c.id,{owner_id:e.target.value||null})));
   $('#close-chat')?.addEventListener('click',()=>act(()=>patchChat(c.id,{status:c.status==='open'?'closed':'open'})));
   $('#remove-followup')?.addEventListener('click',()=>act(()=>patchChat(c.id,{followup_at:null})));
@@ -157,9 +211,9 @@ function bindView(){
           const result=await api('/api/conversations/'+encodeURIComponent(c.id)+'/messages','POST',{text,requestId:outgoingRequest.id});
           if(!['sent','simulated','delivered','read'].includes(result.message.status))throw new Error('Envio anterior não confirmado ou recusado. Confira o histórico antes de tentar novamente.');
         }
-        outgoingRequest=null;$('#reply').value='';sending=false;
+        outgoingRequest=null;finishReplyDraft(c.id,text);sending=false;
         if(localMode)render();else await refresh();
-      }finally{sending=false;const button=$('#reply-form button');if(button)button.disabled=c.status!=='open';}
+      }finally{sending=false;const button=$('#reply-form button[type="submit"]');if(button)button.disabled=state.conversations.find(chat=>chat.id===active)?.status!=='open';}
     });
   });
   $('#add-agent')?.addEventListener('click',()=>agentForm());
@@ -190,6 +244,7 @@ function connectionDiagnostic(status){
   return lines.map(line=>'<p>'+esc(line)+'</p>').join('');
 }
 function auth(setupRequired){
+  replyDrafts.clear();emojiOpen=false;
   view='inbox';active=null;filter='open';query='';mobileChat=false;outgoingRequest=null;connectionReport=null;
   $('#root').innerHTML='<main class="auth"><div class="brand"><img class="brand-wordmark" src="/assets/domum-wordmark-dark.png" alt="Domum Engenharia"></div><p class="auth-kicker">Central de atendimento</p><h1>'+(setupRequired?'Prepare sua central.':'Bem-vindo de volta.')+'</h1><p>'+(setupRequired?'Cadastre o primeiro administrador para começar.':'Entre com sua conta e escolha quem está atendendo.')+'</p><form id="auth-form">'+(setupRequired?'<label class="field">Nome na assinatura<input name="name" maxlength="80" autocomplete="name" required></label>':'')+'<label class="field">E-mail<input name="email" type="email" autocomplete="username" required></label><label class="field">Senha<input name="password" type="password" maxlength="512" autocomplete="'+(setupRequired?'new-password':'current-password')+'" required></label>'+(setupRequired?'<label class="field">Código de instalação<input name="setupToken" type="password" autocomplete="off"><small>Necessário para instalação remota.</small></label>':'')+(!setupRequired?'<label class="field">Quem está atendendo?<input name="signatureName" maxlength="80" autocomplete="name" placeholder="Seu nome para assinar as mensagens"><small>Se deixar vazio, será usado o nome cadastrado na conta.</small></label>':'')+'<button class="primary">'+(setupRequired?'Criar administrador':'Entrar')+'</button></form><p class="fineprint">A assinatura identifica quem está atendendo nesta sessão.</p><p class="fineprint"><a href="/sobre" target="_blank" rel="noopener">Domum Engenharia</a> · <a href="/privacidade" target="_blank" rel="noopener">Privacidade</a> · <a href="/exclusao-de-dados" target="_blank" rel="noopener">Exclusão de dados</a></p></main>';
   $('#auth-form').onsubmit=e=>{e.preventDefault();const button=e.submitter;button.disabled=true;act(async()=>{try{const data=Object.fromEntries(new FormData(e.target));if(setupRequired)await api('/api/setup','POST',data);await api('/api/login','POST',data);await refresh();}finally{button.disabled=false;}});};
