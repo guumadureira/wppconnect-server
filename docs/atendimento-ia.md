@@ -37,7 +37,29 @@ O servidor reúne mensagens próximas antes de responder, cancela trabalhos aind
 
 Pedidos por pessoa, anexos que precisam de leitura, avaliações técnicas, compromissos comerciais e falhas ou limites de execução encaminham o atendimento para a equipe. A lista sinaliza **Pronto para assumir**; o painel mantém motivo, resumo, pendências e próximo passo. O modelo pode coletar brevemente serviço e município, e solicitar matrícula **ou** cadastro imobiliário se pertinente. Não há OCR, áudio/transcrição, aprovação de orçamento/contrato nem execução genérica de comandos. Imagens/documentos recebidos podem gerar uma confirmação de recebimento e o encaminhamento à equipe, sem enviar o conteúdo binário ao modelo. Áudios e outros formatos não interpretados continuam com encaminhamento humano direto.
 
-As mensagens ao contato são em nome da Domum, sem fingir a identidade de um atendente. Se perguntarem sobre automação, a instrução é explicar honestamente o uso de IA e oferecer uma pessoa. A autoria interna fica explícita como **Domum · IA**. O nome de uma pessoa e os dois-pontos em negrito permanecem uma melhoria separada para mensagens humanas.
+As mensagens ao contato são em nome da Domum, sem fingir a identidade de um atendente. Se perguntarem sobre automação, a instrução é explicar honestamente o uso de IA e oferecer uma pessoa, sem encerrar por essa pergunta isolada. A autoria interna fica explícita como **Domum · IA**. O nome de uma pessoa e os dois-pontos em negrito permanecem uma melhoria separada para mensagens humanas.
+
+## Linguagem e continuidade
+
+As orientações ficam em `ai-attendance-guide.mjs`, separado dos controles de acesso, consumo e envio. São instruções explícitas de atendimento da Domum; o modelo da central não recebe automaticamente a memória do ChatGPT, e-mails ou conversas de outros clientes.
+
+O guia orienta a responder à dúvida antes de coletar dados, escrever de forma simples e acolhedora, perguntar somente o que ajuda no próximo passo e retirar pendências já respondidas. Não exige pergunta em toda mensagem, saudação repetida nem entrevista cômodo a cômodo. Quando a pessoa quer desenvolver a ideia, a IA pode continuar dentro dos limites de orientação geral. Cadastro concluído, arquivo recebido ou pedido de resumo não impõem encerramento. Decisão técnica, leitura de arquivo, compromisso de preço/prazo, pedido humano ou próxima ação que dependa da equipe continuam exigindo passagem para uma pessoa.
+
+O contexto identifica separadamente se há cadastro vinculado e qual é a etapa de cadastro. `Inicial` não comprova contratação nem existência de projeto. Os relatos e interpretações mantêm origem e qualificação; a IA não deve transformar seu resumo anterior em confirmação da equipe.
+
+As 24 mensagens enviadas ao modelo seguem a ordem de registro na central, a mesma usada pelo controle da última mensagem recebida. Isso evita inverter uma resposta e uma nova mensagem do contato quando o horário da Meta tem precisão de segundos e o servidor registra milissegundos. Os horários originais das mensagens no banco são preservados.
+
+### Conferência pelo telefone após publicar
+
+No contato autorizado do piloto, use **Permitir assistência** caso a equipe tenha assumido e envie uma mensagem nova. Não é preciso recriar o cadastro. Confira:
+
+1. **Continuidade:** “Quero continuar explicando minha ideia.” A resposta deve acolher e usar o que já foi dito, sem encaminhar só por haver dados mínimos.
+2. **Orientação:** “O que preciso fazer agora?” Deve explicar o próximo passo possível, sem apenas devolver outra pergunta nem prometer aprovação ou prazo.
+3. **Resumo:** “Pode resumir o que já contei?” Deve preservar os detalhes conhecidos sem repetir perguntas resolvidas nem anunciar um contrato inexistente.
+4. **Documento indisponível:** “Não tenho a matrícula agora.” Deve permitir seguir, sem cobrança repetida do documento. Um arquivo enviado não foi lido pela IA.
+5. **Passagem humana:** “Quero falar com uma pessoa.” Deve pausar a automação e deixar motivo e contexto para a equipe. Mensagem posterior não a reativa sozinha.
+
+Os testes de transporte falso conferem continuidade, vínculo único e preservação de contexto; não comprovam qualidade de linguagem. A avaliação do tom ocorre na conversa real, dentro do teto já autorizado. Não executar avaliações pagas adicionais sem contabilizar o orçamento restante do mesmo piloto.
 
 ## Contexto e Notion
 
@@ -51,9 +73,9 @@ Os testes usam chave fictícia, números fictícios, bancos temporários e trans
 
 Referências oficiais: [modelo e preços](https://developers.openai.com/api/docs/models/gpt-5.4-mini), [saídas estruturadas](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses).
 
-## Diagnóstico real e orçamento deste piloto
+## Diagnóstico inicial e orçamento deste piloto
 
-A chave foi aceita na consulta de disponibilidade do modelo (HTTP 200), mas a geração retornou HTTP 429 com credit_balance_exhausted e insufficient_quota. Nenhuma resposta foi gerada, nenhum WhatsApp foi enviado e nenhum registro foi criado no Notion por essas verificações. O contador local retém uma reserva conservadora, que não comprova cobrança.
+No diagnóstico inicial, a chave foi aceita na consulta de disponibilidade do modelo (HTTP 200), mas a geração retornou HTTP 429 com credit_balance_exhausted e insufficient_quota. Nenhuma resposta foi gerada, nenhum WhatsApp foi enviado e nenhum registro foi criado no Notion por essas verificações. Esse resultado histórico não descreve necessariamente o estado atual do piloto. O contador local retém uma reserva conservadora, que não comprova cobrança.
 
 Para respeitar os US$ 5 totais autorizados, a configuração privada separa até US$ 0,05 para o diagnóstico local e até US$ 4,95 para o teste pelo telefone (AI_TOTAL_BUDGET_USD=4.95 no Render, mantendo AI_MONTHLY_BUDGET_USD=5). Não há renovação automática desse teto total. A autorização não foi usada para comprar créditos ou habilitar recarga automática.
 

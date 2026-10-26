@@ -146,6 +146,26 @@ test('nome inventado, contato comercial e cadastro divergente não criam cliente
   }
 });
 
+test('cadastro inicial mantém diálogo e contexto entre turnos sem nova página nem encaminhamento obrigatório',async t=>{
+  const f=notionPilot(t),timestamp=Math.floor(Date.now()/1000)-1;
+  const c=f.incoming('Meu nome é Cliente Exemplo. Preciso de projeto residencial em Maringá.',phone,{timestamp});await f.app.ai.process();
+  f.incoming('Quero continuar conversando. A cozinha será integrada à área gourmet.',phone,{timestamp});await f.app.ai.process();
+  f.incoming('Pode resumir o que já contei?',phone,{timestamp});await f.app.ai.process();await f.app.customerContext.processQueue(true);
+  assert.equal(f.clientPosts,1);assert.equal(f.app.customerContext.view(c.id).mode,'assisted');assert.equal(f.app.ai.status().handoffs.length,0);
+  const requests=f.calls.filter(c=>c.url.includes('api.openai.com'));
+  assert.equal(requests.length,3);
+  assert.deepEqual(JSON.parse(requests.at(-1).body.input[0].content).messages.map(m=>m.from==='contato'?'in':'out'),['in','out','in','out','in']);
+  assert.equal(JSON.parse(requests[0].body.input[0].content).context.clientLinked,false);
+  const input=JSON.parse(requests.at(-1).body.input[0].content);
+  assert.equal(input.context.clientLinked,true);assert.equal(input.context.notion.client.registration,'Inicial');
+  assert.ok(input.messages.some(m=>m.text.includes('cozinha será integrada')));
+  assert.equal(input.messages.at(-1).text,'Pode resumir o que já contei?');
+  assert.ok(input.context.history.some(e=>e.source==='IA'&&e.qualification==='Interpretado'));
+  assert.ok(f.rows[f.history].length>0);
+  assert.equal(f.app.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE direction='out'").get().n,3);
+  // Transporte simulado valida continuidade e contexto, não avalia o tom de um modelo real.
+});
+
 test('telefone e nome exatos reaproveitam cadastro único sem criar outra página',async t=>{
   const f=notionPilot(t,{existing:'Cliente Exemplo'});const c=f.incoming('Meu nome é Cliente Exemplo. Preciso de projeto residencial em Maringá.');await f.app.ai.process();assert.equal(f.clientPosts,0);assert.equal(f.app.customerContext.view(c.id).client_name,'Cliente Exemplo',f.registrationError);assert.equal(f.app.customerContext.view(c.id).history.find(e=>e.kind==='cliente').source,'IA');
 });
