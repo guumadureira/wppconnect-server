@@ -20,7 +20,7 @@ cp .env.example .env
 npm start
 ```
 
-Abra `http://localhost:3000`. No primeiro acesso, cadastre o administrador com nome, e-mail e senha de no mínimo 12 caracteres. O campo código de instalação pode ficar vazio apenas na instalação local padrão. Depois, entre em **Equipe** e crie o acesso de cada atendente. Cada pessoa responde com seu próprio login; o servidor determina a assinatura e não aceita um nome de remetente informado pelo navegador.
+Abra `http://localhost:3000`. No primeiro acesso, cadastre o administrador com nome, e-mail e senha preenchida, sem tamanho mínimo ou exigência de composição. O campo código de instalação pode ficar vazio apenas na instalação local padrão. Depois, entre em **Equipe** e crie o acesso de cada atendente. Cada pessoa responde com seu próprio login; o servidor determina a assinatura e não aceita um nome de remetente informado pelo navegador.
 
 O modo padrão é `WHATSAPP_MODE=demo`. Mesmo com contas reais na central, os envios continuam simulados. Use **Simular cliente** para criar conversas fictícias e revisar o fluxo.
 
