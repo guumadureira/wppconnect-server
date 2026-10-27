@@ -23,7 +23,7 @@ test('clientes recorrentes exigem vínculo ao trabalho correto e não presumem g
 test('candidatos a emprego e contatos diversos não viram oportunidades de engenharia',()=>{
   assert.match(attendanceInstructions,/procura emprego/);
   assert.match(attendanceInstructions,/intake.ready=false, supplier=null/);
-  assert.match(attendanceInstructions,/não afirme que existe seleção aberta/);
+  assert.match(attendanceInstructions,/(?:não afirme|sem afirmar) que existe seleção aberta/);
 });
 test('falhas e correções não alteram regras globais sem revisão',()=>{
   assert.match(attendanceInstructions,/sinal de possível falha/);
