@@ -11,7 +11,7 @@ const rt=value=>({rich_text:[{text:{content:String(value||'').slice(0,2000)}}]})
 const kinds=['atendimento','orcamento','andamento','documentos','alteracao','comercial','administrativo','outro'];
 const states=['Em atendimento','Aguardando contato','Aguardando equipe','Resolvida'];
 const qualifications=['Informado','Extraído','Interpretado','Confirmado','Corrigido'];
-const eventTypes={contexto:'Contexto atualizado',solicitacao:'Solicitação registrada',situacao:'Situação da solicitação atualizada',cliente:'Cliente vinculado',humano:'Atendimento assumido',assistencia:'Assistência liberada',arquivo:'Arquivo recebido'};
+const eventTypes={comercial:'Oferta comercial recebida',contexto:'Contexto atualizado',solicitacao:'Solicitação registrada',situacao:'Situação da solicitação atualizada',cliente:'Cliente vinculado',humano:'Atendimento assumido',assistencia:'Assistência liberada',arquivo:'Arquivo recebido'};
 
 export function createNotionContext(db,config,transport,options={}){
   const aiActor=Object.freeze({id:'domum-ai-registration',signatureName:'Domum · IA',role:'internal_ai'});
@@ -42,7 +42,7 @@ export function createNotionContext(db,config,transport,options={}){
     const old=get('SELECT id FROM service_events WHERE event_key=?',data.key);if(old)return old.id;
     const c=context(id),eventId=randomUUID();
     const clientId=data.clientId===undefined?c.client_id:data.clientId,workId=data.workId===undefined?c.work_id:data.workId;
-    run('INSERT INTO service_events(id,event_key,conversation_id,request_id,client_id,work_id,kind,summary,missing,next_step,status,qualification,actor,source,message_id,created,sync_state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',eventId,data.key,id,data.requestId||null,clientId,workId,data.kind,data.summary,data.missing??c.missing,data.nextStep??c.next_step,data.status||'Em atendimento',data.qualification||'Informado',data.actor||'Sistema',data.source||'Sistema',data.messageId||null,Date.now(),clientId?'pending':'waiting_link');
+    run('INSERT INTO service_events(id,event_key,conversation_id,request_id,client_id,work_id,kind,summary,missing,next_step,status,qualification,actor,source,message_id,created,sync_state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',eventId,data.key,id,data.requestId||null,clientId,workId,data.kind,data.summary,data.missing??c.missing,data.nextStep??c.next_step,data.status||'Em atendimento',data.qualification||'Informado',data.actor||'Sistema',data.source||'Sistema',data.messageId||null,Date.now(),data.kind==='comercial'?'separate':clientId?'pending':'waiting_link');
     return eventId;
   }
   function localView(id){
@@ -167,9 +167,9 @@ export function createNotionContext(db,config,transport,options={}){
       if(handoff){
         const existing=get("SELECT id FROM service_requests WHERE conversation_id=? AND owner_id IS NULL AND status='Aguardando equipe'",id);
         requestId=existing?.id||randomUUID();
-        if(!existing)run('INSERT INTO service_requests(id,conversation_id,client_id,work_id,title,kind,status,summary,missing,next_step,owner_id,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',requestId,id,c.client_id,c.work_id,'Atendimento encaminhado pela IA',result.kind,'Aguardando equipe',result.summary,result.missing,result.nextStep,null,Date.now(),Date.now());
+        if(!existing)run('INSERT INTO service_requests(id,conversation_id,client_id,work_id,title,kind,status,summary,missing,next_step,owner_id,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',requestId,id,result.kind==='comercial'?null:c.client_id,result.kind==='comercial'?null:c.work_id,'Atendimento encaminhado pela IA',result.kind,'Aguardando equipe',result.summary,result.missing,result.nextStep,null,Date.now(),Date.now());
       }
-      addEvent(id,{key:eventKey,kind:'contexto',requestId,summary:result.summary,missing:result.missing,nextStep:result.nextStep,status:handoff?'Aguardando equipe':'Em atendimento',actor:'Domum · IA',source:'IA',qualification:'Interpretado'});
+      addEvent(id,{key:eventKey,kind:result.kind==='comercial'?'comercial':'contexto',requestId,...(result.kind==='comercial'?{clientId:null,workId:null}:{}),summary:result.summary,missing:result.missing,nextStep:result.nextStep,status:handoff?'Aguardando equipe':'Em atendimento',actor:'Domum · IA',source:'IA',qualification:'Interpretado'});
     };if(db.isTransaction)record();else transaction(record);
   }
   const creating=new Map();
