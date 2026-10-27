@@ -17,6 +17,15 @@ function setup(){
   return {context,root,reply,events};
 }
 
+test('áudio tem player sem autoplay e assinatura humana é negrito com conteúdo escapado',()=>{
+  const {context,root}=setup();
+  const player=vm.runInContext("attachmentMarkup({id:'00000000-0000-4000-8000-000000000001',kind:'audio',name:'<voz>.ogg',state:'ready',size:150})",context);
+  assert.match(player,/<audio controls preload="none"/);assert.doesNotMatch(player,/autoplay/);assert.match(player,/download="&lt;voz&gt;.ogg"/);
+  const message=vm.runInContext("messageText({direction:'out',agent_name:'Ana',body:'*Ana:* Olá <cliente>'})",context);
+  assert.equal(message,'<strong>Ana:</strong> Olá &lt;cliente&gt;');
+  vm.runInContext('render()',context);assert.match(root.innerHTML,/id="new-conversation"/);assert.match(root.innerHTML,/Últimos 7 dias/);assert.equal(vm.runInContext('historyDays',context),7);
+});
+
 test('anexos são escapados, prévia fica na conversa certa e renderizar não envia arquivos',()=>{
   const {context,root}=setup();
   vm.runInContext(`

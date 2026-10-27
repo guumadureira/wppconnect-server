@@ -42,13 +42,13 @@ test('o mesmo login mantém nomes independentes por sessão e preserva autoria d
   const send = (cookie, requestId) => request('/api/conversations/' + chat.body.id + '/messages', 'POST', { text: 'Olá', requestId, agentName: 'Nome não autorizado pelo envio' }, cookie);
   const first = await send(a.cookie, 'session-message-a');
   const second = await send(b.cookie, 'session-message-b');
-  assert.equal(first.body.message.body, 'Gustavo: Olá');
-  assert.equal(second.body.message.body, 'Jonatan: Olá');
+  assert.equal(first.body.message.body, '*Gustavo:* Olá');
+  assert.equal(second.body.message.body, '*Jonatan:* Olá');
   assert.equal(first.body.message.agent_id, second.body.message.agent_id);
   assert.equal((await request('/api/session/signature', 'PATCH', { name: '  Ana  ' }, a.cookie)).status, 200);
   assert.equal((await request('/api/session', 'GET', undefined, a.cookie)).body.user.signatureName, 'Ana');
   assert.equal((await request('/api/session', 'GET', undefined, b.cookie)).body.user.signatureName, 'Jonatan');
-  assert.equal((await send(a.cookie, 'session-message-c')).body.message.body, 'Ana: Olá');
+  assert.equal((await send(a.cookie, 'session-message-c')).body.message.body, '*Ana:* Olá');
   const state = (await request('/api/state', 'GET', undefined, a.cookie)).body;
   assert.equal(state.messages.find(message => message.request_id === 'session-message-a').agent_name, 'Gustavo');
   assert.equal(state.agents[0].name, account.name);

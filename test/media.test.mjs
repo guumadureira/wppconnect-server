@@ -69,7 +69,7 @@ test('prepara e envia anexos por ID com assinatura e idempotência, preservando 
   assert.equal(uploads,0);assert.equal((await f.state()).messages.length,1);
   const results=await Promise.all([f.send(image.id,'same-request','Olá'),f.send(image.id,'same-request','Olá')]);
   assert.ok(results.every(r=>[200,201].includes(r.status)));assert.equal(uploads,1);assert.equal(sends,1);
-  assert.deepEqual(sent[0].image,{id:'uploaded-1',caption:'Atendente teste: Olá'});assert.equal(sent[0].type,'image');
+  assert.deepEqual(sent[0].image,{id:'uploaded-1',caption:'*Atendente teste:* Olá'});assert.equal(sent[0].type,'image');
   assert.ok(f.app.db.prepare('SELECT pending_since FROM conversations').get().pending_since);
   const document=(await f.upload('document','application/pdf',pdf,'../../Contrato "teste".pdf')).body.attachment;
   assert.equal((await f.send(document.id,'document-request')).status,201);

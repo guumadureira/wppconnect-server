@@ -1,22 +1,28 @@
 import { randomUUID, createHash, timingSafeEqual } from 'node:crypto';
+import {opusDuration} from './audio-format.mjs';
 
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
-const limits = { image: 5_000_000, document: 20_000_000, sticker: 500_000 };
+const limits = { image: 5_000_000, document: 20_000_000, sticker: 500_000, audio:16_000_000 };
 const documents = new Set(['application/pdf','text/plain','application/msword','application/vnd.ms-excel','application/vnd.ms-powerpoint','application/vnd.openxmlformats-officedocument.wordprocessingml.document','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','application/vnd.openxmlformats-officedocument.presentationml.presentation']);
 const filename = value => (String(value || 'arquivo').split(/[\\/]/).at(-1).replace(/[\x00-\x1f\x7f<>:"|?*]/g, '_').slice(0,150) || 'arquivo');
-const mimeType = value => String(value || '').split(';')[0].trim().toLowerCase();
+const mimeType = value => {const mime=String(value || '').split(';')[0].trim().toLowerCase();return ({'audio/mp3':'audio/mpeg','audio/x-m4a':'audio/mp4','audio/x-aac':'audio/aac'})[mime]||mime;};
 function mediaName(value,mime) {
-  const extension=({'image/jpeg':'jpg','image/png':'png','image/webp':'webp','application/pdf':'pdf','text/plain':'txt','application/msword':'doc','application/vnd.ms-excel':'xls','application/vnd.ms-powerpoint':'ppt','application/vnd.openxmlformats-officedocument.wordprocessingml.document':'docx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':'xlsx','application/vnd.openxmlformats-officedocument.presentationml.presentation':'pptx'})[mime];
+  const extension=({'audio/ogg':'ogg','audio/mpeg':'mp3','audio/mp4':'m4a','audio/aac':'aac','audio/amr':'amr','image/jpeg':'jpg','image/png':'png','image/webp':'webp','application/pdf':'pdf','text/plain':'txt','application/msword':'doc','application/vnd.ms-excel':'xls','application/vnd.ms-powerpoint':'ppt','application/vnd.openxmlformats-officedocument.wordprocessingml.document':'docx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':'xlsx','application/vnd.openxmlformats-officedocument.presentationml.presentation':'pptx'})[mime];
   const name=filename(value);
   return extension&&!name.toLowerCase().endsWith('.'+extension)?name+'.'+extension:name;
 }
 function validateType(kind, mime) {
-  if (!limits[kind] || !(kind === 'image' ? ['image/jpeg','image/png'].includes(mime) : kind === 'sticker' ? mime === 'image/webp' : documents.has(mime))) fail(415,'Formato não suportado. Use JPEG/PNG, documento PDF/Office/TXT ou figurinha WebP.');
+  if (!limits[kind] || !(kind === 'audio'?['audio/ogg','audio/mpeg','audio/mp4','audio/aac','audio/amr'].includes(mime):kind === 'image' ? ['image/jpeg','image/png'].includes(mime) : kind === 'sticker' ? mime === 'image/webp' : documents.has(mime))) fail(415,'Formato não suportado. Use imagem, documento, figurinha WebP ou áudio OGG/Opus, MP3, M4A, AAC ou AMR.');
 }
 function validateBytes(kind, mime, data) {
   validateType(kind,mime);
   if (!data.length || data.length > limits[kind]) fail(413,'Arquivo vazio ou acima do limite permitido. Imagens: 5 MB; documentos: 20 MB; figurinhas: até 500 KB.');
   let valid = true;
+  if(mime==='audio/ogg'){try{opusDuration(data,86400);}catch{fail(415,'Use áudio OGG com codec Opus válido.');}}
+  if(mime==='audio/mpeg')valid=data.subarray(0,3).toString()==='ID3'||(data[0]===255&&(data[1]&0xe0)===0xe0);
+  if(mime==='audio/aac')valid=data[0]===255&&(data[1]&0xf6)===0xf0;
+  if(mime==='audio/mp4')valid=data.length>12&&data.toString('ascii',4,8)==='ftyp';
+  if(mime==='audio/amr')valid=data.subarray(0,6).toString()==='#!AMR\n'||data.subarray(0,9).toString()==='#!AMR-WB\n';
   if (mime === 'image/png') valid = data.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]));
   if (mime === 'image/jpeg') valid = data[0] === 255 && data[1] === 216 && data[2] === 255;
   if (mime === 'application/pdf') valid = data.subarray(0,5).toString() === '%PDF-';
@@ -71,7 +77,8 @@ export function createMediaStore(db,config,transport,live) {
   }
   function messages(rows) {
     const attachments=new Map(all('SELECT mm.message_id,m.'+columns.split(',').join(',m.')+' FROM message_media mm JOIN media m ON m.id=mm.media_id').map(row=>[row.message_id,view(row)]));
-    return rows.map(row=>attachments.has(row.id)?{...row,attachment:attachments.get(row.id)}:row);
+    const transcripts=new Map(get("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_transcriptions'")?all("SELECT message_id,text FROM ai_transcriptions WHERE state='done'").map(r=>[r.message_id,r.text]):[]);
+    return rows.map(row=>({...row,...(attachments.has(row.id)?{attachment:attachments.get(row.id)}:{}),...(transcripts.has(row.id)?{transcription:transcripts.get(row.id)}:{})}));
   }
   async function upload(req,params) {
     const kind=params.get('kind'),mime=mimeType(req.headers['content-type']);validateType(kind,mime);
@@ -130,7 +137,7 @@ export function createMediaStore(db,config,transport,live) {
     const response=await transport(`https://graph.facebook.com/${config.META_GRAPH_VERSION}/${config.WHATSAPP_PHONE_NUMBER_ID}/media`,{method:'POST',headers:{authorization:`Bearer ${config.WHATSAPP_ACCESS_TOKEN}`},body:form,signal:AbortSignal.timeout(30000)});
     const result=await response.json();if(!response.ok||!result.id)fail(502,'O WhatsApp recusou o carregamento do anexo. A conversa continua pendente.');
     const part={id:String(result.id)};
-    if(row.kind!=='sticker')part.caption=caption;
+    if(!['sticker','audio'].includes(row.kind))part.caption=caption;
     if(row.kind==='document')part.filename=row.name;
     return {type:row.kind,[row.kind]:part};
   }

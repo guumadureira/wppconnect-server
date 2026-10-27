@@ -62,18 +62,18 @@ test('contas, assinaturas, recebimento e controle de pendências', async t => {
   await t.test('assinatura usa a sessão, ignora identidade enviada pelo navegador e evita duplicidade',async()=>{
     const path='/api/conversations/'+chatId+'/messages';
     const result=await request(path,'POST',{text:'Olá, vou ajudar!',requestId:'request-1',agentId,agentName:'Falso'},adminCookie);
-    assert.equal(result.status,201);assert.equal(result.body.message.body,'Ana: Olá, vou ajudar!');assert.equal(result.body.message.agent_id,adminId);
-    assert.equal(lastPayload.text.body,'Ana: Olá, vou ajudar!');assert.equal(sendCount,1);
+    assert.equal(result.status,201);assert.equal(result.body.message.body,'*Ana:* Olá, vou ajudar!');assert.equal(result.body.message.agent_id,adminId);
+    assert.equal(lastPayload.text.body,'*Ana:* Olá, vou ajudar!');assert.equal(sendCount,1);
     assert.equal((await request(path,'POST',{text:'Outra',requestId:'request-1'},adminCookie)).status,200);assert.equal(sendCount,1);
     assert.equal((await request(path,'POST',{text:'Outra',requestId:'request-1'},agentCookie)).status,409);
     const s=(await request('/api/state','GET',null,adminCookie)).body;assert.equal(s.conversations[0].pending_since,null);
     assert.equal((await request('/api/agents/'+adminId,'PATCH',{name:'Ana Souza'},adminCookie)).status,200);
-    const previous=(await request('/api/state','GET',null,adminCookie)).body.messages.find(m=>m.request_id==='request-1');assert.equal(previous.body,'Ana: Olá, vou ajudar!');
+    const previous=(await request('/api/state','GET',null,adminCookie)).body.messages.find(m=>m.request_id==='request-1');assert.equal(previous.body,'*Ana:* Olá, vou ajudar!');
   });
   await t.test('recusas e resultado desconhecido preservam a pendência',async()=>{
     await webhook([{id:'in-2',from:'5511999990000',timestamp:Math.floor(Date.now()/1000),type:'text',text:{body:'Mais uma dúvida'}}]);
     sendMode='fail';assert.equal((await request('/api/conversations/'+chatId+'/messages','POST',{text:'Retorno',requestId:'request-fail'},agentCookie)).status,502);
-    let s=(await request('/api/state','GET',null,adminCookie)).body;assert.ok(s.conversations[0].pending_since);assert.equal(s.messages.at(-1).status,'failed');assert.equal(lastPayload.text.body,'Bruno Silva: Retorno');
+    let s=(await request('/api/state','GET',null,adminCookie)).body;assert.ok(s.conversations[0].pending_since);assert.equal(s.messages.at(-1).status,'failed');assert.equal(lastPayload.text.body,'*Bruno Silva:* Retorno');
     sendMode='timeout';assert.equal((await request('/api/conversations/'+chatId+'/messages','POST',{text:'Retorno',requestId:'request-timeout'},agentCookie)).status,502);
     s=(await request('/api/state','GET',null,adminCookie)).body;assert.ok(s.conversations[0].pending_since);assert.equal(s.messages.at(-1).status,'unknown');
     sendMode='ok';
