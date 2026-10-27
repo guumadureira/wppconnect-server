@@ -79,3 +79,24 @@ test('período mantém filtros de status e busca, e não remove a seleção Toda
   assert.equal(vm.runInContext('active', context), null);
   assert.equal(vm.runInContext('mobileChat', context), false);
 });
+
+test('atalhos laterais incluem pendências antigas e separam atenção de retornos sem alterar dados',()=>{
+  const {context,root}=setup();
+  vm.runInContext("state.messages.filter(m=>m.conversation_id==='c1').forEach(m=>m.created=Date.now()-20*86400000);query='inexistente';filter='closed';view='contacts';",context);
+  const before=vm.runInContext('JSON.stringify(state)',context);
+  vm.runInContext("focusInbox('attention')",context);
+  assert.match(root.innerHTML,/data-chat="c1"/);assert.doesNotMatch(root.innerHTML,/data-chat="c2"|data-chat="c3"/);
+  assert.equal(vm.runInContext('historyDays',context),0);
+  vm.runInContext("focusInbox('followups')",context);
+  assert.match(root.innerHTML,/data-chat="c3"/);assert.doesNotMatch(root.innerHTML,/data-chat="c1"|data-chat="c2"/);
+  vm.runInContext("focusInbox('all')",context);
+  for(const id of ['c1','c2','c3'])assert.ok(root.innerHTML.includes('data-chat="'+id+'"'));
+  assert.equal(vm.runInContext('JSON.stringify(state)',context),before);
+});
+
+test('abrir um contato fora do atalho seleciona a conversa pedida, sem trocar pelo primeiro resultado',()=>{
+  const {context,root}=setup();
+  vm.runInContext("focusInbox('attention');chooseConversation('c3')",context);
+  assert.equal(vm.runInContext('active',context),'c3');assert.equal(vm.runInContext('inboxFocus',context),'all');
+  assert.match(root.innerHTML,/data-conversation-id="c3"/);
+});

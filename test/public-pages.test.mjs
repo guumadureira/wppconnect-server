@@ -56,4 +56,9 @@ test('logos oficiais da Domum são servidos como imagens sem abrir arquivos arbi
     assert.ok(png.length > 1000);
   }
   assert.equal((await fetch(base + '/assets/server.mjs')).status, 404);
+  const stylesheet=await fetch(base+'/assets/domum-interface.css');
+  assert.equal(stylesheet.status,200);assert.match(stylesheet.headers.get('content-type'),/^text\/css/);
+  const font=await fetch(base+'/assets/manrope-latin.woff2');
+  assert.equal(font.status,200);assert.equal(font.headers.get('content-type'),'font/woff2');
+  assert.equal(Buffer.from(await font.arrayBuffer()).subarray(0,4).toString(),'wOF2');
 });
