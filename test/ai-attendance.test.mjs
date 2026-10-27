@@ -181,3 +181,13 @@ test('tomada humana durante cadastro impede novas escritas e conserva resultado 
     if(stage==='pauseDuringCreate')assert.ok(f.app.db.prepare('SELECT client_id FROM notion_client_operations').get().client_id);
   }
 });
+
+test('falha de atualização do Notion permite orientação geral sem apresentar consulta antiga como atual',async t=>{
+  const f=notionPilot(t),c=f.incoming('Meu nome é Cliente Exemplo. Preciso de projeto residencial em Maringá.');await f.app.ai.process();
+  f.app.customerContext.refresh=async()=>{f.app.db.prepare('UPDATE conversation_context SET last_error=? WHERE conversation_id=?').run('Consulta indisponível',c.id);throw Error('private remote details');};
+  f.incoming('Podemos conversar sobre a minha ideia?');await f.app.ai.process();
+  const req=f.calls.filter(r=>r.url.includes('api.openai.com')).at(-1),input=JSON.parse(req.body.input[0].content);
+  assert.equal(input.context.notionUnavailable,true);assert.equal(input.context.notion,null);assert.deepEqual(input.context.notionHistory,[]);
+  assert.equal(f.app.customerContext.view(c.id).mode,'assisted');assert.equal(f.app.ai.status().handoffs.length,0);
+  assert.ok(!req.body.input[0].content.includes('private remote details'));
+});

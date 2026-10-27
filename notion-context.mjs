@@ -159,7 +159,7 @@ export function createNotionContext(db,config,transport,options={}){
     if(!['human','assisted'].includes(body.mode))fail(400,'Modo de atendimento inválido.');
     transaction(()=>{checkVersion(conversation.id,body.version);run('UPDATE conversation_context SET mode=?,version=version+1,updated=? WHERE conversation_id=?',body.mode,Date.now(),conversation.id);if(body.mode==='human')run('UPDATE conversations SET owner_id=? WHERE id=?',actor.id,conversation.id);addEvent(conversation.id,{key:eventKey,kind:body.mode==='human'?'humano':'assistencia',summary:body.mode==='human'?'Atendimento assumido por '+actor.signatureName:'Assistência liberada; a execução depende da configuração e dos telefones autorizados no piloto de IA.',actor:actor.signatureName,source:'Atendente',qualification:'Confirmado'});});return localView(conversation.id);
   }
-  function receivedFile(conversationId,messageId,kind){addEvent(conversationId,{key:'file:'+messageId,kind:'arquivo',summary:({image:'Imagem recebida',document:'Documento recebido',sticker:'Figurinha recebida'})[kind]||'Arquivo recebido',source:'Cliente',actor:'Contato do WhatsApp',messageId});}
+  function receivedFile(conversationId,messageId,kind){addEvent(conversationId,{key:'file:'+messageId,kind:'arquivo',summary:({image:'Imagem recebida',document:'Documento recebido',sticker:'Figurinha recebida',audio:'Áudio recebido'})[kind]||'Arquivo recebido',source:'Cliente',actor:'Contato do WhatsApp',messageId});}
   function aiRecord(id,jobId,result,handoff=false){
     const eventKey='ai:'+jobId;if(get('SELECT id FROM service_events WHERE event_key=?',eventKey))return;
     const record=()=>{

@@ -1,15 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { attendanceInstructions as instructions } from './ai-attendance-guide.mjs';
+import {createAudioTranscription} from './audio-transcription.mjs';
+import {knowledgeFor} from './attendance-knowledge.mjs';
 
 // Fixed model and standard text rates verified on 2026-10-26. No model tools.
 const MODEL='gpt-5.4-mini-2026-03-17',INPUT_USD=0.75/1e6,OUTPUT_USD=4.5/1e6,MAX_OUTPUT=1800;
 const kinds=['atendimento','orcamento','andamento','documentos','alteracao','comercial','administrativo','outro'];
 const intakeSchema={type:'object',additionalProperties:false,required:['ready','name','city','service','nameMessageId','cityMessageId','serviceMessageId'],properties:{ready:{type:'boolean'},...Object.fromEntries(['name','city','service','nameMessageId','cityMessageId','serviceMessageId'].map(k=>[k,{type:'string'}]))}};
-const schema={type:'object',additionalProperties:false,required:['reply','summary','missing','nextStep','kind','handoff','reason','intake'],properties:{reply:{type:'string'},summary:{type:'string'},missing:{type:'string'},nextStep:{type:'string'},kind:{type:'string',enum:kinds},handoff:{type:'boolean'},reason:{type:'string'},intake:intakeSchema}};
+const schema={type:'object',additionalProperties:false,required:['reply','summary','missing','nextStep','kind','handoff','reason','intake'],properties:{reply:{type:'string',maxLength:700},summary:{type:'string'},missing:{type:'string'},nextStep:{type:'string'},kind:{type:'string',enum:kinds},handoff:{type:'boolean'},reason:{type:'string'},intake:intakeSchema}};
 const fail=(status,message)=>{throw Object.assign(new Error(message),{status});};
 const month=()=>new Date().toISOString().slice(0,7);
 
-export function createAIAttendance(db,config,transport,context,{ready=false,debounceMs=2500}={}){
+export function createAIAttendance(db,config,transport,context,{ready=false,debounceMs=2500,media}={}){
   const get=(sql,...a)=>db.prepare(sql).get(...a),all=(sql,...a)=>db.prepare(sql).all(...a),run=(sql,...a)=>db.prepare(sql).run(...a);
   db.exec(`CREATE TABLE IF NOT EXISTS ai_jobs(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL REFERENCES conversations(id),message_id TEXT UNIQUE NOT NULL REFERENCES messages(id),epoch INTEGER NOT NULL,state TEXT NOT NULL,created INTEGER NOT NULL,updated INTEGER NOT NULL,result TEXT,error TEXT,cost_usd REAL NOT NULL DEFAULT 0,billing_month TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS ai_control(conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),epoch INTEGER NOT NULL DEFAULT 0,handoff TEXT NOT NULL DEFAULT '');`);
@@ -21,9 +23,10 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
   const totalBudget=Number(config.AI_TOTAL_BUDGET_USD)||0;
   const enabled=()=>String(config.AI_ENABLED).trim()==='true'&&!!String(config.OPENAI_API_KEY||'').trim()&&phones.length>0&&budget>0&&budget<=100&&(config.AI_TOTAL_BUDGET_USD===undefined||(totalBudget>0&&totalBudget<=100))&&ready;
   const ensure=id=>{run('INSERT OR IGNORE INTO ai_control(conversation_id) VALUES(?)',id);return get('SELECT * FROM ai_control WHERE conversation_id=?',id);};
-  const spent=()=>get('SELECT COALESCE(SUM(cost_usd),0) AS n FROM ai_jobs WHERE billing_month=?',month()).n;
-  const totalSpent=()=>get('SELECT COALESCE(SUM(cost_usd),0) AS n FROM ai_jobs').n;
-  function status(){return{enabled:enabled(),model:MODEL,credentialPresent:!!String(config.OPENAI_API_KEY||'').trim(),activationPending:String(config.AI_ENABLED).trim()!=='true',pilotConfigured:phones.length>0,budgetUsd:budget>0&&budget<=100?budget:0,usedUsd:spent(),totalBudgetUsd:totalBudget,usedTotalUsd:totalSpent(),autoRegistration:String(config.AI_AUTO_REGISTER)==='true',whatsappReady:ready,pending:get("SELECT COUNT(*) AS n FROM ai_jobs WHERE state IN ('pending','running')").n,handoffs:all("SELECT a.conversation_id,c.name,a.handoff FROM ai_control a JOIN conversations c ON c.id=a.conversation_id WHERE a.handoff<>'' ORDER BY c.updated DESC LIMIT 30")};}
+  const transcriber=createAudioTranscription(db,config,transport,media,cost=>spent()+cost<=budget&&(!totalBudget||totalSpent()+cost<=totalBudget));
+  const spent=()=>get('SELECT COALESCE(SUM(cost_usd),0) AS n FROM ai_jobs WHERE billing_month=?',month()).n+transcriber.cost(month());
+  const totalSpent=()=>get('SELECT COALESCE(SUM(cost_usd),0) AS n FROM ai_jobs').n+transcriber.cost();
+  function status(){return{enabled:enabled(),model:MODEL,credentialPresent:!!String(config.OPENAI_API_KEY||'').trim(),activationPending:String(config.AI_ENABLED).trim()!=='true',pilotConfigured:phones.length>0,budgetUsd:budget>0&&budget<=100?budget:0,usedUsd:spent(),totalBudgetUsd:totalBudget,usedTotalUsd:totalSpent(),audioEnabled:String(config.AI_AUDIO_ENABLED)==='true',autoRegistration:String(config.AI_AUTO_REGISTER)==='true',whatsappReady:ready,pending:get("SELECT COUNT(*) AS n FROM ai_jobs WHERE state IN ('pending','running')").n,handoffs:all("SELECT a.conversation_id,c.name,a.handoff FROM ai_control a JOIN conversations c ON c.id=a.conversation_id WHERE a.handoff<>'' ORDER BY c.updated DESC LIMIT 30")};}
   function pause(id,reason=''){
     ensure(id);run('UPDATE ai_control SET epoch=epoch+1,handoff=? WHERE conversation_id=?',reason,id);
     run("UPDATE ai_jobs SET state='cancelled',updated=? WHERE conversation_id=? AND state='pending'",Date.now(),id);
@@ -41,7 +44,7 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
     if(fresh&&!conversation.owner_id){run("UPDATE conversation_context SET mode='assisted',version=version+1 WHERE conversation_id=?",conversation.id);}
     else if(c.mode!=='assisted')return;
     const control=ensure(conversation.id);
-    if(!['text','image','document'].includes(type)){handoff(conversation.id,message.id,'Arquivo recebido: precisa de conferência humana.');return;}
+    if(!['text','image','document'].includes(type)&&!(type==='audio'&&String(config.AI_AUDIO_ENABLED)==='true')){handoff(conversation.id,message.id,'Arquivo recebido: precisa de conferência humana.');return;}
     if(/(?:falar|conversar|atendido|atendida).{0,35}(?:pessoa|humano|humana|gustavo|atendente)|(?:quero|preciso).{0,20}(?:humano|humana)/i.test(message.body)){handoff(conversation.id,message.id,'Contato solicitou atendimento humano.');return;}
     run("UPDATE ai_jobs SET state='cancelled',updated=? WHERE conversation_id=? AND state='pending'",Date.now(),conversation.id);
     run("INSERT OR IGNORE INTO ai_jobs(id,conversation_id,message_id,epoch,state,created,updated,billing_month) VALUES(?,?,?,?,'pending',?,?,?)",randomUUID(),conversation.id,message.id,control.epoch,Date.now(),Date.now(),month());
@@ -58,7 +61,7 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
     if(!result||Array.isArray(result)||!kinds.includes(result.kind)||typeof result.handoff!=='boolean')throw Error('Invalid output');
     if(!result.intake||Array.isArray(result.intake)||typeof result.intake.ready!=='boolean')throw Error('Invalid intake');
     for(const field of ['name','city','service','nameMessageId','cityMessageId','serviceMessageId'])if(typeof result.intake[field]!=='string'||result.intake[field].length>120||/\0/.test(result.intake[field]))throw Error('Invalid intake field');
-    for(const [k,max]of Object.entries({reply:1800,summary:1800,missing:1000,nextStep:1000,reason:500}))if(typeof result[k]!=='string'||result[k].length>max||/\0/.test(result[k]))throw Error('Invalid output');
+    for(const [k,max]of Object.entries({reply:700,summary:1800,missing:1000,nextStep:1000,reason:500}))if(typeof result[k]!=='string'||result[k].length>max||/\0/.test(result[k]))throw Error('Invalid output');
     if(/https?:\/\/|www\.|sk-proj-|Bearer /i.test(result.reply))throw Error('Unsafe output');
     if(/R\$|\b(?:custa|custará|garantimos)\b|\b(?:prazo|entrega).{0,35}\d/i.test(result.reply))throw Error('Unapproved commitment');
     if(!result.reply.trim()&&!result.handoff)throw Error('Empty output');return result;
@@ -86,16 +89,22 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
     const conversation=get('SELECT * FROM conversations WHERE id=?',job.conversation_id);
     try{
       let ctx=context.view(conversation.id);
-      if(ctx.client_id){await context.refresh(conversation);ctx=context.view(conversation.id);if(ctx.last_error)throw Error('Context unavailable');}
+      if(ctx.client_id){try{await context.refresh(conversation);}catch{/* General attendance can continue without presenting stale operational status as current. */}ctx=context.view(conversation.id);}
       job.contextVersion=ctx.version;
       if(!valid(job)){run("UPDATE ai_jobs SET state='cancelled' WHERE id=?",job.id);return;}
       // Meta timestamps have second precision; replies have milliseconds. Use the
       // persisted arrival order (also used by last_received) to preserve turn order.
       const history=all("SELECT id,direction,body,agent_name FROM messages WHERE conversation_id=? AND (direction='in' OR status IN ('sent','delivered','read')) ORDER BY rowid DESC LIMIT 24",conversation.id).reverse();
+      const transcripts=new Map();
+      if(String(config.AI_AUDIO_ENABLED)==='true')for(const message of history){
+        if(message.direction!=='in'||!get("SELECT 1 FROM message_media mm JOIN media m ON m.id=mm.media_id WHERE mm.message_id=? AND m.kind='audio'",message.id))continue;
+        let text;try{text=await transcriber.read(message.id,()=>valid(job));}catch(e){if(message.id===job.message_id)throw e;continue;}if(!valid(job))return;transcripts.set(message.id,text);
+        if(message.id===job.message_id&&/(?:quero|preciso).{0,30}(?:humano|humana|atendente)|(?:falar|conversar).{0,25}(?:pessoa|gustavo|atendente)/i.test(text)){handoff(conversation.id,job.id,'Contato solicitou atendimento humano por áudio.');return;}
+      }
       const attachments=all('SELECT m.kind,m.name,m.state,mm.message_id FROM message_media mm JOIN media m ON m.id=mm.media_id JOIN messages x ON x.id=mm.message_id WHERE x.conversation_id=? ORDER BY x.rowid DESC LIMIT 5',conversation.id);
       // Only the allowlisted operational subset from the Notion adapter, never a raw page.
-      const snapshot=ctx.snapshot?{client:{name:ctx.snapshot.client?.name,stage:ctx.snapshot.client?.stage,registration:ctx.snapshot.client?.registration},sections:Object.fromEntries(Object.entries(ctx.snapshot.sections||{}).map(([k,v])=>[k,{configured:v.configured,complete:v.complete,error:!!v.error,rows:(v.rows||[]).slice(0,8).map(r=>({title:r.title,status:r.status,due:r.due,next:r.next,contract:r.contract}))}]))}:null;
-      const input=JSON.stringify({currentDate:new Date().toISOString(),registrationAvailable:String(config.AI_AUTO_REGISTER)==='true'&&context.status().enabled,attachments,context:{clientLinked:!!ctx.client_id,summary:ctx.summary,missing:ctx.missing,nextStep:ctx.next_step,notion:snapshot,history:ctx.history.slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next_step,source:e.source,qualification:e.qualification,at:e.created})),notionHistory:ctx.snapshot?.history?.rows?.slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next,source:e.source,qualification:e.qualification,at:e.at}))},messages:history.map(m=>({id:m.id,from:m.direction==='in'?'contato':m.agent_name||'equipe',text:m.body.slice(0,2000)}))});
+      const snapshot=ctx.snapshot&&!ctx.last_error?{client:{name:ctx.snapshot.client?.name,stage:ctx.snapshot.client?.stage,registration:ctx.snapshot.client?.registration},sections:Object.fromEntries(Object.entries(ctx.snapshot.sections||{}).map(([k,v])=>[k,{configured:v.configured,complete:v.complete,error:!!v.error,rows:(v.rows||[]).slice(0,8).map(r=>({title:r.title,status:r.status,due:r.due,next:r.next,contract:r.contract}))}]))}:null;
+      const input=JSON.stringify({currentDate:new Date().toISOString(),referenceGuide:knowledgeFor(history.slice(-8).map(m=>transcripts.get(m.id)||m.body).join(' ')),registrationAvailable:String(config.AI_AUTO_REGISTER)==='true'&&context.status().enabled,attachments,context:{notionUnavailable:!!ctx.last_error,clientLinked:!!ctx.client_id,summary:ctx.summary,missing:ctx.missing,nextStep:ctx.next_step,notion:snapshot,history:ctx.history.slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next_step,source:e.source,qualification:e.qualification,at:e.created})),notionHistory:(!ctx.last_error&&ctx.snapshot?.history?.rows||[]).slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next,source:e.source,qualification:e.qualification,at:e.at}))},messages:history.map(m=>({id:m.id,from:m.direction==='in'?'contato':m.agent_name||'equipe',text:(transcripts.get(m.id)||m.body).slice(0,transcripts.has(m.id)?8000:2000),...(transcripts.has(m.id)?{source:'transcricao_automatica',original:'audio'}:{})}))});
       if(Buffer.byteLength(input)>36000)throw Error('Context too large');
       const body={model:MODEL,store:false,instructions,input:[{role:'user',content:input}],reasoning:{effort:'none'},max_output_tokens:MAX_OUTPUT,text:{format:{type:'json_schema',name:'domum_attendance',strict:true,schema}}};
       // Reserve by UTF-8 bytes (a conservative upper bound for input tokens), including schema/overhead.

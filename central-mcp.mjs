@@ -95,7 +95,7 @@ export function createCentralMCP(db,config,transport,{context,ai,media,ready}){
     const c=conversation(args.telefone);
     if(name==='consultar_conversa'){
       const ctx=context.view(c.id);audit(name,c.id,'ok');
-      return{conversaId:c.id,nome:c.name,telefone:c.phone,situacao:c.status,clienteNotionId:ctx.client_id,modo:ctx.mode,resumo:ctx.summary,pendencias:ctx.missing,proximoPasso:ctx.next_step,mensagens:all('SELECT id,direction,body,agent_name,status,created FROM messages WHERE conversation_id=? ORDER BY rowid DESC LIMIT 30',c.id).reverse().map(m=>({...m,anexos:all('SELECT a.id,a.name,a.kind,a.state FROM media a JOIN message_media mm ON mm.media_id=a.id WHERE mm.message_id=?',m.id)}))};
+      return{conversaId:c.id,nome:c.name,telefone:c.phone,situacao:c.status,clienteNotionId:ctx.client_id,modo:ctx.mode,resumo:ctx.summary,pendencias:ctx.missing,proximoPasso:ctx.next_step,mensagens:all('SELECT id,direction,body,agent_name,status,created FROM messages WHERE conversation_id=? ORDER BY rowid DESC LIMIT 30',c.id).reverse().map(m=>({...m,transcricao:get("SELECT text FROM ai_transcriptions WHERE message_id=? AND state='done'",m.id)?.text||null,anexos:all('SELECT a.id,a.name,a.kind,a.state FROM media a JOIN message_media mm ON mm.media_id=a.id WHERE mm.message_id=?',m.id)}))};
     }
     if(name==='atualizar_contexto_notion'){
       const ctx=await context.refresh(c);audit(name,c.id,'ok');

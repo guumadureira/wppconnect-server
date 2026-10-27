@@ -49,7 +49,7 @@ export function createCentral(config = process.env, transport = fetch, options =
   let ai;
   const customerContext = createNotionContext(db,config,transport,{requestIntervalMs:options.notionRequestIntervalMs,aiEnabled:()=>ai?.status().enabled||false});
   const ready = live && ['WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_ACCESS_TOKEN','META_APP_SECRET','WEBHOOK_VERIFY_TOKEN','META_GRAPH_VERSION'].every(k => config[k]);
-  ai = createAIAttendance(db,config,transport,customerContext,{ready:!!ready,debounceMs:options.aiDebounceMs});
+  ai = createAIAttendance(db,config,transport,customerContext,{ready:!!ready,debounceMs:options.aiDebounceMs,media});
   const centralMCP=createCentralMCP(db,config,transport,{context:customerContext,ai,media,ready:!!ready});
   // Only operational counts and timestamps; no payload, phone or credentials.
   // These observations start again with each server process.
@@ -103,11 +103,11 @@ export function createCentral(config = process.env, transport = fetch, options =
         run('INSERT INTO conversations(id,name,phone,updated) VALUES(?,?,?,?)', id, name, phone, at);
         c = get('SELECT * FROM conversations WHERE id=?', id);
       }
-      const body = clean(m.text?.body, 4096) || clean(m[m.type]?.caption,1024) || ({image:'[Imagem]',document:'[Documento]',sticker:'[Figurinha]'})[m.type] || `[${clean(m.type,40) || 'Mensagem não textual'} — consulte o aplicativo WhatsApp Business]`;
+      const body = clean(m.text?.body, 4096) || clean(m[m.type]?.caption,1024) || ({image:'[Imagem]',document:'[Documento]',sticker:'[Figurinha]',audio:'[Áudio]'})[m.type] || `[${clean(m.type,40) || 'Mensagem não textual'} — consulte o aplicativo WhatsApp Business]`;
       const messageId=randomUUID();
       const received = run('INSERT INTO messages(id,conversation_id,provider_id,direction,body,agent_name,status,created) VALUES(?,?,?,?,?,?,?,?)',messageId,c.id,m.id,echo?'out':'in',body,echo?'Aplicativo Business (atendente não identificado)':null,echo?'sent':'received',at).lastInsertRowid;
       media.incoming(messageId,m);
-      if(!echo&&['image','document'].includes(m.type)&&get('SELECT media_id FROM message_media WHERE message_id=?',messageId))customerContext.receivedFile(c.id,messageId,m.type);
+      if(!echo&&['image','document','audio'].includes(m.type)&&get('SELECT media_id FROM message_media WHERE message_id=?',messageId))customerContext.receivedFile(c.id,messageId,m.type);
       result.recordedMessages++;
       if (echo) {
         run('UPDATE conversations SET pending_since=CASE WHEN last_inbound<? THEN NULL ELSE pending_since END,updated=MAX(updated,?) WHERE id=?', at, at, c.id);
@@ -147,7 +147,7 @@ export function createCentral(config = process.env, transport = fetch, options =
     try {
       res.setHeader('x-content-type-options','nosniff');
       res.setHeader('referrer-policy','same-origin');
-      res.setHeader('content-security-policy',"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'");
+      res.setHeader('content-security-policy',"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'");
       if(url.pathname==='/healthz' && req.method==='GET')return reply(200,{status:'ok',mode:live?'live':'demo'});
       // Dedicated service credential; never reuse or bypass browser-session authentication.
       if(url.pathname==='/mcp')return await centralMCP.handle(req,res,{origin,readBody,reply});
@@ -292,11 +292,21 @@ export function createCentral(config = process.env, transport = fetch, options =
           return reply(200,{attachment:media.favorite(id,body.favorite)});
         }
         if(action==='content'&&['GET','HEAD'].includes(req.method)){
-          const file=media.content(id),inline=!url.searchParams.has('download')&&['image','sticker'].includes(file.kind);
+          const file=media.content(id),inline=!url.searchParams.has('download')&&['image','sticker','audio'].includes(file.kind);
           res.setHeader('content-security-policy',"default-src 'none'; sandbox; frame-ancestors 'none'");
           const encodedName=encodeURIComponent(file.name).replace(/['()*]/g,char=>'%'+char.charCodeAt(0).toString(16).toUpperCase());
-          res.writeHead(200,{'content-type':file.mime,'content-length':file.byte_size,'cache-control':'private, no-store','content-disposition':(inline?'inline':'attachment')+`; filename="arquivo"; filename*=UTF-8''${encodedName}`});
-          return res.end(req.method==='HEAD'?undefined:Buffer.from(file.data));
+          const bytes=Buffer.from(file.data),range=req.headers.range;
+          let start=0,end=bytes.length-1,partial=false;
+          if(file.kind==='audio'&&range){
+            const match=/^bytes=(\d*)-(\d*)$/.exec(range);
+            if(!match||(!match[1]&&!match[2])){res.setHeader('content-range','bytes */'+bytes.length);fail(416,'Faixa de áudio inválida.');}
+            start=match[1]?Number(match[1]):Math.max(0,bytes.length-Number(match[2]));end=match[1]&&match[2]?Math.min(Number(match[2]),bytes.length-1):bytes.length-1;
+            if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start>end||start>=bytes.length){res.setHeader('content-range','bytes */'+bytes.length);fail(416,'Faixa de áudio inválida.');}
+            partial=true;res.setHeader('content-range',`bytes ${start}-${end}/${bytes.length}`);
+          }
+          if(file.kind==='audio')res.setHeader('accept-ranges','bytes');
+          res.writeHead(partial?206:200,{'content-type':file.mime,'content-length':end-start+1,'cache-control':'private, no-store','content-disposition':(inline?'inline':'attachment')+`; filename="arquivo"; filename*=UTF-8''${encodedName}`});
+          return res.end(req.method==='HEAD'?undefined:bytes.subarray(start,end+1));
         }
         fail(405,'Método não permitido.');
       }
@@ -406,12 +416,12 @@ export function createCentral(config = process.env, transport = fetch, options =
           const attachment=attachmentId?media.find(attachmentId):null;
           if(attachmentId&&(!attachment||attachment.state!=='ready'))fail(409,'Selecione um anexo disponível.');
           if(attachment&&text.length+user.signatureName.length+2>1024)fail(400,'A legenda do anexo deve ter até 1024 caracteres, incluindo a assinatura.');
-          if(attachment?.kind==='sticker'&&text)fail(400,'Envie a figurinha sem legenda. A mensagem de texto pode ser enviada separadamente.');
+          if(['sticker','audio'].includes(attachment?.kind)&&text)fail(400,'Envie o áudio ou figurinha sem legenda. A mensagem de texto pode ser enviada separadamente.');
           if(c.status!=='open')fail(409,'Reabra a conversa antes de responder.');
           if(live&&!ready)fail(503,'A conexão com o WhatsApp ainda não foi configurada.');
           if(live&&(!c.last_inbound||now()-c.last_inbound>24*3600000))fail(409,'A janela de 24 horas terminou. O retorno pela API exige um modelo aprovado; use o aplicativo Business para este contato.');
           ai.pause(c.id);
-          const id=randomUUID(),at=now(),signed=`${user.signatureName}: ${text||({image:'[Imagem]',document:'[Documento]',sticker:'[Figurinha]'})[attachment?.kind]}`;
+          const id=randomUUID(),at=now(),signed=`*${user.signatureName}:* ${text||({image:'[Imagem]',document:'[Documento]',sticker:'[Figurinha]',audio:'[Áudio]'})[attachment?.kind]}`;
           run('INSERT INTO messages(id,conversation_id,request_id,direction,body,agent_id,agent_name,status,created) VALUES(?,?,?,?,?,?,?,?,?)',id,c.id,requestId,'out',signed,user.id,user.signatureName,live?'sending':'simulated',at);
           if(attachment)media.link(id,attachmentId);
           if(live) {
