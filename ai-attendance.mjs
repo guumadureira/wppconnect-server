@@ -178,7 +178,7 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
 // A deterministic walkthrough, not a model call or an assessment of model quality.
 export function simulateAttendance(message){
   if(typeof message!=='string'||!message.trim()||message.length>2000)fail(400,'Escreva uma mensagem de teste com até 2000 caracteres.');
-  if(/(?:pessoa|humano|gustavo|atendente)|reclama|urgente/i.test(message))return{simulation:true,reply:'Vou encaminhar sua solicitação para a equipe da Domum.',handoff:true,reason:'Solicitação de atendimento humano ou prioridade.'};
+  if(/(?:pessoa|humano|gustavo|atendente)|reclama|urgente/i.test(message))return{simulation:true,reply:'Vamos verificar sua solicitação.',handoff:true,reason:'Solicitação de atendimento humano ou prioridade.'};
   if(/fornece|vend[ao]|parceria|comercial/i.test(message))return{simulation:true,reply:'Obrigado pela oferta. No momento não precisamos, mas podemos conversar se surgir uma necessidade.',handoff:false,kind:'comercial'};
   return{simulation:true,reply:/maring|sarandi|paiçandu/i.test(message)?'Olá! Qual serviço você precisa para esse imóvel?':'Olá! Em qual município fica o imóvel?',handoff:false,kind:'atendimento'};
 }
