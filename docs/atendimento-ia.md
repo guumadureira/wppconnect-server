@@ -43,7 +43,9 @@ As mensagens ao contato são em nome da Domum, sem fingir a identidade de um ate
 
 As orientações ficam em `ai-attendance-guide.mjs`, separado dos controles de acesso, consumo e envio. São instruções explícitas de atendimento da Domum; o modelo da central não recebe automaticamente a memória do ChatGPT, e-mails ou conversas de outros clientes.
 
-O guia orienta a responder à dúvida antes de coletar dados, escrever de forma simples e acolhedora, perguntar somente o que ajuda no próximo passo e retirar pendências já respondidas. Não exige pergunta em toda mensagem, saudação repetida nem entrevista cômodo a cômodo. Quando a pessoa quer desenvolver a ideia, a IA pode continuar dentro dos limites de orientação geral. Cadastro concluído, arquivo recebido ou pedido de resumo não impõem encerramento. Decisão técnica, leitura de arquivo, compromisso de preço/prazo, pedido humano ou próxima ação que dependa da equipe continuam exigindo passagem para uma pessoa.
+O guia orienta a responder ao que a pessoa acabou de dizer, normalmente em uma frase curta, duas quando necessário, sem tamanho mínimo. Perguntas básicas entram somente quando necessárias ao pedido atual; o aprofundamento acompanha o interesse do cliente. Confirmações como “Tenho em casa” não devem gerar outra solicitação de documento ou explicação do processo: “Pode mandar por aqui quando estiver com ele” é suficiente. Pausas e agradecimentos também não obrigam uma pergunta. Pendências e próximo passo são internos e podem estar vazios ou indicar espera pelo cliente.
+
+Não há saudação repetida, recapitulação sem pedido, narrativa de tarefas internas nem entrevista para completar o cadastro. Cadastro concluído, arquivo recebido ou pedido de resumo não impõem encerramento. Decisão técnica, leitura de arquivo, compromisso de preço/prazo, pedido humano ou próxima ação que dependa da equipe continuam exigindo passagem para uma pessoa.
 
 O contexto identifica separadamente se há cadastro vinculado e qual é a etapa de cadastro. `Inicial` não comprova contratação nem existência de projeto. Os relatos e interpretações mantêm origem e qualificação; a IA não deve transformar seu resumo anterior em confirmação da equipe.
 
@@ -58,6 +60,8 @@ No contato autorizado do piloto, use **Permitir assistência** caso a equipe ten
 3. **Resumo:** “Pode resumir o que já contei?” Deve preservar os detalhes conhecidos sem repetir perguntas resolvidas nem anunciar um contrato inexistente.
 4. **Documento indisponível:** “Não tenho a matrícula agora.” Deve permitir seguir, sem cobrança repetida do documento. Um arquivo enviado não foi lido pela IA.
 5. **Passagem humana:** “Quero falar com uma pessoa.” Deve pausar a automação e deixar motivo e contexto para a equipe. Mensagem posterior não a reativa sozinha.
+6. **Ritmo:** após falar de um documento, “Tenho em casa” deve receber apenas uma resposta curta permitindo enviar depois, sem pedir outro documento. “Vou ver e te aviso” deve permitir encerrar aquela troca, sem nova pergunta.
+7. **Resposta direta:** “Vocês fazem regularização?” deve receber uma resposta simples sobre o serviço, sem formulário, lista de documentos ou explicação de todo o processo. Aprofundar somente conforme a conversa evoluir.
 
 Os testes de transporte falso conferem continuidade, vínculo único e preservação de contexto; não comprovam qualidade de linguagem. A avaliação do tom ocorre na conversa real, dentro do teto já autorizado. Não executar avaliações pagas adicionais sem contabilizar o orçamento restante do mesmo piloto.
 
