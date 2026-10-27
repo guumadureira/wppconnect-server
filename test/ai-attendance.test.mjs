@@ -51,6 +51,43 @@ test('histórico manual acompanha a próxima mensagem sem gerar resposta ao impo
   assert.equal(input.importedHistory.source,'exportacao_manual_nao_verificada');assert.equal(input.importedHistory.messages[0].text,'Já enviei a matrícula ontem.');
   assert.ok(input.messages.every(m=>!m.text.includes('Já enviei a matrícula')));
 });
+
+test('fornecedor com serviço compreendido recebe categoria e só tem conversa concluída após resposta aceita',async t=>{
+  let stage=0;
+  const f=fixture(t,{},async(url,options,app)=>{
+    if(!url.includes('openai.com'))return;
+    const source=app.db.prepare("SELECT id FROM messages WHERE direction='in' ORDER BY rowid DESC LIMIT 1").get().id;
+    const result={...output,kind:'comercial',reply:stage?'Obrigado, Wilton. Por enquanto não precisamos; se surgir uma demanda, podemos conversar.':'Que tipo de serviço você oferece?',summary:'Contato oferece serviços.',missing:'',nextStep:'',supplier:{name:'Wilton',description:stage?'Oferece serviços de pintura residencial.':'',category:stage?'Mão de obra e execução':'A identificar',sourceMessageId:stage?source:'',complete:!!stage}};
+    return Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify(result)}]}]});
+  });
+  const c=f.incoming('Sou Wilton e gostaria de oferecer meu trabalho.');await f.app.ai.process();
+  assert.equal(f.app.db.prepare('SELECT status FROM conversations').get().status,'open');
+  stage=1;f.incoming('Faço pintura residencial.');await f.app.ai.process();
+  const row=f.app.db.prepare('SELECT * FROM supplier_contacts').get();assert.equal(row.name,'Wilton');assert.equal(row.category,'Mão de obra e execução');assert.equal(row.summary,'Oferece serviços de pintura residencial.');
+  assert.equal(f.app.db.prepare('SELECT status,pending_since FROM conversations').get().status,'closed');assert.equal(f.app.customerContext.view(c.id).mode,'human');
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM supplier_contacts').get().n,1);assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM service_requests').get().n,0);
+});
+
+test('envio incerto ou mensagem nova durante despedida não concluem a conversa comercial',async t=>{
+  for(const interrupt of ['unknown','incoming']){
+    let f;f=fixture(t,{},async(url,options,app)=>{
+      if(url.includes('openai.com')){
+        const source=app.db.prepare("SELECT id FROM messages WHERE direction='in' ORDER BY rowid DESC LIMIT 1").get().id;
+        const result={...output,kind:'comercial',supplier:{name:'Wilton',description:'Oferece pintura.',category:'Mão de obra e execução',sourceMessageId:source,complete:true}};
+        return Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify(result)}]}]});
+      }
+      if(interrupt==='unknown')throw Error('Resultado incerto');f.incoming('Antes de encerrar, preciso esclarecer outra coisa.');
+    });
+    f.incoming('Sou Wilton e ofereço pintura.');await f.app.ai.process();
+    assert.equal(f.app.db.prepare('SELECT status FROM conversations').get().status,'open',interrupt);
+  }
+});
+
+test('atividade sem fonte ou categoria inexistente não cadastra nem conclui fornecedor',async t=>{
+  const f=fixture(t,{},async url=>url.includes('openai.com')?Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify({...output,kind:'comercial',supplier:{name:'Wilton',description:'Oferta inventada.',category:'Categoria inventada',sourceMessageId:'sem-fonte',complete:true}})}]}]}):null);
+  f.incoming('Olá');await f.app.ai.process();assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM supplier_contacts').get().n,0);assert.equal(f.app.db.prepare('SELECT status FROM conversations').get().status,'open');
+  assert.equal(f.calls.filter(c=>c.url.includes('facebook.com')).length,0);
+});
 test('chave presente sem limite autorizado ou ativação não chama APIs',async t=>{
   for(const extra of [{AI_MONTHLY_BUDGET_USD:'0'},{AI_ENABLED:'false'},{AI_ALLOWED_PHONES:''},{WHATSAPP_MODE:'demo'}]){
     const f=fixture(t,extra);f.incoming();await f.app.ai.process();assert.equal(f.calls.length,0);assert.equal(f.app.ai.status().enabled,false);
