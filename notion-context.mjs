@@ -243,7 +243,12 @@ export function createNotionContext(db,config,transport,options={}){
     if(missing.length)fail(409,'Confira as propriedades das bases: '+missing.join(', '));
     return {...status(),accessVerified:true,verifiedAt:Date.now()};
   }
-  return{status,view:localView,lookup,link,refresh,save,request,updateRequest,control,receivedFile,aiRecord,createClient,registerFromAI,processQueue,verify,
+  function integrationRecord(conversationId,draftId,messageId,state){
+    const descriptions={sent:'Mensagem da conexão Notion aceita pela Meta; entrega ainda deve ser conferida.',failed:'Envio da conexão Notion não realizado ou recusado.',unknown:'Resultado do envio da conexão Notion não confirmado; conferir no WhatsApp antes de nova tentativa.'};
+    if(!descriptions[state])return;
+    addEvent(conversationId,{key:'mcp:'+draftId,kind:'contexto',summary:descriptions[state],missing:'',nextStep:state==='sent'?'Conferir entrega na central.':'Conferir resultado com a equipe.',actor:'Notion · integração',source:'Sistema',qualification:'Confirmado',messageId});
+  }
+  return{status,view:localView,lookup,link,refresh,save,request,updateRequest,control,receivedFile,aiRecord,createClient,registerFromAI,processQueue,verify,integrationRecord,
     close:async()=>{stopped=true;await Promise.allSettled([worker,...refreshing.values(),...creating.values(),serial].filter(Boolean));},
   };
 }

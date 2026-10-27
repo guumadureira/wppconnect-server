@@ -9,6 +9,7 @@ import { createWhatsAppSignup } from './whatsapp-signup.mjs';
 import { createMediaStore } from './media.mjs';
 import { createNotionContext } from './notion-context.mjs';
 import { createAIAttendance, simulateAttendance } from './ai-attendance.mjs';
+import { createCentralMCP } from './central-mcp.mjs';
 
 const derive = promisify(scrypt);
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -49,6 +50,7 @@ export function createCentral(config = process.env, transport = fetch, options =
   const customerContext = createNotionContext(db,config,transport,{requestIntervalMs:options.notionRequestIntervalMs,aiEnabled:()=>ai?.status().enabled||false});
   const ready = live && ['WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_ACCESS_TOKEN','META_APP_SECRET','WEBHOOK_VERIFY_TOKEN','META_GRAPH_VERSION'].every(k => config[k]);
   ai = createAIAttendance(db,config,transport,customerContext,{ready:!!ready,debounceMs:options.aiDebounceMs});
+  const centralMCP=createCentralMCP(db,config,transport,{context:customerContext,ai,media,ready:!!ready});
   // Only operational counts and timestamps; no payload, phone or credentials.
   // These observations start again with each server process.
   const metaCode = value => Number.isSafeInteger(value) && value > 0 ? value : null;
@@ -147,6 +149,8 @@ export function createCentral(config = process.env, transport = fetch, options =
       res.setHeader('referrer-policy','same-origin');
       res.setHeader('content-security-policy',"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'");
       if(url.pathname==='/healthz' && req.method==='GET')return reply(200,{status:'ok',mode:live?'live':'demo'});
+      // Dedicated service credential; never reuse or bypass browser-session authentication.
+      if(url.pathname==='/mcp')return await centralMCP.handle(req,res,{origin,readBody,reply});
       if (url.pathname === '/webhooks/whatsapp') {
         if (req.method==='GET') {
           if (!config.WEBHOOK_VERIFY_TOKEN || url.searchParams.get('hub.mode')!=='subscribe' || !safeEqual(url.searchParams.get('hub.verify_token'), config.WEBHOOK_VERIFY_TOKEN)) fail(403,'Verificação inválida.');
@@ -238,6 +242,10 @@ export function createCentral(config = process.env, transport = fetch, options =
         return reply(200,{ok:true});
       }
       if (!user) fail(401,'Entre com seu usuário para continuar.');
+      if(url.pathname==='/api/integration/status'&&req.method==='GET'){
+        if(user.role!=='admin')fail(403,'Somente administradores podem verificar esta conexão.');
+        return reply(200,centralMCP.status());
+      }
       if(url.pathname==='/api/ai/status'&&req.method==='GET')return reply(200,ai.status());
       if(url.pathname==='/api/ai/simulate'&&req.method==='POST'){
         if(user.role!=='admin')fail(403,'Somente administradores podem abrir o teste.');
