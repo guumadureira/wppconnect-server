@@ -27,7 +27,7 @@ test('MCP exige credencial própria, origem válida e não aceita cookie como au
   assert.equal((await f.post(rpc,{},'GET')).status,405);
   const init=await(await f.post(rpc)).json();assert.equal(init.result.protocolVersion,'2025-06-18');
   assert.equal((await f.post({jsonrpc:'2.0',method:'notifications/initialized'})).status,202);
-  const list=await(await f.post({jsonrpc:'2.0',id:2,method:'tools/list'})).json();assert.equal(list.result.tools.length,7);
+  const list=await(await f.post({jsonrpc:'2.0',id:2,method:'tools/list'})).json();assert.equal(list.result.tools.length,9);
   assert.ok(list.result.tools.find(x=>x.name==='confirmar_envio').annotations.destructiveHint);
   assert.equal((await fetch(f.base+'/api/state',{headers:{authorization:'Bearer '+key}})).status,401);
   assert.ok(!JSON.stringify(init).includes(key));assert.equal(f.calls.length,0);
@@ -107,5 +107,106 @@ test('reinício conserva resultado desconhecido sem reenvio e rotação revoga t
   assert.equal((await next.post({jsonrpc:'2.0',id:1,method:'tools/list'})).status,401);
   assert.equal(next.app.db.prepare('SELECT state FROM integration_drafts WHERE id=?').get(d.envioId).state,'unknown');
   assert.equal(next.app.db.prepare('SELECT id FROM conversations WHERE id=?').get(c.id).id,c.id);
+  await next.app.close();next.app.close=async()=>{};rmSync(directory,{recursive:true,force:true});
+});
+
+const pageId='11111111-1111-4111-8111-111111111111',blockId='22222222-2222-4222-8222-222222222222';
+const notionConfig={NOTION_ENABLED:'true',NOTION_TOKEN:'test-only-notion-token'};
+function documentTransport(state={}){
+  return async(url,options)=>{
+    if(url.startsWith('https://api.notion.com/v1/')){
+      assert.equal(options.headers.authorization,'Bearer test-only-notion-token');assert.equal(options.redirect,'error');
+      if(state.denied)return Response.json({message:'test-only-notion-token'},{status:404});
+      if(url.endsWith('/pages/'+pageId))return Response.json({id:pageId,properties:{Nome:{type:'title',title:[{plain_text:'Proposta de teste'}]}}});
+      if(url.includes('/children'))return Response.json({results:[{id:blockId,type:'file',file:{type:'file',name:'proposta.pdf',file:{url:state.url||'https://prod-files-secure.s3.us-west-2.amazonaws.com/test/proposta.pdf?signature=private-test',expiry_time:new Date(Date.now()+3600000).toISOString()}}}],has_more:false});
+      throw Error('Unexpected Notion path');
+    }
+    if(url.includes('amazonaws.com')){
+      state.downloads=(state.downloads||0)+1;assert.equal(options.headers,undefined);assert.equal(options.redirect,'error');
+      if(state.onDownload)await state.onDownload();
+      return new Response(state.bytes||Buffer.from('%PDF-1.4\nDocumento ficticio'),{headers:{'content-type':'application/pdf'}});
+    }
+    if(url.endsWith('/media'))return Response.json({id:'fake-document-upload'});
+    if(url.endsWith('/messages'))return Response.json({messages:[{id:'fake-document-message'}]});
+    throw Error('Forbidden transport');
+  };
+}
+async function selectDocument(f){
+  const r=await f.tool('listar_documentos_notion',{telefone:phone,paginaId:pageId});assert.equal(r.isError,undefined);
+  assert.ok(!JSON.stringify(r).includes('private-test'));assert.ok(!JSON.stringify(r).includes('test-only-notion-token'));
+  return{telefone:phone,paginaId:pageId,arquivoId:r.structuredContent.documentos[0].arquivoId,texto:'Segue a proposta para conferir.',requestId:randomUUID()};
+}
+test('documento do Notion é copiado para conversa exata e só enviado após confirmação, sem duplicação',async t=>{
+  const state={},f=await fixture(t,notionConfig,documentTransport(state)),c=f.incoming();
+  const args=await selectDocument(f),d=(await f.tool('preparar_documento_notion',args)).structuredContent;
+  assert.equal(d.estado,'prepared');assert.equal(d.anexo.nome,'proposta.pdf');assert.equal(d.anexo.origemNotion.paginaId,pageId);
+  assert.equal(f.app.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE direction='out'").get().n,0);
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM message_media').get().n,0);
+  assert.equal(f.calls.filter(c=>c.url.includes('facebook.com')).length,0);
+  assert.equal((await f.tool('preparar_documento_notion',args)).structuredContent.envioId,d.envioId);assert.equal(state.downloads,1);
+  assert.equal((await f.tool('preparar_documento_notion',{...args,texto:'Outra legenda'})).isError,true);
+  const other='5544000000002';f.incoming('Outro cliente',other);
+  assert.equal((await f.tool('preparar_documento_notion',{...args,telefone:other})).isError,true);
+  await f.send(d);await f.send(d);
+  const dispatches=f.calls.filter(c=>c.url.endsWith('/messages'));assert.equal(dispatches.length,1);
+  const payload=JSON.parse(dispatches[0].options.body);assert.equal(payload.to,phone);assert.equal(payload.type,'document');assert.equal(payload.document.filename,'proposta.pdf');
+  const linked=f.app.db.prepare('SELECT m.conversation_id FROM message_media mm JOIN messages m ON m.id=mm.message_id WHERE mm.media_id=?').get(d.anexo.id);assert.equal(linked.conversation_id,c.id);
+  f.app.intake({metadata:{phone_number_id:'fake-phone'},statuses:[{id:'fake-document-message',status:'delivered'}]});
+  assert.equal((await f.tool('consultar_envio',{envioId:d.envioId})).structuredContent.entregaConfirmada,true);
+});
+test('preparações simultâneas reutilizam arquivo e prévia; troca de conteúdo não é aceita',async t=>{
+  let release,started;const barrier=new Promise(r=>release=r),began=new Promise(r=>started=r);
+  const state={onDownload:async()=>{started();await barrier;}},f=await fixture(t,notionConfig,documentTransport(state));f.incoming();
+  const args=await selectDocument(f),first=f.tool('preparar_documento_notion',args);await began;
+  const second=f.tool('preparar_documento_notion',args);
+  const conflict=await f.tool('preparar_documento_notion',{...args,texto:'Mudou'});assert.equal(conflict.isError,true);
+  release();const [a,b]=await Promise.all([first,second]);assert.equal(a.structuredContent.envioId,b.structuredContent.envioId);assert.equal(state.downloads,1);
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM media').get().n,1);
+});
+test('mudança da conversa durante importação ou do arquivo após prévia bloqueia envio',async t=>{
+  for(const change of ['incoming','client','bytes']){
+    let f;const state={onDownload:()=>{
+      if(change==='incoming')f.incoming('Aguarde');
+      if(change==='client')f.app.db.prepare('UPDATE conversation_context SET client_id=?').run(randomUUID());
+    }};
+    f=await fixture(t,notionConfig,documentTransport(state));f.incoming();const args=await selectDocument(f),r=await f.tool('preparar_documento_notion',args);
+    if(change==='bytes'){
+      const d=r.structuredContent;f.app.db.prepare('UPDATE media SET data=? WHERE id=?').run(Buffer.from('%PDF-1.4\nModificado'),d.anexo.id);
+      assert.equal((await f.send(d)).isError,true);
+    }else{assert.equal(r.isError,true);assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM media').get().n,0);}
+    assert.equal(f.calls.filter(c=>c.url.includes('facebook.com')).length,0);
+  }
+});
+test('erro de acesso, arquivo falso e falta de armazenamento não criam prévia nem mensagem',async t=>{
+  for(const change of ['denied','fake','capacity']){
+    const state={},f=await fixture(t,{...notionConfig,MEDIA_STORAGE_MAX_MB:'1'},documentTransport(state));f.incoming();
+    if(change==='denied'){
+      state.denied=true;const r=await f.tool('listar_documentos_notion',{telefone:phone,paginaId:pageId});assert.equal(r.isError,true);assert.ok(!JSON.stringify(r).includes('test-only-notion-token'));continue;
+    }
+    const args=await selectDocument(f);
+    if(change==='fake')state.bytes=Buffer.from('<html>nao e PDF</html>');
+    if(change==='capacity')f.app.db.prepare("INSERT INTO media(id,kind,mime,name,state,created,data) VALUES(?,'document','application/pdf','ocupado.pdf','ready',?,zeroblob(1000000))").run(randomUUID(),Date.now());
+    const failed=await f.tool('preparar_documento_notion',args);assert.equal(failed.isError,true);
+    if(change==='capacity')assert.match(failed.content[0].text,/armazenamento/);
+    assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM integration_document_imports').get().n,0);
+    assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM integration_drafts').get().n,0);
+    assert.equal(f.calls.filter(c=>c.url.includes('facebook.com')).length,0);
+  }
+});
+test('cópia importada não pode ser reutilizada em outro cliente mesmo com ambos os telefones autorizados',async t=>{
+  const other='5544000000002',f=await fixture(t,{...notionConfig,CENTRAL_MCP_ALLOWED_PHONES:phone+','+other},documentTransport());f.incoming();f.incoming('Outro cliente',other);
+  const args=await selectDocument(f),d=(await f.tool('preparar_documento_notion',args)).structuredContent;
+  assert.equal((await f.tool('preparar_envio',{telefone:other,texto:'Arquivo',anexoId:d.anexo.id,requestId:randomUUID()})).isError,true);
+  assert.equal((await f.tool('preparar_documento_notion',{...args,telefone:other})).isError,true);
+  assert.equal(f.calls.filter(c=>c.url.includes('facebook.com')).length,0);
+});
+test('arquivo preparado persiste após reinício e não é baixado novamente na mesma intenção',async t=>{
+  const directory=mkdtempSync(join(tmpdir(),'central-notion-doc-')),path=join(directory,'db.sqlite'),state={};
+  const f=await fixture(t,{...notionConfig,DATABASE_PATH:path},documentTransport(state));f.incoming();
+  const args=await selectDocument(f),d=(await f.tool('preparar_documento_notion',args)).structuredContent;
+  await f.app.close();f.app.close=async()=>{};
+  const next=await fixture(t,{...notionConfig,DATABASE_PATH:path},()=>{throw Error('No network expected');});
+  const restored=await next.tool('preparar_documento_notion',args);assert.equal(restored.structuredContent.envioId,d.envioId);assert.equal(next.calls.length,0);
+  assert.equal(Buffer.from(next.app.media.content(d.anexo.id).data).toString(),'%PDF-1.4\nDocumento ficticio');
   await next.app.close();next.app.close=async()=>{};rmSync(directory,{recursive:true,force:true});
 });

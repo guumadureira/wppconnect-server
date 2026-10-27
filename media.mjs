@@ -87,8 +87,11 @@ export function createMediaStore(db,config,transport,live) {
     const kind=params.get('kind'),mime=mimeType(req.headers['content-type']);validateType(kind,mime);
     const chunks=[];let size=0;
     for await(const chunk of req){size+=chunk.length;if(size>limits[kind])fail(413,'Arquivo acima do limite permitido.');chunks.push(chunk);}
-    const data=Buffer.concat(chunks);validateBytes(kind,mime,data);checkCapacity(data.length);
-    const id=randomUUID();run("INSERT INTO media(id,kind,mime,name,byte_size,state,created,data) VALUES(?,?,?,?,?,'ready',?,?)",id,kind,mime,mediaName(params.get('name'),mime),data.length,Date.now(),data);
+    return store(kind,mime,params.get('name'),Buffer.concat(chunks));
+  }
+  function store(kind,mime,name,data) {
+    validateBytes(kind,mime,data);checkCapacity(data.length);
+    const id=randomUUID();run("INSERT INTO media(id,kind,mime,name,byte_size,state,created,data) VALUES(?,?,?,?,?,'ready',?,?)",id,kind,mime,mediaName(name,mime),data.length,Date.now(),data);
     return view(find(id));
   }
   const inflight=new Map();let worker=null,stopped=false;
@@ -145,7 +148,7 @@ export function createMediaStore(db,config,transport,live) {
     return {type:row.kind,[row.kind]:part};
   }
   return {
-    incoming,messages,upload,ensure,processPending,payload,find,
+    incoming,messages,upload,store,ensure,processPending,payload,find,
     public:id=>view(find(id)),
     stats:()=>({usedBytes:used(),maxBytes,limits}),
     link:(messageId,id)=>run('INSERT INTO message_media(message_id,media_id) VALUES(?,?)',messageId,id),
