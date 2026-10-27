@@ -194,6 +194,8 @@ export function createCentral(config = process.env, transport = fetch, options =
         '/assets/domum-wordmark-dark.png': ['domum-wordmark-dark.png', 'image/png'],
         '/assets/domum-wordmark-light.png': ['domum-wordmark-light.png', 'image/png'],
         '/assets/domum-symbol.png': ['domum-symbol.png', 'image/png'],
+        '/assets/domum-interface.css': ['domum-interface.css', 'text/css; charset=utf-8'],
+        '/assets/manrope-latin.woff2': ['fonts/manrope-latin.woff2', 'font/woff2'],
       };
       if (Object.hasOwn(publicFiles, url.pathname) && ['GET','HEAD'].includes(req.method)) {
         const [file, type] = publicFiles[url.pathname];
