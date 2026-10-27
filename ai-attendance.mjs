@@ -11,7 +11,7 @@ const schema={type:'object',additionalProperties:false,required:['reply','summar
 const fail=(status,message)=>{throw Object.assign(new Error(message),{status});};
 const month=()=>new Date().toISOString().slice(0,7);
 
-export function createAIAttendance(db,config,transport,context,{ready=false,debounceMs=2500,media}={}){
+export function createAIAttendance(db,config,transport,context,{ready=false,debounceMs=2500,media,suppliers,importedHistory}={}){
   const get=(sql,...a)=>db.prepare(sql).get(...a),all=(sql,...a)=>db.prepare(sql).all(...a),run=(sql,...a)=>db.prepare(sql).run(...a);
   db.exec(`CREATE TABLE IF NOT EXISTS ai_jobs(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL REFERENCES conversations(id),message_id TEXT UNIQUE NOT NULL REFERENCES messages(id),epoch INTEGER NOT NULL,state TEXT NOT NULL,created INTEGER NOT NULL,updated INTEGER NOT NULL,result TEXT,error TEXT,cost_usd REAL NOT NULL DEFAULT 0,billing_month TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS ai_control(conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),epoch INTEGER NOT NULL DEFAULT 0,handoff TEXT NOT NULL DEFAULT '');`);
@@ -45,7 +45,8 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
     else if(c.mode!=='assisted')return;
     const control=ensure(conversation.id);
     if(!['text','image','document'].includes(type)&&!(type==='audio'&&String(config.AI_AUDIO_ENABLED)==='true')){handoff(conversation.id,message.id,'Arquivo recebido: precisa de conferência humana.');return;}
-    if(/(?:falar|conversar|atendido|atendida).{0,35}(?:pessoa|humano|humana|gustavo|atendente)|(?:quero|preciso).{0,20}(?:humano|humana)/i.test(message.body)){handoff(conversation.id,message.id,'Contato solicitou atendimento humano.');return;}
+    const salesOffer=c.kind==='comercial'||/\b(?:oferecemos|vendemos|ofereço|represento)\b|sou .{0,30}(?:prestador|fornecedor|representante)/i.test(message.body);
+    if(!salesOffer&&/(?:falar|conversar|atendido|atendida).{0,35}(?:pessoa|humano|humana|gustavo|atendente)|(?:quero|preciso).{0,20}(?:humano|humana)/i.test(message.body)){handoff(conversation.id,message.id,'Contato solicitou atendimento humano.');return;}
     run("UPDATE ai_jobs SET state='cancelled',updated=? WHERE conversation_id=? AND state='pending'",Date.now(),conversation.id);
     run("INSERT OR IGNORE INTO ai_jobs(id,conversation_id,message_id,epoch,state,created,updated,billing_month) VALUES(?,?,?,?,'pending',?,?,?)",randomUUID(),conversation.id,message.id,control.epoch,Date.now(),Date.now(),month());
   }
@@ -104,7 +105,7 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
       const attachments=all('SELECT m.kind,m.name,m.state,mm.message_id FROM message_media mm JOIN media m ON m.id=mm.media_id JOIN messages x ON x.id=mm.message_id WHERE x.conversation_id=? ORDER BY x.rowid DESC LIMIT 5',conversation.id);
       // Only the allowlisted operational subset from the Notion adapter, never a raw page.
       const snapshot=ctx.snapshot&&!ctx.last_error?{client:{name:ctx.snapshot.client?.name,stage:ctx.snapshot.client?.stage,registration:ctx.snapshot.client?.registration},sections:Object.fromEntries(Object.entries(ctx.snapshot.sections||{}).map(([k,v])=>[k,{configured:v.configured,complete:v.complete,error:!!v.error,rows:(v.rows||[]).slice(0,8).map(r=>({title:r.title,status:r.status,due:r.due,next:r.next,contract:r.contract}))}]))}:null;
-      const input=JSON.stringify({currentDate:new Date().toISOString(),referenceGuide:knowledgeFor(history.slice(-8).map(m=>transcripts.get(m.id)||m.body).join(' ')),registrationAvailable:String(config.AI_AUTO_REGISTER)==='true'&&context.status().enabled,attachments,context:{notionUnavailable:!!ctx.last_error,clientLinked:!!ctx.client_id,summary:ctx.summary,missing:ctx.missing,nextStep:ctx.next_step,notion:snapshot,history:ctx.history.slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next_step,source:e.source,qualification:e.qualification,at:e.created})),notionHistory:(!ctx.last_error&&ctx.snapshot?.history?.rows||[]).slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next,source:e.source,qualification:e.qualification,at:e.at}))},messages:history.map(m=>({id:m.id,from:m.direction==='in'?'contato':m.agent_name||'equipe',text:(transcripts.get(m.id)||m.body).slice(0,transcripts.has(m.id)?8000:2000),...(transcripts.has(m.id)?{source:'transcricao_automatica',original:'audio'}:{})}))});
+      const input=JSON.stringify({currentDate:new Date().toISOString(),referenceGuide:knowledgeFor(history.slice(-8).map(m=>transcripts.get(m.id)||m.body).join(' ')),importedHistory:importedHistory?.(conversation.id),registrationAvailable:String(config.AI_AUTO_REGISTER)==='true'&&context.status().enabled,attachments,context:{notionUnavailable:!!ctx.last_error,clientLinked:!!ctx.client_id,summary:ctx.summary,missing:ctx.missing,nextStep:ctx.next_step,notion:snapshot,history:ctx.history.slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next_step,source:e.source,qualification:e.qualification,at:e.created})),notionHistory:(!ctx.last_error&&ctx.snapshot?.history?.rows||[]).slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next,source:e.source,qualification:e.qualification,at:e.at}))},messages:history.map(m=>({id:m.id,from:m.direction==='in'?'contato':m.agent_name||'equipe',text:(transcripts.get(m.id)||m.body).slice(0,transcripts.has(m.id)?8000:2000),...(transcripts.has(m.id)?{source:'transcricao_automatica',original:'audio'}:{})}))});
       if(Buffer.byteLength(input)>36000)throw Error('Context too large');
       const body={model:MODEL,store:false,instructions,input:[{role:'user',content:input}],reasoning:{effort:'none'},max_output_tokens:MAX_OUTPUT,text:{format:{type:'json_schema',name:'domum_attendance',strict:true,schema}}};
       // Reserve by UTF-8 bytes (a conservative upper bound for input tokens), including schema/overhead.
@@ -129,6 +130,7 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
         if(intake){ctx=await context.registerFromAI(conversation,intake,()=>valid(job));job.contextVersion=ctx.version;run('UPDATE ai_jobs SET result=? WHERE id=?',JSON.stringify({...result,registration:{clientName:ctx.client_name,linked:true}}),job.id);}
       }
       if(!valid(job)){run("UPDATE ai_jobs SET state='cancelled',updated=? WHERE id=?",Date.now(),job.id);return;}
+      if(result.kind==='comercial')suppliers?.record(conversation,result);
       if(result.reply.trim()){
         const id=randomUUID(),at=Date.now();
         run("INSERT INTO messages(id,conversation_id,request_id,direction,body,agent_name,status,created) VALUES(?,?,?,'out',?,'Domum · IA','sending',?)",id,conversation.id,'ai:'+job.id,result.reply.trim(),at);
@@ -161,6 +163,6 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
 export function simulateAttendance(message){
   if(typeof message!=='string'||!message.trim()||message.length>2000)fail(400,'Escreva uma mensagem de teste com até 2000 caracteres.');
   if(/(?:pessoa|humano|gustavo|atendente)|reclama|urgente/i.test(message))return{simulation:true,reply:'Vou encaminhar sua solicitação para a equipe da Domum.',handoff:true,reason:'Solicitação de atendimento humano ou prioridade.'};
-  if(/fornece|vend[ao]|parceria|comercial/i.test(message))return{simulation:true,reply:'Olá! Qual produto ou serviço você gostaria de apresentar à Domum?',handoff:false,kind:'comercial'};
+  if(/fornece|vend[ao]|parceria|comercial/i.test(message))return{simulation:true,reply:'Obrigado pela oferta. No momento não precisamos, mas podemos conversar se surgir uma necessidade.',handoff:false,kind:'comercial'};
   return{simulation:true,reply:/maring|sarandi|paiçandu/i.test(message)?'Olá! Qual serviço você precisa para esse imóvel?':'Olá! Em qual município fica o imóvel?',handoff:false,kind:'atendimento'};
 }

@@ -10,6 +10,8 @@ import { createMediaStore } from './media.mjs';
 import { createNotionContext } from './notion-context.mjs';
 import { createAIAttendance, simulateAttendance } from './ai-attendance.mjs';
 import { createCentralMCP } from './central-mcp.mjs';
+import {createSupplierRegister} from './supplier-register.mjs';
+import {createHistoryImport} from './history-import.mjs';
 
 const derive = promisify(scrypt);
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -46,10 +48,12 @@ export function createCentral(config = process.env, transport = fetch, options =
   const run = (sql, ...args) => db.prepare(sql).run(...args);
   const live = config.WHATSAPP_MODE === 'live';
   const media = createMediaStore(db,config,transport,live);
-  let ai;
+  let ai,manualHistory;
   const customerContext = createNotionContext(db,config,transport,{requestIntervalMs:options.notionRequestIntervalMs,aiEnabled:()=>ai?.status().enabled||false});
   const ready = live && ['WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_ACCESS_TOKEN','META_APP_SECRET','WEBHOOK_VERIFY_TOKEN','META_GRAPH_VERSION'].every(k => config[k]);
-  ai = createAIAttendance(db,config,transport,customerContext,{ready:!!ready,debounceMs:options.aiDebounceMs,media});
+  const suppliers=createSupplierRegister(db,config,transport);
+  ai = createAIAttendance(db,config,transport,customerContext,{ready:!!ready,debounceMs:options.aiDebounceMs,media,suppliers,importedHistory:id=>manualHistory?.forAI(id)});
+  manualHistory=createHistoryImport(db,customerContext,ai);
   const centralMCP=createCentralMCP(db,config,transport,{context:customerContext,ai,media,ready:!!ready});
   // Only operational counts and timestamps; no payload, phone or credentials.
   // These observations start again with each server process.
@@ -141,7 +145,8 @@ export function createCentral(config = process.env, transport = fetch, options =
     const reply = (status, data) => {res.writeHead(status, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'});res.end(JSON.stringify(data));};
     const readBody = async () => {
       const chunks=[];let length=0;
-      for await (const chunk of req) {length+=chunk.length;if(length>131072) fail(413,'Mensagem muito grande.');chunks.push(chunk);}
+      const limit=/^\/api\/conversations\/[^/]+\/history-import\//.test(url.pathname)?2_100_000:131072;
+      for await (const chunk of req) {length+=chunk.length;if(length>limit) fail(413,'Mensagem muito grande.');chunks.push(chunk);}
       return Buffer.concat(chunks);
     };
     try {
@@ -249,6 +254,18 @@ export function createCentral(config = process.env, transport = fetch, options =
         return reply(200,centralMCP.status());
       }
       if(url.pathname==='/api/ai/status'&&req.method==='GET')return reply(200,ai.status());
+      if(url.pathname==='/api/suppliers/status'&&req.method==='GET')return reply(200,suppliers.status());
+      if(url.pathname==='/api/suppliers/sync'&&req.method==='POST'){
+        if(user.role!=='admin')fail(403,'Somente administradores podem sincronizar fornecedores.');
+        if(!suppliers.status().enabled)fail(503,'Configure NOTION_SUPPLIERS_DATA_SOURCE_ID e o acesso à base antes de sincronizar.');
+        await suppliers.process(true);return reply(200,suppliers.status());
+      }
+      const historyMatch=url.pathname.match(/^\/api\/conversations\/([^/]+)\/history-import\/(inspect|preview|confirm)$/);
+      if(historyMatch&&req.method==='POST'){
+        if(user.role!=='admin')fail(403,'Somente administradores podem importar histórico.');
+        const c=get('SELECT * FROM conversations WHERE id=?',historyMatch[1]);if(!c)fail(404,'Conversa não encontrada.');
+        return reply(200,historyMatch[2]==='inspect'?manualHistory.inspect(body):manualHistory[historyMatch[2]](c,body,user));
+      }
       if(url.pathname==='/api/ai/simulate'&&req.method==='POST'){
         if(user.role!=='admin')fail(403,'Somente administradores podem abrir o teste.');
         return reply(200,simulateAttendance(body.message));
@@ -342,7 +359,7 @@ export function createCentral(config = process.env, transport = fetch, options =
         res.setHeader('set-cookie','central_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');return reply(200,{ok:true});
       }
       if (url.pathname==='/api/state' && req.method==='GET') {
-        tick();return reply(200,{user,mode:live?'live':'demo',connected:!!ready,externalAlerts:!!config.ALERT_WEBHOOK_URL,agents:all('SELECT id,name,email,role,active FROM agents'),contacts:all('SELECT * FROM contacts ORDER BY name COLLATE NOCASE'),conversations:all('SELECT * FROM conversations ORDER BY updated DESC'),messages:media.messages(all('SELECT * FROM messages ORDER BY created')),mediaStorage:media.stats(),contexts:all('SELECT conversation_id,client_name,kind,mode,version FROM conversation_context'),notion:customerContext.status(),ai:ai.status(),settings:get('SELECT minutes FROM settings WHERE id=1')});
+        tick();return reply(200,{user,mode:live?'live':'demo',connected:!!ready,externalAlerts:!!config.ALERT_WEBHOOK_URL,agents:all('SELECT id,name,email,role,active FROM agents'),contacts:all('SELECT * FROM contacts ORDER BY name COLLATE NOCASE'),conversations:all('SELECT * FROM conversations ORDER BY updated DESC'),messages:[...media.messages(all('SELECT * FROM messages ORDER BY created')),...manualHistory.messages()].sort((a,b)=>a.created-b.created),suppliers:suppliers.status(),mediaStorage:media.stats(),contexts:all('SELECT conversation_id,client_name,kind,mode,version FROM conversation_context'),notion:customerContext.status(),ai:ai.status(),settings:get('SELECT minutes FROM settings WHERE id=1')});
       }
       if (url.pathname === '/api/contacts' && req.method === 'GET') return reply(200,{contacts:all('SELECT * FROM contacts ORDER BY name COLLATE NOCASE')});
       const contactMatch=url.pathname.match(/^\/api\/contacts\/([^/]+)$/);
@@ -480,16 +497,17 @@ export function createCentral(config = process.env, transport = fetch, options =
   const timer=setInterval(async()=>{
     if(delivering)return;
     delivering=true;
-    try{await deliverAlerts();await media.processPending();await customerContext.processQueue();}catch{console.error('Falha ao verificar lembretes, anexos ou integração.');}finally{delivering=false;}
+    try{await deliverAlerts();await media.processPending();await customerContext.processQueue();await suppliers.process();}catch{console.error('Falha ao verificar lembretes, anexos ou integração.');}finally{delivering=false;}
   },60000);
   timer.unref();
-  return {server,db,intake,tick,deliverAlerts,media,customerContext,ai,close:()=>{
+  return {server,db,intake,tick,deliverAlerts,media,customerContext,ai,suppliers,manualHistory,close:()=>{
     clearInterval(timer);
     clearInterval(aiTimer);
     return new Promise((resolve,reject)=>server.close(async error=>{
       await media.close();
       await ai.close();
       await customerContext.close();
+      await suppliers.close();
       db.close();
       if(error&&error.code!=='ERR_SERVER_NOT_RUNNING')reject(error);else resolve();
     }));

@@ -26,6 +26,31 @@ test('simulação gratuita não usa modelo nem grava atendimento',()=>{
   const result=simulateAttendance('Quero falar com uma pessoa');assert.equal(result.simulation,true);assert.equal(result.handoff,true);
   assert.equal(simulateAttendance('Ofereço parceria comercial').kind,'comercial');assert.throws(()=>simulateAttendance(''),/mensagem de teste/);
 });
+
+test('oferta comercial fica na fila de fornecedores, fora do cadastro e histórico de clientes',async t=>{
+  const result={...output,reply:'Obrigado por apresentar seu serviço. Por enquanto não precisamos; podemos conversar se surgir uma demanda.',kind:'comercial',summary:'Contato oferece pintura; empresa ainda não confirmada.',missing:'',nextStep:'Consultar somente se houver necessidade futura'};
+  const f=fixture(t,{},async url=>url.includes('openai.com')?Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify(result)}]}]}):null);
+  const c=f.incoming('Gostaria de falar com Gustavo. Ofereço serviços de pintura.');
+  f.app.customerContext.view(c.id);f.app.db.prepare('UPDATE conversation_context SET client_id=? WHERE conversation_id=?').run(randomUUID(),c.id);
+  await f.app.ai.process();
+  assert.equal(f.app.suppliers.status().pending,1);assert.equal(f.app.suppliers.status().enabled,false);
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM notion_client_operations').get().n,0);
+  assert.equal(f.app.db.prepare("SELECT client_id FROM service_events WHERE actor='Domum · IA'").get().client_id,null);
+  assert.equal(f.app.db.prepare("SELECT COUNT(*) AS n FROM service_requests").get().n,0);
+  assert.equal(f.app.db.prepare("SELECT state FROM ai_jobs").get().state,'done');
+});
+
+test('histórico manual acompanha a próxima mensagem sem gerar resposta ao importar ou servir de cadastro',async t=>{
+  const f=fixture(t);const c=f.incoming('Olá');
+  const d=new Date(Date.now()-3*3600000-3600000),line=d.getUTCDate()+'/'+(d.getUTCMonth()+1)+'/'+d.getUTCFullYear()+' '+d.getUTCHours()+':'+String(d.getUTCMinutes()).padStart(2,'0')+' - Cliente: Já enviei a matrícula ontem.';
+  const actor={id:'admin'},draft=f.app.manualHistory.preview(c,{text:line,dateOrder:'dmy',customerName:'Cliente',participantsConfirmed:true},actor);
+  f.app.manualHistory.confirm(c,{...draft,confirmed:true},actor);await f.app.ai.process();assert.equal(f.calls.length,0);
+  f.app.db.prepare("UPDATE conversation_context SET mode='assisted' WHERE conversation_id=?").run(c.id);f.app.ai.release(c);
+  f.incoming('Podemos continuar de onde paramos?');await f.app.ai.process();
+  const input=JSON.parse(f.calls.find(c=>c.url.includes('openai.com')).body.input[0].content);
+  assert.equal(input.importedHistory.source,'exportacao_manual_nao_verificada');assert.equal(input.importedHistory.messages[0].text,'Já enviei a matrícula ontem.');
+  assert.ok(input.messages.every(m=>!m.text.includes('Já enviei a matrícula')));
+});
 test('chave presente sem limite autorizado ou ativação não chama APIs',async t=>{
   for(const extra of [{AI_MONTHLY_BUDGET_USD:'0'},{AI_ENABLED:'false'},{AI_ALLOWED_PHONES:''},{WHATSAPP_MODE:'demo'}]){
     const f=fixture(t,extra);f.incoming();await f.app.ai.process();assert.equal(f.calls.length,0);assert.equal(f.app.ai.status().enabled,false);
