@@ -4,13 +4,14 @@ import {Readable} from 'node:stream';
 import {createCentral} from '../server.mjs';
 import {opusDuration} from '../audio-format.mjs';
 import {knowledgeFor} from '../attendance-knowledge.mjs';
+import {createMediaStore} from '../media.mjs';
 
-function voice(frames=1){
-  const head=Buffer.alloc(19);head.write('OpusHead');head[8]=1;head[9]=1;head.writeUInt32LE(48000,12);
+function voice(frames=1,options={}){
+  const head=Buffer.alloc(19);head.write('OpusHead');head[8]=options.version??1;head[9]=1;head.writeUInt32LE(48000,12);
   const tags=Buffer.alloc(16);tags.write('OpusTags');
-  const packets=[head,tags,...Array.from({length:frames},()=>Buffer.from([0xf8,0xff,0xfe]))];
+  const packets=[head,...(options.noTags?[]:[tags]),...Array.from({length:frames},()=>Buffer.from([0xf8,0xff,0xfe]))];
   return Buffer.concat(packets.map((p,i)=>{
-    const h=Buffer.alloc(28);h.write('OggS');h[5]=i===0?2:i===packets.length-1?4:0;h.writeBigUInt64LE(BigInt(Math.max(0,i-1)*960),6);h.writeUInt32LE(1,14);h.writeUInt32LE(i,18);h[26]=1;h[27]=p.length;
+    const h=Buffer.alloc(28);h.write('OggS');h[5]=i===0?2:i===packets.length-1&&!options.noEOS?4:0;h.writeBigUInt64LE(BigInt(Math.max(0,i-1)*960),6);h.writeUInt32LE(1,14);h.writeUInt32LE((options.sequence||0)+i,18);h[26]=1;h[27]=p.length;
     const page=Buffer.concat([h,p]);let crc=0;for(const b of page){crc^=b<<24;for(let bit=0;bit<8;bit++)crc=crc&0x80000000?(crc<<1)^0x04c11db7:crc<<1;}page.writeUInt32LE(crc>>>0,22);return page;
   }));
 }
@@ -35,6 +36,22 @@ test('duração Opus usa pacotes, limita tamanho e rejeita cadeia/truncamento',(
   assert.throws(()=>opusDuration(Buffer.concat([voice(),voice()])));
   assert.throws(()=>opusDuration(voice(15001)));
 });
+test('exportações móveis sem EOS, metadados ou sequência inicial zero preservam duração',()=>{
+  assert.equal(opusDuration(voice(50,{noEOS:true,sequence:9,version:0})),1);
+  assert.equal(opusDuration(voice(50,{noTags:true,noEOS:true})),1);
+});
+
+test('falha na leitura de duração não descarta áudio; bloqueios antigos são recuperáveis sem consumir IA',async t=>{
+  const f=await fixture(t),data=voice();data.writeUInt32LE(20,47+18); // Deliberately inconsistent page sequence.
+  assert.throws(()=>opusDuration(data));
+  const req=Readable.from([data]);req.headers={'content-type':'audio/ogg'};
+  const saved=await f.app.media.upload(req,new URLSearchParams({kind:'audio',name:'voz.ogg'}));assert.equal(saved.state,'ready');
+  assert.deepEqual(Buffer.from(f.app.media.content(saved.id).data),data);
+  f.app.db.prepare("UPDATE media SET state='blocked',error='Use áudio OGG com codec Opus válido.',attempts=3 WHERE id=?").run(saved.id);
+  const recovered=createMediaStore(f.app.db,{MEDIA_STORAGE_MAX_MB:500},async()=>{throw Error('No external calls');},false);t.after(()=>recovered.close());
+  assert.equal(recovered.find(saved.id).state,'pending');assert.equal(recovered.find(saved.id).attempts,0);assert.equal(f.calls.length,0);assert.equal(f.app.ai.status().usedTotalUsd,0);
+});
+
 test('áudio vira texto de contexto, conserva original e custo conjunto, sem repetir transcrição',async t=>{
   const f=await fixture(t),c=f.incoming(true);await f.app.ai.process();
   assert.equal(f.calls.length,3);assert.equal(f.calls[0].options.body.get('model'),'gpt-transcribe');

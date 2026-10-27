@@ -1,5 +1,5 @@
 import { randomUUID, createHash, timingSafeEqual } from 'node:crypto';
-import {opusDuration} from './audio-format.mjs';
+import {isOggOpus} from './audio-format.mjs';
 
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
 const limits = { image: 5_000_000, document: 20_000_000, sticker: 500_000, audio:16_000_000 };
@@ -18,7 +18,7 @@ function validateBytes(kind, mime, data) {
   validateType(kind,mime);
   if (!data.length || data.length > limits[kind]) fail(413,'Arquivo vazio ou acima do limite permitido. Imagens: 5 MB; documentos: 20 MB; figurinhas: até 500 KB.');
   let valid = true;
-  if(mime==='audio/ogg'){try{opusDuration(data,86400);}catch{fail(415,'Use áudio OGG com codec Opus válido.');}}
+  if(mime==='audio/ogg'&&!isOggOpus(data))fail(415,'O arquivo não contém uma mensagem de voz OGG/Opus reconhecível.');
   if(mime==='audio/mpeg')valid=data.subarray(0,3).toString()==='ID3'||(data[0]===255&&(data[1]&0xe0)===0xe0);
   if(mime==='audio/aac')valid=data[0]===255&&(data[1]&0xf6)===0xf0;
   if(mime==='audio/mp4')valid=data.length>12&&data.toString('ascii',4,8)==='ftyp';
@@ -56,6 +56,9 @@ export function createMediaStore(db,config,transport,live) {
   const configuredMB=Number(config.MEDIA_STORAGE_MAX_MB||500);
   if(!Number.isInteger(configuredMB)||configuredMB<1||configuredMB>500)fail(500,'MEDIA_STORAGE_MAX_MB deve ser um inteiro entre 1 e 500.');
   const maxBytes=configuredMB*1_000_000;
+  // Re-fetch voices rejected by the old packet timer. This only downloads from
+  // Meta; it neither resumes an AI job nor calls a paid transcription API.
+  run("UPDATE media SET state='pending',attempts=0,next_attempt=0,error=NULL WHERE kind='audio' AND state='blocked' AND error IN ('Use áudio OGG com codec Opus válido.','Use áudio OGG com codec Opus de até 5 minutos.')");
   const used=()=>get('SELECT COALESCE(SUM(length(data)),0) AS bytes FROM media').bytes;
   const view=row=>row?{id:row.id,kind:row.kind,mime:row.mime,name:row.name,size:row.byte_size,state:row.state,error:row.error,favorite:!!row.favorite,url:row.state==='ready'?'/api/media/'+row.id+'/content':null}:null;
   const columns='id,kind,mime,name,byte_size,provider_id,expected_hash,state,error,attempts,next_attempt,favorite,created';

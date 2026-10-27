@@ -241,7 +241,13 @@ export function createNotionContext(db,config,transport,options={}){
     const expected={clients:{'Nome do Cliente':'title',Telefone:'phone_number','ID de criação na central':'rich_text'},history:{Registro:'title','ID do evento':'rich_text','Cliente cadastrado':'relation','Data do acontecimento':'date',Resumo:'rich_text',Qualificação:'select'}};
     const missing=[];for(const [name,schema]of Object.entries(expected))for(const [property,type]of Object.entries(schema))if(({clients,history})[name].properties?.[property]?.type!==type)missing.push(name+': '+property);
     if(missing.length)fail(409,'Confira as propriedades das bases: '+missing.join(', '));
-    return {...status(),accessVerified:true,verifiedAt:Date.now()};
+    const sourceChecks=Object.entries(sources).map(([name,id])=>({name,field:sourceFields[name],sourceId:id,configured:!!id,accessible:['clients','history'].includes(name)}));
+    for(const check of sourceChecks.filter(c=>c.configured&&!['clients','history'].includes(c.name))){
+      try{await api('data_sources/'+check.sourceId);check.accessible=true;}
+      catch(error){check.accessible=false;check.error=error.message;}
+    }
+    const pendingSources=sourceChecks.filter(c=>c.configured&&!c.accessible);
+    return {...status(),accessVerified:true,allConfiguredSourcesVerified:pendingSources.length===0,sourceChecks,pendingSources,verifiedAt:Date.now()};
   }
   function integrationRecord(conversationId,draftId,messageId,state){
     const descriptions={sent:'Mensagem da conexão Notion aceita pela Meta; entrega ainda deve ser conferida.',failed:'Envio da conexão Notion não realizado ou recusado.',unknown:'Resultado do envio da conexão Notion não confirmado; conferir no WhatsApp antes de nova tentativa.'};

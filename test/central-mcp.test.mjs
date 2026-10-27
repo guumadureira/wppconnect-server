@@ -27,7 +27,7 @@ test('MCP exige credencial própria, origem válida e não aceita cookie como au
   assert.equal((await f.post(rpc,{},'GET')).status,405);
   const init=await(await f.post(rpc)).json();assert.equal(init.result.protocolVersion,'2025-06-18');
   assert.equal((await f.post({jsonrpc:'2.0',method:'notifications/initialized'})).status,202);
-  const list=await(await f.post({jsonrpc:'2.0',id:2,method:'tools/list'})).json();assert.equal(list.result.tools.length,5);
+  const list=await(await f.post({jsonrpc:'2.0',id:2,method:'tools/list'})).json();assert.equal(list.result.tools.length,7);
   assert.ok(list.result.tools.find(x=>x.name==='confirmar_envio').annotations.destructiveHint);
   assert.equal((await fetch(f.base+'/api/state',{headers:{authorization:'Bearer '+key}})).status,401);
   assert.ok(!JSON.stringify(init).includes(key));assert.equal(f.calls.length,0);
