@@ -31,3 +31,9 @@ test('criação incerta é reconciliada por telefone/chave sem duplicar nem reve
 test('duplicidade no Notion exige conferência e não cria outro cadastro',async t=>{
   const f=setup(t,'ambiguous');f.register.record({id:'c',phone,name:'Contato',last_inbound:Date.now()},{kind:'comercial',summary:'Oferece serviço'});await f.register.process();assert.equal(f.creates(),0);assert.match(f.register.status().lastError,/Mais de um/);
 });
+
+test('categoria e descrição sucinta são enviadas à base exclusiva',async t=>{
+  const f=setup(t);f.register.record({id:'c',phone,name:'Nome de perfil',last_inbound:Date.now()},{kind:'comercial',summary:'Resumo amplo',supplier:{name:'Wilton',description:'Oferece pintura residencial.',category:'Mão de obra e execução'}});
+  await f.register.process();const create=f.calls.find(c=>c.url.endsWith('/pages'));
+  assert.equal(create.body.properties.Contato.title[0].text.content,'Wilton');assert.equal(create.body.properties.Categoria.select.name,'Mão de obra e execução');assert.equal(create.body.properties['Resumo da IA'].rich_text[0].text.content,'Oferece pintura residencial.');
+});

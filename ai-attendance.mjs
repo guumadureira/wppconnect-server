@@ -2,12 +2,15 @@ import { randomUUID } from 'node:crypto';
 import { attendanceInstructions as instructions } from './ai-attendance-guide.mjs';
 import {createAudioTranscription} from './audio-transcription.mjs';
 import {knowledgeFor} from './attendance-knowledge.mjs';
+import {supplierCategories} from './supplier-register.mjs';
 
 // Fixed model and standard text rates verified on 2026-10-26. No model tools.
 const MODEL='gpt-5.4-mini-2026-03-17',INPUT_USD=0.75/1e6,OUTPUT_USD=4.5/1e6,MAX_OUTPUT=1800;
 const kinds=['atendimento','orcamento','andamento','documentos','alteracao','comercial','administrativo','outro'];
 const intakeSchema={type:'object',additionalProperties:false,required:['ready','name','city','service','nameMessageId','cityMessageId','serviceMessageId'],properties:{ready:{type:'boolean'},...Object.fromEntries(['name','city','service','nameMessageId','cityMessageId','serviceMessageId'].map(k=>[k,{type:'string'}]))}};
 const schema={type:'object',additionalProperties:false,required:['reply','summary','missing','nextStep','kind','handoff','reason','intake'],properties:{reply:{type:'string',maxLength:700},summary:{type:'string'},missing:{type:'string'},nextStep:{type:'string'},kind:{type:'string',enum:kinds},handoff:{type:'boolean'},reason:{type:'string'},intake:intakeSchema}};
+const supplierSchema={type:'object',additionalProperties:false,required:['name','description','category','sourceMessageId','complete'],properties:{name:{type:'string',maxLength:120},description:{type:'string',maxLength:240},category:{type:'string',enum:supplierCategories},sourceMessageId:{type:'string',maxLength:120},complete:{type:'boolean'}}};
+schema.required.push('supplier');schema.properties.supplier={anyOf:[supplierSchema,{type:'null'}]};
 const fail=(status,message)=>{throw Object.assign(new Error(message),{status});};
 const month=()=>new Date().toISOString().slice(0,7);
 
@@ -67,6 +70,15 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
     if(/R\$|\b(?:custa|custará|garantimos)\b|\b(?:prazo|entrega).{0,35}\d/i.test(result.reply))throw Error('Unapproved commitment');
     if(!result.reply.trim()&&!result.handoff)throw Error('Empty output');return result;
   }
+  function supplierEvidence(result,history){
+    const s=result.supplier;if(s==null)return;
+    if(result.kind!=='comercial'||typeof s.complete!=='boolean'||!supplierCategories.includes(s.category))throw Error('Invalid supplier');
+    for(const [key,max]of Object.entries({name:120,description:240,sourceMessageId:120}))if(typeof s[key]!=='string'||s[key].length>max||/\0/.test(s[key]))throw Error('Invalid supplier field');
+    const source=history.find(m=>m.direction==='in'&&m.id===s.sourceMessageId);
+    if((s.description||s.complete)&&!source)throw Error('Supplier source unavailable');
+    if(s.name&&!history.some(m=>m.direction==='in'&&m.body.toLocaleLowerCase('pt-BR').includes(s.name.toLocaleLowerCase('pt-BR'))))s.name='';
+    if(s.complete&&(!s.description.trim()||s.category==='A identificar'))throw Error('Supplier service unavailable');
+  }
   function registrationEvidence(result,history){
     const intake=result.intake;if(!intake?.ready)return null;
     if(!['atendimento','orcamento','documentos'].includes(result.kind))throw Error('Commercial registration');
@@ -123,6 +135,7 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
       if(Number.isSafeInteger(data.usage?.input_tokens)&&Number.isSafeInteger(data.usage?.output_tokens)&&data.usage.input_tokens>=0&&data.usage.output_tokens>=0)run('UPDATE ai_jobs SET cost_usd=? WHERE id=?',data.usage.input_tokens*INPUT_USD+data.usage.output_tokens*OUTPUT_USD,job.id);
       if(data.status!=='completed')throw Error('Incomplete output');
       const result=validated(JSON.parse((data.output||[]).filter(o=>o.type==='message').flatMap(o=>o.content||[]).filter(c=>c.type==='output_text').map(c=>c.text).join('')));
+      supplierEvidence(result,history);
       run('UPDATE ai_jobs SET result=? WHERE id=?',JSON.stringify(result),job.id);
       if(!valid(job)){run("UPDATE ai_jobs SET state='cancelled',updated=? WHERE id=?",Date.now(),job.id);return;}
       if(!ctx.client_id&&String(config.AI_AUTO_REGISTER)==='true'){
@@ -145,7 +158,10 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
       }
       run("UPDATE ai_jobs SET state='done',updated=? WHERE id=?",Date.now(),job.id);
       context.aiRecord(conversation.id,job.id,result,result.handoff);
-      if(result.handoff)pause(conversation.id,result.reason||'Atendimento pronto para a equipe.');
+      if(result.kind==='comercial'&&result.supplier?.complete&&!result.handoff&&result.reply.trim()&&valid(job)){
+        const closed=run("UPDATE conversations SET status='closed',pending_since=NULL WHERE id=? AND last_received=? AND status='open'",conversation.id,conversation.last_received);
+        if(closed.changes)pause(conversation.id);
+      }else if(result.handoff)pause(conversation.id,result.reason||'Atendimento pronto para a equipe.');
     }catch(error){
       if(!valid(job)){run("UPDATE ai_jobs SET state='cancelled',updated=? WHERE id=?",Date.now(),job.id);return;}
       const reason=error.aiReason||'A IA não concluiu esta etapa. A equipe precisa conferir; não haverá reenvio automático.';

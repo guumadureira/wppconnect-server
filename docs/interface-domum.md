@@ -2,6 +2,8 @@
 
 A área de conversa ocupa o espaço disponível na janela, com lista e mensagens em rolagens próprias. O campo de resposta permanece visível. Os três indicadores deixam a área principal e ficam compactos na lateral grafite.
 
+A atualização em segundo plano preserva o foco e a seleção atuais no momento de reconstruir a tela. Não restaura valores capturados antes da requisição, evitando desviar um clique para a busca ou copiar um rascunho para outro contato. Conversa concluída explica o bloqueio de escrita e oferece Reabrir para responder. A correção foi reproduzida em navegador local com requisição atrasada, escrita durante a espera e troca de conversa antes da resposta do servidor.
+
 Os indicadores são atalhos: Conversas abertas, Precisam de atenção e Retornos agendados. Ao clicar, a central limpa a busca e consulta todos os períodos, para incluir pendências antigas contadas no indicador. Não altera mensagens, responsável ou situação. Um aviso na lista identifica o filtro de atenção/retorno e permite removê-lo. Abrir um contato diretamente continua selecionando a conversa pedida, mesmo quando ela estava fora desse filtro.
 
 O aviso fixo de validação do modo real foi retirado da tela principal. A área Conexão mantém seus diagnósticos. O aviso de demonstração continua visível nesse modo.

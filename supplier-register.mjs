@@ -1,17 +1,20 @@
 import {randomUUID} from 'node:crypto';
 const rt=value=>({rich_text:[{text:{content:String(value||'').slice(0,1800)}}]});
+export const supplierCategories=['Materiais e produtos','Mão de obra e execução','Projetos e serviços técnicos','Serviços para empresas','Outros','A identificar'];
 export function createSupplierRegister(db,config,transport){
   const get=(s,...a)=>db.prepare(s).get(...a),all=(s,...a)=>db.prepare(s).all(...a),run=(s,...a)=>db.prepare(s).run(...a);
   db.exec(`CREATE TABLE IF NOT EXISTS supplier_contacts(id TEXT PRIMARY KEY,phone TEXT UNIQUE NOT NULL,conversation_id TEXT NOT NULL,name TEXT NOT NULL,summary TEXT NOT NULL,last_contact INTEGER NOT NULL,version INTEGER NOT NULL DEFAULT 1,notion_id TEXT,state TEXT NOT NULL DEFAULT 'pending',error TEXT,next_attempt INTEGER NOT NULL DEFAULT 0);`);
+  if(!db.prepare('PRAGMA table_info(supplier_contacts)').all().some(c=>c.name==='category'))db.exec("ALTER TABLE supplier_contacts ADD COLUMN category TEXT NOT NULL DEFAULT 'A identificar'");
   run("UPDATE supplier_contacts SET state='uncertain',error='Cadastro anterior sem resultado confirmado; conferir no Notion.' WHERE state='creating'");
   const source=String(config.NOTION_SUPPLIERS_DATA_SOURCE_ID||'').trim().replace(/^collection:\/\//,'');
   const sourceValid=/^[a-f\d]{8}-(?:[a-f\d]{4}-){3}[a-f\d]{12}$/i.test(source);
   const enabled=()=>String(config.NOTION_ENABLED)==='true'&&!!String(config.NOTION_TOKEN||'').trim()&&sourceValid;
   function record(c,result){
     if(result.kind!=='comercial')return;
+    const name=result.supplier?.name||c.name,summary=(result.supplier?.description||result.summary).slice(0,240),category=result.supplier?.category||'A identificar';
     const old=get('SELECT * FROM supplier_contacts WHERE phone=?',c.phone);
-    if(old)run("UPDATE supplier_contacts SET name=?,summary=?,last_contact=?,conversation_id=?,version=version+1,state=CASE WHEN state IN ('creating','uncertain') THEN state ELSE 'pending' END,next_attempt=CASE WHEN next_attempt>? THEN next_attempt ELSE 0 END WHERE id=?",c.name,result.summary,c.last_inbound||Date.now(),c.id,Date.now(),old.id);
-    else run('INSERT INTO supplier_contacts(id,phone,conversation_id,name,summary,last_contact) VALUES(?,?,?,?,?,?)',randomUUID(),c.phone,c.id,c.name,result.summary,c.last_inbound||Date.now());
+    if(old)run("UPDATE supplier_contacts SET name=?,summary=?,category=?,last_contact=?,conversation_id=?,version=version+1,state=CASE WHEN state IN ('creating','uncertain') THEN state ELSE 'pending' END,next_attempt=CASE WHEN next_attempt>? THEN next_attempt ELSE 0 END WHERE id=?",name,summary,category,c.last_inbound||Date.now(),c.id,Date.now(),old.id);
+    else run('INSERT INTO supplier_contacts(id,phone,conversation_id,name,summary,category,last_contact) VALUES(?,?,?,?,?,?,?)',randomUUID(),c.phone,c.id,name,summary,category,c.last_inbound||Date.now());
   }
   function status(){return{enabled:enabled(),sourceConfigured:sourceValid,pending:get("SELECT COUNT(*) AS n FROM supplier_contacts WHERE state<>'synced'").n,uncertain:get("SELECT COUNT(*) AS n FROM supplier_contacts WHERE state='uncertain'").n,lastError:get("SELECT error FROM supplier_contacts WHERE error IS NOT NULL ORDER BY last_contact DESC LIMIT 1")?.error||null};}
   let nextAt=0;
@@ -35,7 +38,7 @@ export function createSupplierRegister(db,config,transport){
           if(matches.length)notionId=matches[0].id;
           else if(row.state==='uncertain')throw Object.assign(Error('Criação anterior incerta. Conferir no Notion antes de tentar criar outro cadastro.'),{uncertain:true});
         }
-        const properties={Contato:{title:[{text:{content:row.name.slice(0,160)}}]},Telefone:{phone_number:row.phone},'Resumo da IA':rt(row.summary),'Último contato':{date:{start:new Date(row.last_contact).toISOString()}},'ID da conversa':rt(row.conversation_id),'ID do cadastro':rt(row.id),Origem:{select:{name:'WhatsApp'}}};
+        const properties={Contato:{title:[{text:{content:row.name.slice(0,160)}}]},Telefone:{phone_number:row.phone},Categoria:{select:{name:row.category}},'Resumo da IA':rt(row.summary),'Último contato':{date:{start:new Date(row.last_contact).toISOString()}},'ID da conversa':rt(row.conversation_id),'ID do cadastro':rt(row.id),Origem:{select:{name:'WhatsApp'}}};
         if(notionId)await api('pages/'+notionId,'PATCH',{properties});
         else{
           run("UPDATE supplier_contacts SET state='creating' WHERE id=?",row.id);
