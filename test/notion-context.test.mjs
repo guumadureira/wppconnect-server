@@ -43,6 +43,15 @@ function remote(){
   };
   return {state,transport};
 }
+
+test('verificação distingue cadastro/histórico acessíveis das quatro fontes operacionais sem acesso',async t=>{
+  const r=remote(),base=r.transport;
+  r.transport=async(url,options)=>Object.values(ids).slice(2,6).some(id=>url.endsWith('/data_sources/'+id))?Response.json({message:'private-test-notion-token'},{status:404}):base(url,options);
+  const f=await fixture(t,{remoteServer:r}),diagnostic=await f.app.customerContext.verify();
+  assert.equal(diagnostic.accessVerified,true);assert.equal(diagnostic.allConfiguredSourcesVerified,false);assert.equal(diagnostic.pendingSources.length,4);
+  assert.deepEqual(diagnostic.pendingSources.map(s=>s.name).sort(),['projects','proposals','tasks','works']);
+  assert.ok(!JSON.stringify(diagnostic).includes('private-test-notion-token'));
+});
 async function fixture(t,{enabled=true,config:extra={},remoteServer=remote()}={}){
   const config={DATABASE_PATH:':memory:',WHATSAPP_MODE:'demo',WHATSAPP_PHONE_NUMBER_ID:'test-phone',NOTION_ENABLED:enabled?'true':'false',NOTION_TOKEN:'private-test-notion-token',...Object.fromEntries(Object.entries(ids).filter(([k])=>['clients','history','works','projects','proposals','tasks'].includes(k)).map(([k,v])=>['NOTION_'+k.toUpperCase()+'_DATA_SOURCE_ID',v])),...extra};
   const app=createCentral(config,remoteServer.transport,{notionRequestIntervalMs:0});t?.after(()=>app.close());await new Promise(resolve=>app.server.listen(0,'127.0.0.1',resolve));config.PUBLIC_ORIGIN='http://127.0.0.1:'+app.server.address().port;

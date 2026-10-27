@@ -40,6 +40,8 @@ let emojiOpen=false,contactQuery='',historyDays=7;
 const expandedHistory=new Set();
 const attachmentDrafts=new Map();
 const contextCache=new Map(),contextOpen=new Set();
+const messageViewports=new Map(),panelViewports=new Map(),forceLatest=new Set();
+let conversationResizeObserver=null;
 let notionDiagnostic=null;
 let requestedConversation=null,navigationMissing=false;
 const contextKinds={atendimento:'Atendimento geral',orcamento:'Orçamento',andamento:'Andamento',documentos:'Documentação',alteracao:'Alteração ou problema',comercial:'Contato comercial/fornecedor',administrativo:'Administrativo',outro:'Outro assunto'};
@@ -50,7 +52,7 @@ function notionConnectionCard(){
   const notion=state.notion;if(!notion)return '';
   const labels={NOTION_TOKEN:'Credencial de acesso',NOTION_CLIENTS_DATA_SOURCE_ID:'Fonte de clientes',NOTION_HISTORY_DATA_SOURCE_ID:'Fonte de histórico'};
   const pending=[...(notion.activationPending?['Ativar a conexão no Render: NOTION_ENABLED=true.']:[]),...(notion.missing||[]).map(name=>(labels[name]||'Configuração')+' ausente no servidor: '+name+'.'),...(notion.invalid||[]).map(name=>'Identificador de fonte inválido em '+name+'. Use somente o ID da fonte, sem nome da variável ou sinal de igual; não use a URL da página.')];
-  const diagnosis=notionDiagnostic?'<div class="hint" role="status">'+(notionDiagnostic.error?esc(notionDiagnostic.error):notionDiagnostic.accessVerified?'Acesso às bases principais do Notion conferido.':notionDiagnostic.enabled?'Configuração presente. A confirmação de acesso ainda precisa ser concluída.':'Ainda há configurações pendentes no Render. Confira os itens acima.')+'</div>':'';
+  const diagnosis=notionDiagnostic?'<div class="hint" role="status">'+(notionDiagnostic.error?esc(notionDiagnostic.error):notionDiagnostic.accessVerified?(notionDiagnostic.pendingSources?.length?'Cadastro e histórico acessíveis. Há '+notionDiagnostic.pendingSources.length+' fontes operacionais sem acesso; confira abaixo.':(notionDiagnostic.allConfiguredSourcesVerified?'Acesso às fontes configuradas do Notion conferido.':'Acesso às bases principais do Notion conferido.')):notionDiagnostic.enabled?'Configuração presente. A confirmação de acesso ainda precisa ser concluída.':'Ainda há configurações pendentes no Render. Confira os itens acima.')+(notionDiagnostic.pendingSources?.length?'<ul>'+notionDiagnostic.pendingSources.map(source=>'<li>'+esc(source.field)+': '+esc(source.error||'Fonte sem acesso.')+'</li>').join('')+'</ul><p>Abra cada base no Notion, use o menu ··· → Conexões e confira o acesso da integração cujo token está no Render. Confira também o ID da fonte, que é diferente do ID da página da base.</p>':'')+'</div>':'';
   return '<div class="card full"><h2>Histórico integrado com o Notion</h2><p>'+(notion.enabled?'Conexão configurada. Use a verificação de acesso antes do primeiro vínculo.':'O contexto, as solicitações e o histórico já podem ser salvos na central. A administração precisa configurar o acesso próprio ao Notion para sincronizá-los.')+'</p>'+(state.user.role==='admin'&&pending.length?'<div class="hint"><strong>Para habilitar a integração</strong><ul>'+pending.map(line=>'<li>'+esc(line)+'</li>').join('')+'</ul><p>Salve as configurações no Render, aguarde a atualização concluir e recarregue esta página. Nenhum valor de credencial é exibido aqui.</p></div>':'')+'<p>Registros na fila: '+notion.pendingEvents+' · Resultados a conferir: '+notion.uncertainEvents+'.</p><p>'+(state.ai?.enabled?'Piloto de IA habilitado para contatos autorizados.':'As respostas automáticas da IA ainda não estão ativas.')+'</p>'+(state.user.role==='admin'?'<div class="context-actions"><button id="verify-notion">'+(notion.enabled?'Verificar acesso ao Notion':'Verificar configuração')+'</button><button id="sync-notion" '+(!notion.enabled?'disabled':'')+'>Sincronizar histórico pendente</button></div>'+diagnosis:'')+'</div>';
 }
 let aiDemoResult=null;
@@ -73,7 +75,7 @@ function contextPanel(c){
       if(snap?.history?.rows)body+='<h3>Outros registros do cliente no Notion</h3>'+snap.history.rows.filter(item=>!remoteIds.has(item.id)).map(item=>'<div class="context-entry"><a href="'+esc(item.url)+'" target="_blank" rel="noopener">'+esc(item.title)+'</a><small> · '+esc(item.source)+' · '+esc(item.qualification)+'</small><p class="context-text">'+esc(item.summary)+'</p>'+(item.missing?'<p>Falta: '+esc(item.missing)+'</p>':'')+'</div>').join('');
     }
   }
-  return '<div class="context-toolbar"><button type="button" id="open-customer-context" aria-expanded="'+contextOpen.has(c.id)+'">'+(contextOpen.has(c.id)?'Fechar contexto':'Cliente e histórico')+'</button><span>'+esc(mode==='human'?'Atendimento humano':'Assistência liberada')+(state.ai?.enabled?' · Piloto de IA habilitado':' · IA automática ainda não ativa')+'</span><button type="button" id="take-conversation">Assumir atendimento</button>'+(mode==='human'?'<button type="button" id="release-assistance">Permitir assistência</button>':'')+'</div>'+(contextOpen.has(c.id)?'<aside class="context-panel" aria-label="Contexto interno do atendimento">'+body+'</aside>':'');
+  return '<div class="context-toolbar"><button type="button" id="open-customer-context" aria-expanded="'+contextOpen.has(c.id)+'">'+(contextOpen.has(c.id)?'Fechar contexto':'Cliente e histórico')+'</button><span>'+esc(mode==='human'?'Atendimento humano':'Assistência liberada')+(state.ai?.enabled?' · Piloto de IA habilitado':' · IA automática ainda não ativa')+'</span><button type="button" id="take-conversation">Assumir atendimento</button>'+(mode==='human'?'<button type="button" id="release-assistance">Permitir assistência</button>':'')+'</div>'+(contextOpen.has(c.id)?'<aside class="context-panel" data-conversation-id="'+esc(c.id)+'" aria-label="Contexto interno do atendimento">'+body+'</aside>':'');
 }
 async function contextEdit(){
   const id=active,c=await loadContext(id),requestId=uid(),works=c.snapshot?.sections?.works?.rows||[];
@@ -167,6 +169,41 @@ function chooseConversation(id){
   if(!conversationsInPeriod([conversation],state.messages,historyDays).length)historyDays=0;
   active=id;if(filter!=='all')filter=conversation.status;query='';mobileChat=true;view='inbox';render();
 }
+function captureConversationViewport(){
+  const area=$('.messages'),id=area?.dataset?.conversationId;
+  if(id&&Number.isFinite(area.scrollTop)){
+    const items=area.querySelectorAll?Array.from(area.querySelectorAll('[data-message-id]')):[];
+    const rect=area.getBoundingClientRect?.();
+    const anchor=rect?items.find(item=>item.getBoundingClientRect().bottom>rect.top):null;
+    messageViewports.set(id,{top:area.scrollTop,nearBottom:area.scrollHeight-area.clientHeight-area.scrollTop<=64,anchorId:anchor?.dataset.messageId,anchorOffset:anchor?anchor.getBoundingClientRect().top-rect.top:0});
+  }
+  const panel=$('.context-panel'),panelId=panel?.dataset?.conversationId;
+  if(panelId&&Number.isFinite(panel.scrollTop))panelViewports.set(panelId,panel.scrollTop);
+  conversationResizeObserver?.disconnect();conversationResizeObserver=null;
+}
+function restoreConversationViewport(){
+  const area=$('.messages'),id=area?.dataset?.conversationId;
+  const panel=$('.context-panel'),panelId=panel?.dataset?.conversationId;
+  if(panelId)panel.scrollTop=panelViewports.get(panelId)||0;
+  if(!id)return;
+  const previous=messageViewports.get(id),requestedLatest=forceLatest.delete(id);let follow=!previous||previous.nearBottom||requestedLatest;
+  const position=()=>{
+    if(follow){area.scrollTop=area.scrollHeight;return;}
+    const anchor=previous?.anchorId&&area.querySelectorAll?Array.from(area.querySelectorAll('[data-message-id]')).find(item=>item.dataset.messageId===previous.anchorId):null;
+    if(anchor&&area.getBoundingClientRect)area.scrollTop+=anchor.getBoundingClientRect().top-area.getBoundingClientRect().top-previous.anchorOffset;
+    else if(previous)area.scrollTop=previous.top;
+  };
+  position();
+  area.addEventListener('scroll',()=>{follow=area.scrollHeight-area.clientHeight-area.scrollTop<=64;},{passive:true});
+  // Images, audio metadata, or opening context can change the height after render.
+  area.addEventListener('load',()=>{if(follow)area.scrollTop=area.scrollHeight;},true);
+  area.addEventListener('loadedmetadata',()=>{if(follow)area.scrollTop=area.scrollHeight;},true);
+  if(typeof ResizeObserver!=='undefined'){
+    conversationResizeObserver=new ResizeObserver(()=>{if(follow)area.scrollTop=area.scrollHeight;});
+    conversationResizeObserver.observe(area);
+    area.querySelectorAll('.message').forEach(item=>conversationResizeObserver.observe(item));
+  }
+}
 function setHistoryPeriod(days){
   historyDays=days===0?0:days===15?15:7;active=null;mobileChat=false;expandedHistory.clear();render();
 }
@@ -230,6 +267,7 @@ function badge(c){
   return '<span class="badge '+(isOverdue(c)?'orange':'')+'">'+esc(waiting(c)||(c.followup_at?'Retorno agendado':'Em dia'))+'</span>';
 }
 function render(){
+  captureConversationViewport();
   const draft=$('#reply');if(draft?.dataset.chatId)replyDrafts.set(draft.dataset.chatId,draft.value);
   const t={contacts:['Contatos da Domum.','Organize os clientes e abra a conversa certa.'],inbox:['Seu atendimento, em dia.','Cada conversa com um responsável. Cada cliente com atenção.'],reminders:['Nenhum retorno esquecido.','Acompanhe os clientes que precisam de atenção.'],team:['Uma equipe. Cada um com seu nome.','Configure os atendentes e as assinaturas das mensagens.'],connection:['Conexão com o WhatsApp.','Acompanhe o recebimento e as etapas para ativar a integração.']}[view];
   const n=state.conversations.filter(c=>c.status==='open').length;
@@ -241,6 +279,7 @@ function render(){
   $('#logout')?.addEventListener('click',()=>act(async()=>{await api('/api/logout','POST',{});await boot();}));
   $('#simulate')?.addEventListener('click',simulate);
   bindView();
+  restoreConversationViewport();
 }
 function inbox(){
   if(navigationMissing)return '<div class="card"><h2>Conversa não encontrada</h2><p>A referência aberta não está disponível neste banco. Nenhuma outra conversa foi selecionada.</p><a href="/">Voltar para as conversas</a></div>';
@@ -257,7 +296,7 @@ function chat(c){
   const allMessages=state.messages.filter(m=>m.conversation_id===c.id);
   const cutoff=Date.now()-historyDays*86400000;
   const messages=historyDays&&!expandedHistory.has(c.id)?allMessages.filter(m=>m.created>=cutoff):allMessages;
-  return '<header class="chat-head"><button class="mobile-back" id="back" aria-label="Voltar para conversas">←</button><span class="avatar">'+esc(initials(c.name))+'</span><div class="contact"><strong>'+esc(c.name)+'</strong><span>'+esc(c.phone)+'</span></div><a href="https://wa.me/'+encodeURIComponent(c.phone)+'" target="_blank" rel="noopener">Abrir no WhatsApp</a><button id="followup">Agendar retorno</button><button id="close-chat">'+(c.status==='open'?'Concluir':'Reabrir')+'</button></header><div class="chat-tools"><label>Responsável <select id="owner" aria-label="Responsável"><option value="">Sem responsável</option>'+state.agents.map(a=>'<option value="'+esc(a.id)+'" '+(a.id===c.owner_id?'selected':'')+'>'+esc(a.name)+'</option>').join('')+'</select></label><button id="save-contact">'+((state.contacts||[]).some(contact=>contact.phone===c.phone)?'Editar contato':'Salvar contato')+'</button><span>'+badge(c)+'</span></div>'+contextPanel(c)+(!c.last_inbound&&state.mode==='live'?'<div class="hint">Contato salvo. Para o primeiro envio pela API é necessário um modelo aprovado pela Meta. Você pode iniciar pelo aplicativo em Abrir no WhatsApp. Quando o cliente responder, atenda por aqui.</div>':'')+(c.followup_at?'<div class="return-strip"><span>Retorno: '+formatDate(c.followup_at)+'</span><button id="remove-followup">Remover retorno</button></div>':'')+'<div class="messages" role="log" aria-label="Mensagens">'+(messages.length<allMessages.length?'<div class="history-note">Exibindo as mensagens dos últimos '+historyDays+' dias.<br><button type="button" id="show-older-messages">Ver mensagens anteriores ('+(allMessages.length-messages.length)+')</button></div>':'')+messages.map(m=>'<div class="message '+(m.direction==='out'?'out ':'')+esc(m.status)+'">'+messageText(m)+(m.agent_name==='Domum · IA'?'<small> · Domum · IA</small>':'')+attachmentMarkup(m.attachment)+(m.transcription?'<details><summary>Transcrição automática</summary><p>'+esc(m.transcription)+'</p></details>':'')+'<time>'+formatTime(m.created)+' · '+esc(({simulated:'simulado',received:'recebida',sent:'enviada',delivered:'entregue',read:'lida',failed:'falhou',unknown:'envio não confirmado',sending:'enviando'})[m.status]||m.status)+'</time></div>').join('')+'</div><form id="reply-form" class="composer"><div class="signature">Assinando como '+esc(signedName())+':</div><div class="emoji-toolbar"><button id="emoji-toggle" type="button" aria-label="Adicionar emoji" aria-controls="emoji-picker" aria-expanded="'+emojiOpen+'" '+(c.status==='closed'||sending?'disabled':'')+'>☺ Emojis</button><div id="emoji-picker" class="emoji-picker" aria-label="Emojis" '+(emojiOpen?'':'hidden')+'>'+emojiChoices.map(emoji=>'<button type="button" data-emoji="'+esc(emoji)+'" aria-label="Inserir '+esc(emoji)+'">'+emoji+'</button>').join('')+'</div></div>'+attachmentPreview(c)+'<div class="compose-row"><textarea id="reply" data-chat-id="'+esc(c.id)+'" aria-label="Sua mensagem" placeholder="Escreva sua mensagem..." maxlength="3900" '+(c.status==='closed'?'disabled':'')+'>'+esc(replyDrafts.get(c.id)||'')+'</textarea><button type="submit" class="primary" '+(c.status==='closed'||sending?'disabled':'')+'>Enviar</button></div><footer><label class="enter-preference"><input id="enter-sends" type="checkbox" '+(sendWithEnter?'checked':'')+'> Enter envia · Shift+Enter quebra linha</label><span>'+esc(state.mode==='demo'?'Envio simulado':'Janela de resposta: 24 horas')+'</span></footer></form>';
+  return '<header class="chat-head"><button class="mobile-back" id="back" aria-label="Voltar para conversas">←</button><span class="avatar">'+esc(initials(c.name))+'</span><div class="contact"><strong>'+esc(c.name)+'</strong><span>'+esc(c.phone)+'</span></div><a href="https://wa.me/'+encodeURIComponent(c.phone)+'" target="_blank" rel="noopener">Abrir no WhatsApp</a><button id="followup">Agendar retorno</button><button id="close-chat">'+(c.status==='open'?'Concluir':'Reabrir')+'</button></header><div class="chat-tools"><label>Responsável <select id="owner" aria-label="Responsável"><option value="">Sem responsável</option>'+state.agents.map(a=>'<option value="'+esc(a.id)+'" '+(a.id===c.owner_id?'selected':'')+'>'+esc(a.name)+'</option>').join('')+'</select></label><button id="save-contact">'+((state.contacts||[]).some(contact=>contact.phone===c.phone)?'Editar contato':'Salvar contato')+'</button><span>'+badge(c)+'</span></div>'+contextPanel(c)+(!c.last_inbound&&state.mode==='live'?'<div class="hint">Contato salvo. Para o primeiro envio pela API é necessário um modelo aprovado pela Meta. Você pode iniciar pelo aplicativo em Abrir no WhatsApp. Quando o cliente responder, atenda por aqui.</div>':'')+(c.followup_at?'<div class="return-strip"><span>Retorno: '+formatDate(c.followup_at)+'</span><button id="remove-followup">Remover retorno</button></div>':'')+'<div class="messages" data-conversation-id="'+esc(c.id)+'" role="log" aria-label="Mensagens">'+(messages.length<allMessages.length?'<div class="history-note">Exibindo as mensagens dos últimos '+historyDays+' dias.<br><button type="button" id="show-older-messages">Ver mensagens anteriores ('+(allMessages.length-messages.length)+')</button></div>':'')+messages.map(m=>'<div data-message-id="'+esc(m.id)+'" class="message '+(m.direction==='out'?'out ':'')+esc(m.status)+'">'+messageText(m)+(m.agent_name==='Domum · IA'?'<small> · Domum · IA</small>':'')+attachmentMarkup(m.attachment)+(m.transcription?'<details><summary>Transcrição automática</summary><p>'+esc(m.transcription)+'</p></details>':'')+'<time>'+formatTime(m.created)+' · '+esc(({simulated:'simulado',received:'recebida',sent:'enviada',delivered:'entregue',read:'lida',failed:'falhou',unknown:'envio não confirmado',sending:'enviando'})[m.status]||m.status)+'</time></div>').join('')+'</div><form id="reply-form" class="composer"><div class="signature">Assinando como '+esc(signedName())+':</div><div class="emoji-toolbar"><button id="emoji-toggle" type="button" aria-label="Adicionar emoji" aria-controls="emoji-picker" aria-expanded="'+emojiOpen+'" '+(c.status==='closed'||sending?'disabled':'')+'>☺ Emojis</button><div id="emoji-picker" class="emoji-picker" aria-label="Emojis" '+(emojiOpen?'':'hidden')+'>'+emojiChoices.map(emoji=>'<button type="button" data-emoji="'+esc(emoji)+'" aria-label="Inserir '+esc(emoji)+'">'+emoji+'</button>').join('')+'</div></div>'+attachmentPreview(c)+'<div class="compose-row"><textarea id="reply" data-chat-id="'+esc(c.id)+'" aria-label="Sua mensagem" placeholder="Escreva sua mensagem..." maxlength="3900" '+(c.status==='closed'?'disabled':'')+'>'+esc(replyDrafts.get(c.id)||'')+'</textarea><button type="submit" class="primary" '+(c.status==='closed'||sending?'disabled':'')+'>Enviar</button></div><footer><label class="enter-preference"><input id="enter-sends" type="checkbox" '+(sendWithEnter?'checked':'')+'> Enter envia · Shift+Enter quebra linha</label><span>'+esc(state.mode==='demo'?'Envio simulado':'Janela de resposta: 24 horas')+'</span></footer></form>';
 }
 function contactsView(){
   const contacts=(state.contacts||[]).filter(contact=>(contact.name+' '+contact.phone+' '+contact.email).toLowerCase().includes(contactQuery.toLowerCase()));
@@ -343,7 +382,7 @@ function bindView(){
   $('#verify-notion')?.addEventListener('click',()=>act(async()=>{
     notionDiagnostic=await api('/api/notion/status');
     if(!notionDiagnostic.enabled){await refresh();toast('Confira os itens de configuração indicados na tela.');return;}
-    try{notionDiagnostic=await api('/api/notion/verify','POST',{});toast('Acesso às bases principais do Notion conferido.');await refresh();}
+    try{notionDiagnostic=await api('/api/notion/verify','POST',{});toast(notionDiagnostic.pendingSources?.length?'Cadastro e histórico acessíveis; confira as fontes operacionais pendentes.':'Acesso às fontes configuradas do Notion conferido.');await refresh();}
     catch(error){notionDiagnostic={...notionDiagnostic,error:error.message};render();throw error;}
   }));
   $('#sync-notion')?.addEventListener('click',()=>act(async()=>{const result=await api('/api/notion/sync','POST',{});toast('Sincronização consultada. Pendentes: '+result.pendingEvents+'; a conferir: '+result.uncertainEvents+'.');await refresh();}));
@@ -387,7 +426,7 @@ function bindView(){
           const result=await api('/api/conversations/'+encodeURIComponent(c.id)+'/messages','POST',{text,requestId:outgoingRequest.id,attachmentId:attachment?.id});
           if(!['sent','simulated','delivered','read'].includes(result.message.status))throw new Error('Envio anterior não confirmado ou recusado. Confira o histórico antes de tentar novamente.');
         }
-        outgoingRequest=null;finishReplyDraft(c.id,text);if(attachmentDrafts.get(c.id)?.id===attachment?.id)attachmentDrafts.delete(c.id);sending=false;
+        outgoingRequest=null;forceLatest.add(c.id);finishReplyDraft(c.id,text);if(attachmentDrafts.get(c.id)?.id===attachment?.id)attachmentDrafts.delete(c.id);sending=false;
         if(localMode)render();else await refresh();
       }finally{sending=false;const button=$('#reply-form button[type="submit"]');if(button)button.disabled=state.conversations.find(chat=>chat.id===active)?.status!=='open';}
     });

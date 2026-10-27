@@ -21,6 +21,14 @@ Não há nova tentativa automática de uma transcrição incerta. Mensagem dedup
 
 O cadastro automático exige fonte conferida em mensagens de texto. Nome, município e serviço que só vierem de áudio precisam de confirmação escrita antes da criação automática; a conversa pode continuar enquanto isso.
 
+### Compatibilidade e recuperação
+
+A validação para armazenar e reproduzir OGG/Opus é separada da leitura de duração exigida para reservar uma transcrição paga. Uma diferença no pacote do gravador não deve descartar o arquivo da conversa. O leitor de duração aceita variações de exportação móvel, como sequência inicial diferente de zero e ausência de página EOS final, mantendo a contagem pelos pacotes e o limite de cinco minutos. Se a duração não puder ser conferida, o original continua disponível para ouvir, mas a transcrição automática fica para conferência.
+
+Ao iniciar uma versão corrigida, áudios bloqueados especificamente pela validação antiga voltam para a fila de download da Meta. Isso não reativa o atendimento nem repete uma transcrição paga. Um resultado incerto de transcrição continua exigindo conferência humana.
+
+A interface abre uma conversa no final e preserva a posição nas atualizações. Quem está no final acompanha mensagens e anexos novos; quem está lendo o histórico mantém o ponto de leitura. A rolagem do painel interno do Notion também é preservada.
+
 ## Conhecimento e apoio humano
 
 `attendance-knowledge.mjs` fornece apenas orientações breves verificadas em fontes oficiais: identificação do imóvel e ficha técnica em Maringá; distinção das normas de Sarandi; matrícula, registro e averbação. Não contém tabelas universais de recuos, taxas, prazos ou pareceres de viabilidade. As referências têm data de conferência e deixam de sustentar regra específica após 30 dias, até nova revisão.

@@ -53,3 +53,10 @@ test('diagnóstico fica disponível sem configuração e explica pendências sem
   vm.runInContext("state.notion={enabled:true,activationPending:false,missing:[],pendingEvents:0,uncertainEvents:0};notionDiagnostic={accessVerified:true};",c);card=vm.runInContext('notionConnectionCard()',c);
   assert.match(card,/id="verify-notion">Verificar acesso ao Notion/);assert.match(card,/Acesso às bases principais do Notion conferido/);assert.doesNotMatch(card,/id="sync-notion" disabled/);
 });
+
+test('diagnóstico parcial do Notion não é apresentado como acesso operacional completo',()=>{
+  const {c:context,root}=fixture();
+  vm.runInContext("state=seed();state.notion={enabled:true,missing:[],invalid:[],pendingEvents:0,uncertainEvents:0};view='connection';notionDiagnostic={accessVerified:true,allConfiguredSourcesVerified:false,pendingSources:[{field:'NOTION_WORKS_DATA_SOURCE_ID',error:'Fonte sem acesso'}]};render();",context);
+  assert.match(root.innerHTML,/Cadastro e histórico acessíveis/);assert.match(root.innerHTML,/NOTION_WORKS_DATA_SOURCE_ID/);assert.match(root.innerHTML,/Conexões/);
+  assert.doesNotMatch(root.innerHTML,/Acesso às fontes configuradas do Notion conferido/);
+});
