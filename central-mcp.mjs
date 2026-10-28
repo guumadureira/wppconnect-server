@@ -30,20 +30,21 @@ export function createCentralMCP(db,config,transport,{context,ai,media,ready}){
   // A process may have stopped after dispatch. Never send these drafts again.
   run("UPDATE messages SET status='unknown' WHERE id IN (SELECT message_id FROM integration_drafts WHERE state='sending') AND status='sending'");
   run("UPDATE integration_drafts SET state='unknown',error='Execução interrompida; conferir no WhatsApp antes de qualquer novo envio.' WHERE state='sending'");
+  if(!all('PRAGMA table_info(integration_drafts)').some(c=>c.name==='operator_owner'))db.exec('ALTER TABLE integration_drafts ADD COLUMN operator_owner TEXT');
   const token=String(config.CENTRAL_MCP_TOKEN||'').trim();
   const phones=new Set(String(config.CENTRAL_MCP_ALLOWED_PHONES||'').split(',').map(x=>x.trim()).filter(x=>/^[1-9]\d{7,14}$/.test(x)));
   const enabled=String(config.CENTRAL_MCP_ENABLED)==='true'&&token.length>=32&&phones.size>0;
   const sendEnabled=String(config.CENTRAL_MCP_SEND_ENABLED)==='true';
   const audit=(tool,id,outcome)=>run('INSERT INTO integration_audit VALUES(?,?,?,?,?)',randomUUID(),tool,id||null,outcome,Date.now());
   let active=0,windowStart=0,requests=0;
-  function conversation(phone){
-    if(typeof phone!=='string'||!phones.has(phone))fail(403,'Telefone não autorizado nesta conexão. Use somente dígitos e a forma exata do piloto.');
+  function conversation(phone,operator=null){
+    if(typeof phone!=='string'||!(/^[1-9]\d{7,14}$/.test(phone))||(!operator&&!phones.has(phone)))fail(403,'Telefone não autorizado nesta conexão. Use somente dígitos e a forma exata do piloto.');
     const c=get('SELECT * FROM conversations WHERE phone=?',phone);if(!c)fail(404,'Conversa ainda não existe. Inicie o teste pelo telefone.');return c;
   }
-  function draft(id){if(!validId(id))fail(400,'Identificador inválido.');const d=get('SELECT * FROM integration_drafts WHERE id=?',id);if(!d)fail(404,'Envio não encontrado.');const c=conversation(d.phone);if(c.id!==d.conversation_id)fail(409,'Vínculo da conversa mudou.');return d;}
+  function draft(id,operator=null){if(!validId(id))fail(400,'Identificador inválido.');const d=get('SELECT * FROM integration_drafts WHERE id=?',id);if(!d)fail(404,'Envio não encontrado.');if((d.operator_owner||null)!==operator)fail(403,'Prévia pertence a outro canal ou operador.');const c=conversation(d.phone,operator);if(c.id!==d.conversation_id)fail(409,'Vínculo da conversa mudou.');return d;}
   function result(d){const m=d.message_id?get('SELECT status,provider_id FROM messages WHERE id=?',d.message_id):null;return{envioId:d.id,telefone:d.phone,...JSON.parse(d.payload),resumoCriptografico:d.digest,expiraEm:new Date(d.expires).toISOString(),estado:m?.status||d.state,erro:d.error||null,aceitoPelaMeta:!!m?.provider_id,entregaConfirmada:['delivered','read'].includes(m?.status)};}
-  function eligible(d){
-    const c=conversation(d.phone),ctx=context.view(c.id);
+  function eligible(d,operator=null){
+    const c=conversation(d.phone,operator),ctx=context.view(c.id);
     if(c.id!==d.conversation_id||ctx.client_id!==d.client_id||ctx.version!==d.context_version||c.last_received!==d.last_received)fail(409,'A conversa ou o contexto mudou. Prepare nova prévia e peça nova autorização.');
     if(c.status!=='open')fail(409,'A conversa está concluída. Reabra na central.');
     if(Date.now()>d.expires)fail(409,'A prévia expirou. Prepare outra e peça nova autorização.');
@@ -64,55 +65,55 @@ export function createCentralMCP(db,config,transport,{context,ai,media,ready}){
     if(/sk-proj-|Bearer\s|https?:\/\/(?:[^\s/]+\.)?(?:notion\.so|notion\.site|app\.notion\.com)\b/i.test(text))fail(400,'Não envie credenciais nem links internos do Notion.');
     return text;
   }
-  function prepare(c,args){
+  function prepare(c,args,operator=null){
     const text=messageText(args.texto),a=attachment(args.anexoId,c);if(a&&text.length>1024)fail(400,'Legenda deve ter até 1024 caracteres.');
     const payload=JSON.stringify({texto:text,anexo:a}),digest=hash(c.phone+'\n'+payload),previous=get('SELECT * FROM integration_drafts WHERE request_id=?',args.requestId);
-    if(previous){if(previous.phone!==c.phone||previous.digest!==digest)fail(409,'requestId já usado para outro conteúdo.');return result(previous);}
+    if(previous){if(previous.phone!==c.phone||previous.digest!==digest)fail(409,'requestId já usado para outro conteúdo.');return result(draft(previous.id,operator));}
     const ctx=context.view(c.id),id=randomUUID(),at=Date.now();
     run('INSERT INTO integration_drafts(id,request_id,conversation_id,phone,payload,digest,client_id,last_received,context_version,created,expires) VALUES(?,?,?,?,?,?,?,?,?,?,?)',id,args.requestId,c.id,c.phone,payload,digest,ctx.client_id,c.last_received,ctx.version,at,at+1800000);
-    audit('preparar_envio',c.id,'prepared');return result(draft(id));
+    run('UPDATE integration_drafts SET operator_owner=? WHERE id=?',operator,id);audit('preparar_envio',c.id,'prepared');return result(draft(id,operator));
   }
-  async function prepareDocument(c,args,pagePDF=false){
+  async function prepareDocument(c,args,pagePDF=false,operator=null){
     const text=messageText(args.texto);if(text.length>1024)fail(400,'Legenda deve ter até 1024 caracteres.');
     if(!/^[a-f0-9]{64}$/.test(pagePDF?args.resumoConteudo:args.arquivoId))fail(400,pagePDF?'Use resumoConteudo da visualização da página.':'Use o arquivoId retornado ao listar os documentos.');
     const intent=hash(JSON.stringify({telefone:c.phone,paginaId:args.paginaId,...(pagePDF?{resumoConteudo:args.resumoConteudo}:{arquivoId:args.arquivoId}),texto:text}));
     const previous=get('SELECT * FROM integration_document_imports WHERE request_id=?',args.requestId);
     if(previous){
       if(previous.intent_hash!==intent||previous.conversation_id!==c.id)fail(409,'requestId já usado para outro conteúdo ou destinatário.');
-      return result(draft(get('SELECT id FROM integration_drafts WHERE request_id=?',args.requestId).id));
+      return result(draft(get('SELECT id FROM integration_drafts WHERE request_id=?',args.requestId).id,operator));
     }
     if(get('SELECT 1 FROM integration_drafts WHERE request_id=?',args.requestId))fail(409,'requestId já usado em outro envio.');
     const pending=imports.get(args.requestId);
-    if(pending){if(pending.intent!==intent)fail(409,'requestId já usado para outra preparação.');return pending.job;}
+    if(pending){if(pending.intent!==intent||pending.operator!==operator)fail(409,'requestId já usado para outra preparação.');return pending.job;}
     const initial=context.view(c.id);
     const job=(async()=>{
-      const file=await(pagePDF?notionDocuments.exportPage(args.paginaId,args.resumoConteudo):notionDocuments.load(args.paginaId,args.arquivoId)),latest=conversation(c.phone),current=context.view(c.id);
+      const file=await(pagePDF?notionDocuments.exportPage(args.paginaId,args.resumoConteudo):notionDocuments.load(args.paginaId,args.arquivoId)),latest=conversation(c.phone,operator),current=context.view(c.id);
       if(latest.id!==c.id||latest.status!=='open'||latest.last_received!==c.last_received||current.version!==initial.version||current.client_id!==initial.client_id)fail(409,'Conversa ou vínculo alterado durante a importação. Liste e prepare novamente.');
       db.exec('BEGIN IMMEDIATE');
       try{
         const saved=media.store('document',file.mime,file.name,file.data);
         run('INSERT INTO integration_document_imports VALUES(?,?,?,?,?,?)',args.requestId,c.id,current.client_id,saved.id,JSON.stringify(file.origin),intent);
-        const preview=prepare(latest,{...args,anexoId:saved.id});
+        const preview=prepare(latest,{...args,anexoId:saved.id},operator);
         audit(pagePDF?'preparar_pagina_notion_pdf':'preparar_documento_notion',c.id,'prepared');db.exec('COMMIT');return preview;
       }catch(error){db.exec('ROLLBACK');throw error;}
     })();
-    imports.set(args.requestId,{intent,job});try{return await job;}finally{imports.delete(args.requestId);}
+    imports.set(args.requestId,{intent,job,operator});try{return await job;}finally{imports.delete(args.requestId);}
   }
   function checkArgs(name,args){
     const s=definitions.find(t=>t.name===name)?.inputSchema;if(!s)fail(404,'Ferramenta desconhecida.');
     if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).some(k=>!Object.hasOwn(s.properties,k))||s.required.some(k=>!Object.hasOwn(args,k)))fail(400,'Parâmetros inválidos.');
     for(const [k,v] of Object.entries(args)){const p=s.properties[k];if(typeof v!==p.type||(p.format==='uuid'&&!validId(v))||(p.const!==undefined&&v!==p.const))fail(400,'Parâmetros inválidos.');}
   }
-  async function call(name,args){
+  async function call(name,args,operator=null){
     checkArgs(name,args);
     if(name==='verificar_integracao_notion')return await context.verify();
-    if(name==='consultar_envio')return result(draft(args.envioId));
+    if(name==='consultar_envio')return result(draft(args.envioId,operator));
     if(name==='confirmar_envio'){
-      if(!sendEnabled)fail(403,'Envio por esta conexão está desativado.');
-      const d=draft(args.envioId);
+      if(!sendEnabled&&!operator)fail(403,'Envio por esta conexão está desativado.');
+      const d=draft(args.envioId,operator);
       if(args.resumoCriptografico!==d.digest)fail(409,'A autorização não corresponde à prévia.');
       if(d.state!=='prepared')return result(d); // Includes sending, failed and unknown: never redispatch.
-      const c=eligible(d),p=JSON.parse(d.payload);
+      const c=eligible(d,operator),p=JSON.parse(d.payload);
       if(p.anexo&&attachment(p.anexo.id,c)?.sha256!==p.anexo.sha256)fail(409,'O arquivo mudou. Prepare nova prévia.');
       const id=randomUUID(),at=Date.now();
       // Claim synchronously before any await so concurrent confirmations cannot dispatch twice.
@@ -124,7 +125,7 @@ export function createCentralMCP(db,config,transport,{context,ai,media,ready}){
       let dispatched=false;
       try{
         const content=p.anexo?await media.payload(p.anexo.id,p.texto):{type:'text',text:{body:p.texto}};
-        const latest=conversation(d.phone),current=context.view(c.id);
+        const latest=conversation(d.phone,operator),current=context.view(c.id);
         if(latest.status!=='open'||latest.last_received!==d.last_received||current.version!==version||current.client_id!==d.client_id)fail(409,'Conversa alterada durante a preparação. Envio cancelado.');
         dispatched=true;
         const response=await transport(`https://graph.facebook.com/${config.META_GRAPH_VERSION}/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,{method:'POST',headers:{authorization:'Bearer '+config.WHATSAPP_ACCESS_TOKEN,'content-type':'application/json'},body:JSON.stringify({messaging_product:'whatsapp',to:d.phone,...content}),redirect:'error',signal:AbortSignal.timeout(15000)});
@@ -142,15 +143,15 @@ export function createCentralMCP(db,config,transport,{context,ai,media,ready}){
       }
       audit(name,c.id,get('SELECT state FROM integration_drafts WHERE id=?',d.id).state);
       context.integrationRecord(c.id,d.id,id,get('SELECT state FROM integration_drafts WHERE id=?',d.id).state);
-      return result(draft(d.id));
+      return result(draft(d.id,operator));
     }
-    const c=conversation(args.telefone);
+    const c=conversation(args.telefone,operator);
     if(name==='listar_documentos_notion'){
       const documents=await notionDocuments.list(args.paginaId);audit(name,c.id,'ok');return{telefone:c.phone,nome:c.name,...documents};
     }
-    if(name==='preparar_documento_notion')return await prepareDocument(c,args);
+    if(name==='preparar_documento_notion')return await prepareDocument(c,args,false,operator);
     if(name==='visualizar_pagina_notion'){const result=await notionDocuments.inspect(args.paginaId);audit(name,c.id,'ok');return result;}
-    if(name==='preparar_pagina_notion_pdf')return await prepareDocument(c,args,true);
+    if(name==='preparar_pagina_notion_pdf')return await prepareDocument(c,args,true,operator);
     if(name==='diagnosticar_audio'){
       const part=get("SELECT a.id FROM media a JOIN message_media mm ON mm.media_id=a.id JOIN messages m ON m.id=mm.message_id WHERE m.conversation_id=? AND a.kind='audio' ORDER BY m.rowid DESC LIMIT 1",c.id);
       if(!part)fail(404,'Esta conversa não tem áudio registrado.');
@@ -170,7 +171,7 @@ export function createCentralMCP(db,config,transport,{context,ai,media,ready}){
       const ctx=await context.refresh(c);audit(name,c.id,'ok');
       return{cliente:ctx.client_name,consultadoEm:ctx.checked_at,secoes:ctx.snapshot?.sections,historico:ctx.snapshot?.history,erro:ctx.last_error};
     }
-    return prepare(c,args);
+    return prepare(c,args,operator);
   }
   async function handle(req,res,{origin,readBody,reply}){
     if(!enabled)fail(503,'Conexão MCP não habilitada.');
@@ -198,5 +199,5 @@ export function createCentralMCP(db,config,transport,{context,ai,media,ready}){
     catch(e){audit(String(rpc.params?.name||'invalid').slice(0,80),null,'error');return ok({isError:true,content:[{type:'text',text:e.status&&(e.status<500||e.status===507)?e.message:'Não foi possível concluir. Consulte o resultado antes de tentar novamente.'}]});}
     finally{active--;}
   }
-  return{handle,status:()=>({enabled,sendEnabled,allowedPhoneCount:phones.size})};
+  return{handle,operatorCall:(name,args,owner)=>{if(!/^[a-f0-9]{64}$/.test(owner)||!['listar_documentos_notion','visualizar_pagina_notion','preparar_documento_notion','preparar_pagina_notion_pdf','confirmar_envio','consultar_envio'].includes(name))fail(403,'Ação não permitida.');return call(name,args,owner);},status:()=>({enabled,sendEnabled,allowedPhoneCount:phones.size})};
 }

@@ -140,3 +140,7 @@ Em **Conexão → Diagnosticar recebimento**, o administrador consulta observaç
 Mensagens só entram na contagem após o commit da transação. Eventos do exemplo da Meta podem usar outro identificador de número e serem aceitos com HTTP 200 sem criar conversas. Uma mensagem registrada comprova recebimento, mas não confirma entrega de respostas nem coexistência do número Business real.
 
 O diagnóstico também informa a última falha de envio observada nesta execução: horário, origem (recusa imediata da API, aviso de falha de entrega ou transporte) e código numérico da Meta quando disponível. O aviso de recusa imediata exibe esse código. Textos, detalhes e cabeçalhos retornados pelo provedor não são mostrados nem guardados nesse diagnóstico. Falhas de entrega só são consideradas para mensagens conhecidas, após o commit do evento. Esse registro histórico não implica que o próximo envio falhará e não inicia novas tentativas.
+
+## Assistente interno e contexto do cliente
+
+A aba Assistente interno conversa com um Custom Agent real do Notion, separada das mensagens de clientes. Configuração, créditos, aprovação de documentos e busca automática do cadastro por telefone estão no [guia de operadores e contexto](docs/chat-operadores-e-contexto.md). A ativação do chat interno é separada do piloto de respostas automáticas do WhatsApp.

@@ -239,7 +239,15 @@ test('cadastro inicial mantém diálogo e contexto entre turnos sem nova página
 });
 
 test('telefone e nome exatos reaproveitam cadastro único sem criar outra página',async t=>{
-  const f=notionPilot(t,{existing:'Cliente Exemplo'});const c=f.incoming('Meu nome é Cliente Exemplo. Preciso de projeto residencial em Maringá.');await f.app.ai.process();assert.equal(f.clientPosts,0);assert.equal(f.app.customerContext.view(c.id).client_name,'Cliente Exemplo',f.registrationError);assert.equal(f.app.customerContext.view(c.id).history.find(e=>e.kind==='cliente').source,'IA');
+  const f=notionPilot(t,{existing:'Cliente Exemplo'});const c=f.incoming('Meu nome é Cliente Exemplo. Preciso de projeto residencial em Maringá.');await f.app.ai.process();assert.equal(f.clientPosts,0);assert.equal(f.app.customerContext.view(c.id).client_name,'Cliente Exemplo',f.registrationError);assert.equal(f.app.customerContext.view(c.id).history.find(e=>e.kind==='cliente').source,'Sistema');
+});
+
+test('cliente já cadastrado é localizado por telefone antes da chamada de IA, sem exigir conversa prévia',async t=>{
+  const f=notionPilot(t,{existing:'Cliente Exemplo'}),c=f.incoming('Como está o meu serviço?');await f.app.ai.process();
+  const index=f.calls.findIndex(c=>c.url.includes('openai.com'));assert.ok(index>0);
+  assert.ok(f.calls.slice(0,index).some(c=>c.url.includes('/data_sources/')));
+  const input=JSON.parse(f.calls[index].body.input[0].content);assert.equal(input.clientLookup.state,'matched_by_phone');assert.equal(input.context.clientLinked,true);
+  assert.equal(f.app.customerContext.view(c.id).client_name,'Cliente Exemplo');assert.equal(f.clientPosts,0);
 });
 test('nome do proprietário mencionado na conversa não vira cadastro do solicitante',async t=>{
   const f=notionPilot(t);f.incoming('Meu nome é Maria. O proprietário é Cliente Exemplo. Preciso de projeto residencial em Maringá.');await f.app.ai.process();assert.equal(f.clientPosts,0);assert.equal(f.app.ai.status().handoffs.length,1);

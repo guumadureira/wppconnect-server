@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import {samePhone} from './contact-phone.mjs';
 
 const fail=(status,message,extra={})=>{throw Object.assign(new Error(message),{status,...extra});};
 const norm=value=>String(value||'').replace(/\D/g,'');
@@ -21,6 +22,7 @@ export function createNotionContext(db,config,transport,options={}){
     CREATE TABLE IF NOT EXISTS service_events(id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,conversation_id TEXT NOT NULL REFERENCES conversations(id),request_id TEXT,client_id TEXT,work_id TEXT,kind TEXT NOT NULL,summary TEXT NOT NULL,missing TEXT NOT NULL DEFAULT '',next_step TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'Em atendimento',qualification TEXT NOT NULL,actor TEXT NOT NULL,source TEXT NOT NULL,message_id TEXT,created INTEGER NOT NULL,sync_state TEXT NOT NULL,sync_error TEXT,notion_page_id TEXT,attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0);
     CREATE INDEX IF NOT EXISTS service_events_queue ON service_events(sync_state,next_attempt);
     CREATE TABLE IF NOT EXISTS notion_client_operations(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL REFERENCES conversations(id),operation_key TEXT UNIQUE NOT NULL,state TEXT NOT NULL,client_id TEXT,error TEXT,created INTEGER NOT NULL);`);
+  db.exec("CREATE TABLE IF NOT EXISTS context_lookup_jobs(conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),last_received INTEGER,state TEXT NOT NULL,next_attempt INTEGER NOT NULL DEFAULT 0,error TEXT)");
   // A process restart during creation leaves an uncertain outcome. Reconcile before another write.
   run("UPDATE service_events SET sync_state='uncertain',sync_error='Resultado anterior não confirmado; aguardando conferência no Notion.' WHERE sync_state='sending'");
   run("UPDATE notion_client_operations SET state='uncertain' WHERE state='creating'");
@@ -47,12 +49,13 @@ export function createNotionContext(db,config,transport,options={}){
   }
   function localView(id){
     const c=context(id),snapshot=c.snapshot?JSON.parse(c.snapshot):null;
-    return {...c,snapshot,clientUrl:c.client_id?url(c.client_id):null,history:all('SELECT id,request_id,kind,summary,missing,next_step,status,qualification,actor,source,message_id,created,sync_state,sync_error,notion_page_id FROM service_events WHERE conversation_id=? ORDER BY created DESC,rowid DESC LIMIT 40',id).map(e=>({...e,notionUrl:e.notion_page_id?url(e.notion_page_id):null})),requests:all('SELECT * FROM service_requests WHERE conversation_id=? ORDER BY updated DESC LIMIT 100',id),integration:status()};
+    return {...c,snapshot,discovery:get('SELECT state,error FROM context_lookup_jobs WHERE conversation_id=?',id)||null,clientUrl:c.client_id?url(c.client_id):null,history:all('SELECT id,request_id,kind,summary,missing,next_step,status,qualification,actor,source,message_id,created,sync_state,sync_error,notion_page_id FROM service_events WHERE conversation_id=? ORDER BY created DESC,rowid DESC LIMIT 40',id).map(e=>({...e,notionUrl:e.notion_page_id?url(e.notion_page_id):null})),requests:all('SELECT * FROM service_requests WHERE conversation_id=? ORDER BY updated DESC LIMIT 100',id),integration:status()};
   }
   function status(){return {enabled:enabled(),configured:configured(),missing:required.filter(name=>!present(name)),invalid:invalidSources(),activationPending:!activated(),aiEnabled:!!options.aiEnabled?.(),optionalSources:Object.fromEntries(Object.entries(sources).filter(([k])=>!['clients','history'].includes(k)).map(([k,v])=>[k,!!v])),pendingEvents:get("SELECT COUNT(*) AS n FROM service_events WHERE sync_state IN ('pending','error')").n,uncertainEvents:get("SELECT COUNT(*) AS n FROM service_events WHERE sync_state='uncertain'").n};}
-  let stopped=false,serial=Promise.resolve(),nextAt=0;const interval=options.requestIntervalMs??350;
+  let stopped=false,serial=Promise.resolve(),nextAt=0,retryUntil=0;const interval=options.requestIntervalMs??350;
   async function api(path,method='GET',body){
     ensureEnabled();
+    if(Date.now()<retryUntil)fail(502,'O Notion pediu uma pausa. Aguarde a retomada da consulta.',{retryAfter:retryUntil-Date.now()});
     const slot=serial.then(async()=>{if(stopped)fail(503,'A central está reiniciando.');const delay=nextAt-Date.now();if(delay>0)await new Promise(resolve=>setTimeout(resolve,delay));nextAt=Date.now()+interval;});
     serial=slot.catch(()=>{});await slot;
     let response;
@@ -60,6 +63,7 @@ export function createNotionContext(db,config,transport,options={}){
     catch{fail(502,'Não foi possível confirmar a resposta do Notion.',{uncertain:method==='POST'&&path==='pages'});}
     if(!response.ok){
       const retry=Number(response.headers?.get('retry-after')),source=path.match(/^data_sources\/([a-f\d-]+)/i)?.[1],field=Object.entries(sources).find(([,id])=>id===source)?.[0];
+      if(response.status===429)retryUntil=Date.now()+(Number.isFinite(retry)&&retry>0?retry*1000:60000);
       const message=response.status===429?'O Notion pediu uma pausa. A sincronização será retomada.':response.status===404&&field?'O Notion não encontrou a fonte definida em '+sourceFields[field]+'. Confira o ID de fonte e o acesso da conexão a essa base.':[401,403].includes(response.status)?'O Notion recusou o acesso ('+response.status+'). Confira a credencial e as permissões da conexão.':'O Notion não concluiu a operação. Confira o acesso da integração e a estrutura das bases.';
       fail(502,message,{uncertain:method==='POST'&&path==='pages'&&response.status>=500,retryAfter:Number.isFinite(retry)?Math.max(1,retry)*1000:60000});
     }
@@ -82,17 +86,17 @@ export function createNotionContext(db,config,transport,options={}){
     ensureEnabled();const term=text(search,120),phone=norm(conversation.phone);
     const filter=term?{or:[{property:'Nome do Cliente',title:{contains:term}},{property:'Telefone',phone_number:{contains:term}}]}:{property:'Telefone',phone_number:{contains:phone.slice(-4)}};
     const found=await query(sources.clients,filter);
-    const matches=found.rows.map(clientView).filter(c=>term||norm(c.phone)===phone);
-    return {matches:matches.slice(0,30).map(c=>({...c,phoneMatches:norm(c.phone)===phone})),complete:found.complete&&matches.length<=30};
+    const matches=found.rows.map(clientView).filter(c=>term||samePhone(c.phone,phone));
+    return {matches:matches.slice(0,30).map(c=>({...c,phoneMatches:samePhone(c.phone,phone)})),complete:found.complete&&matches.length<=30};
   }
   async function link(conversation,body,actor){
     if(body.confirmed!==true)fail(400,'Confirme o cliente antes de vincular.');
     const eventKey=key(conversation.id,actor,body.requestId);
     if(get('SELECT id FROM service_events WHERE event_key=?',eventKey))return localView(conversation.id);
     checkVersion(conversation.id,body.version);const selected=await client(body.clientId);
-    if(actor===aiActor&&(!body.guard?.()||norm(selected.phone)!==norm(conversation.phone)||selected.name.normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().trim()!==String(body.name).normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().trim()))fail(409,'O cadastro automático foi interrompido para conferência.');
+    if(actor===aiActor&&(!body.guard?.()||!samePhone(selected.phone,conversation.phone)||selected.name.normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().trim()!==String(body.name).normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().trim()))fail(409,'O cadastro automático foi interrompido para conferência.');
     const reason=text(body.reason||'',500);
-    if(norm(selected.phone)!==norm(conversation.phone)&&(!reason||actor.role!=='admin'))fail(409,'Telefone diferente: a associação exige conferência e justificativa de um administrador.');
+    if(!samePhone(selected.phone,conversation.phone)&&(!reason||actor.role!=='admin'))fail(409,'Telefone diferente: a associação exige conferência e justificativa de um administrador.');
     transaction(()=>{
       const c=checkVersion(conversation.id,body.version);
       if(c.client_id&&c.client_id!==selected.id&&(!reason||actor.role!=='admin'))fail(409,'A troca do cliente exige conferência e justificativa de um administrador.');
@@ -104,12 +108,85 @@ export function createNotionContext(db,config,transport,options={}){
     });return localView(conversation.id);
   }
   const refreshing=new Map();
+  async function attendanceExcerpt(clientId){
+    const accepted=new Set(['contexto básico de atendimento','contexto para atendimento','atendimento']);
+    let cursor,selected=false,sectionLevel=0,excerpt='',limited=false;
+    const seen=new Set();
+    const rich=parts=>(parts||[]).map(p=>p.type==='mention'&&p.mention?.type==='date'?p.mention.date.start:p.plain_text??p.text?.content??'').join('');
+    for(let page=0;page<3;page++){
+      const response=await api('blocks/'+clientId+'/children?page_size=100'+(cursor?'&start_cursor='+encodeURIComponent(cursor):''));
+      if(!Array.isArray(response.results))fail(502,'O resumo do cliente não pôde ser lido.');
+      for(const b of response.results){
+        if(b.archived||b.in_trash)continue;
+        const type=b.type,heading=/^heading_([123])$/.exec(type||'');
+        if(heading){const level=Number(heading[1]),title=rich(b[type]?.rich_text).trim().toLocaleLowerCase('pt-BR');if(accepted.has(title)){selected=true;sectionLevel=level;}else if(level<=sectionLevel)selected=false;continue;}
+        if(!selected)continue;
+        if(['paragraph','bulleted_list_item','numbered_list_item','quote','callout'].includes(type))excerpt+=rich(b[type]?.rich_text)+'\n';
+        if(b.has_children)limited=true;
+        if(excerpt.length>4000){excerpt=excerpt.slice(0,4000);limited=true;break;}
+      }
+      if(excerpt.length>=4000||!response.has_more)break;
+      if(!response.next_cursor||seen.has(response.next_cursor))fail(502,'A leitura do resumo ficou incompleta.');
+      cursor=response.next_cursor;seen.add(cursor);limited=page===2;
+    }
+    return{text:excerpt.trim(),limited,source:'Seções de atendimento no cadastro do cliente',qualification:'Contexto documental; não confirma andamento atual'};
+  }
+  const resolving=new Map();
+  async function resolveBeforeReply(conversation,guard=()=>true){
+    if(!enabled())return{state:'unavailable'};
+    const initial=context(conversation.id);
+    if(initial.client_id)return{state:'linked'};
+    const found=await lookup(conversation);
+    if(!guard()||context(conversation.id).version!==initial.version)fail(409,'O contexto mudou durante a busca do cadastro.');
+    if(!found.complete||found.matches.length>1)fail(409,'Há mais de um cadastro possível ou a busca ficou incompleta. Confira o cliente antes de liberar a IA.');
+    if(!found.matches.length)return{state:'not_found'};
+    const selected=await client(found.matches[0].id);
+    if(!guard()||!samePhone(selected.phone,conversation.phone))fail(409,'O telefone ou a conversa mudou durante a conferência do cadastro.');
+    const latest=get("SELECT body FROM messages WHERE conversation_id=? AND direction='in' ORDER BY rowid DESC LIMIT 1",conversation.id)?.body||'';
+    const declared=latest.match(/\b(?:meu nome [ée]|me chamo)\s+([^.!?\n,;]{1,120})/i)?.[1]?.trim();
+    const normalized=s=>s.normalize('NFD').replace(/\p{M}/gu,'').toLocaleLowerCase('pt-BR').trim();
+    if(declared&&normalized(declared).split(/\s+/)[0]!==normalized(selected.name).split(/\s+/)[0])fail(409,'O nome informado diverge do cadastro encontrado por telefone. Confira a identidade antes de usar o contexto.');
+    transaction(()=>{
+      const current=checkVersion(conversation.id,initial.version);
+      if(current.client_id)fail(409,'O cliente já foi vinculado por outra ação.');
+      run('UPDATE conversation_context SET client_id=?,client_name=?,snapshot=NULL,checked_at=NULL,last_error=NULL,version=version+1,updated=? WHERE conversation_id=?',selected.id,selected.name,Date.now(),conversation.id);
+      addEvent(conversation.id,{key:'phone-lookup:'+conversation.id+':'+selected.id,kind:'cliente',summary:'Cadastro localizado pelo telefone do WhatsApp. A associação não confirma identidade pessoal, contratação ou situação de trabalho.',actor:'Sistema · busca de contexto',source:'Sistema',qualification:'Informado'});
+    });
+    return{state:'matched_by_phone',clientId:selected.id};
+  }
+  async function resolve(conversation,guard){
+    const key=conversation.id+':'+conversation.last_received;
+    if(resolving.has(key))return resolving.get(key);
+    const op=resolveBeforeReply(conversation,guard);resolving.set(key,op);
+    try{return await op;}finally{resolving.delete(key);}
+  }
+  function queueLookup(c){
+    if(!enabled())return;
+    run("INSERT INTO context_lookup_jobs(conversation_id,last_received,state) VALUES(?,?,'pending') ON CONFLICT(conversation_id) DO UPDATE SET last_received=excluded.last_received,state='pending'",c.id,c.last_received);
+  }
+  let lookupWorker=null;
+  function processLookups(){
+    if(lookupWorker||stopped||!enabled())return lookupWorker||Promise.resolve();
+    lookupWorker=(async()=>{
+      for(const job of all("SELECT * FROM context_lookup_jobs WHERE state IN ('pending','error') AND next_attempt<=? LIMIT 5",Date.now())){
+        const c=get('SELECT * FROM conversations WHERE id=?',job.conversation_id);if(!c)continue;
+        const guard=()=>!stopped&&get('SELECT last_received FROM conversations WHERE id=?',c.id)?.last_received===job.last_received;
+        if(!guard()){run("UPDATE context_lookup_jobs SET state='cancelled' WHERE conversation_id=? AND last_received=?",c.id,job.last_received);continue;}
+        try{
+          const result=await resolve(c,guard);
+          if(guard()&&context(c.id).client_id)await refresh(c);
+          run('UPDATE context_lookup_jobs SET state=?,error=NULL,next_attempt=0 WHERE conversation_id=? AND last_received=?',result.state,c.id,job.last_received);
+        }catch(e){run("UPDATE context_lookup_jobs SET state='error',error=?,next_attempt=? WHERE conversation_id=? AND last_received=?",e.status===409?'Cadastro exige conferência.':'Consulta do cadastro indisponível.',Date.now()+Math.max(e.retryAfter||0,60000),c.id,job.last_received);}
+      }
+    })().finally(()=>{lookupWorker=null;});return lookupWorker;
+  }
   async function refresh(conversation){
     if(refreshing.has(conversation.id))return refreshing.get(conversation.id);
     const operation=(async()=>{
       const c=context(conversation.id);if(!c.client_id)fail(409,'Vincule o cadastro do cliente para consultar seu contexto.');
       try{
         const selected=await client(c.client_id),snapshot={client:selected,sections:{},at:Date.now()};
+        try{snapshot.attendance=await attendanceExcerpt(c.client_id);}catch{snapshot.attendance={text:'',unavailable:true};}
         const descriptions={works:['Trabalho','Situação','Prazo'],proposals:['Proposta','Status',null],projects:['Projeto','Situação','Prazo contratual'],tasks:['Atividade','Status','Prazo']};
         for(const [name,[title,state,due]] of Object.entries(descriptions)){
           if(!sources[name]){snapshot.sections[name]={configured:false,rows:[]};continue;}
@@ -254,7 +331,7 @@ export function createNotionContext(db,config,transport,options={}){
     if(!descriptions[state])return;
     addEvent(conversationId,{key:'mcp:'+draftId,kind:'contexto',summary:descriptions[state],missing:'',nextStep:state==='sent'?'Conferir entrega na central.':'Conferir resultado com a equipe.',actor:'Notion · integração',source:'Sistema',qualification:'Confirmado',messageId});
   }
-  return{status,view:localView,lookup,link,refresh,save,request,updateRequest,control,receivedFile,aiRecord,createClient,registerFromAI,processQueue,verify,integrationRecord,
-    close:async()=>{stopped=true;await Promise.allSettled([worker,...refreshing.values(),...creating.values(),serial].filter(Boolean));},
+  return{status,view:localView,lookup,link,refresh,resolveBeforeReply:resolve,queueLookup,processLookups,save,request,updateRequest,control,receivedFile,aiRecord,createClient,registerFromAI,processQueue,verify,integrationRecord,
+    close:async()=>{stopped=true;await Promise.allSettled([worker,lookupWorker,...refreshing.values(),...resolving.values(),...creating.values(),serial].filter(Boolean));},
   };
 }
