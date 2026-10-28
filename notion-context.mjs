@@ -23,6 +23,7 @@ export function createNotionContext(db,config,transport,options={}){
     CREATE INDEX IF NOT EXISTS service_events_queue ON service_events(sync_state,next_attempt);
     CREATE TABLE IF NOT EXISTS notion_client_operations(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL REFERENCES conversations(id),operation_key TEXT UNIQUE NOT NULL,state TEXT NOT NULL,client_id TEXT,error TEXT,created INTEGER NOT NULL);`);
   db.exec("CREATE TABLE IF NOT EXISTS context_lookup_jobs(conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),last_received INTEGER,state TEXT NOT NULL,next_attempt INTEGER NOT NULL DEFAULT 0,error TEXT)");
+  db.exec("CREATE TABLE IF NOT EXISTS notion_client_summaries(client_id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,revision TEXT NOT NULL,payload TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',error TEXT,next_attempt INTEGER NOT NULL DEFAULT 0,updated INTEGER NOT NULL)");
   // A process restart during creation leaves an uncertain outcome. Reconcile before another write.
   run("UPDATE service_events SET sync_state='uncertain',sync_error='Resultado anterior não confirmado; aguardando conferência no Notion.' WHERE sync_state='sending'");
   run("UPDATE notion_client_operations SET state='uncertain' WHERE state='creating'");
@@ -32,6 +33,8 @@ export function createNotionContext(db,config,transport,options={}){
   const sources=Object.fromEntries(Object.entries(sourceFields).map(([key,name])=>{try{return[key,present(name)?uuid(String(config[name]).trim().replace(/^collection:\/\//i,'')):null];}catch{return[key,null];}}));
   const invalidSources=()=>Object.entries(sourceFields).filter(([key,name])=>present(name)&&!sources[key]).map(([,name])=>name);
   const activated=()=>String(config.NOTION_ENABLED||'').trim().toLowerCase()==='true';
+  const summaryEnabled=()=>String(config.NOTION_CLIENT_SUMMARY_ENABLED).trim()==='true';
+  const summaryFields={'Resumo do atendimento — Central':'rich_text','Pendências — Central':'rich_text','Próximo passo — Central':'rich_text','Atualizado em — Central':'date','Conversa — Central':'url'};
   const required=['NOTION_TOKEN','NOTION_CLIENTS_DATA_SOURCE_ID','NOTION_HISTORY_DATA_SOURCE_ID'];
   const configured=()=>required.every(present);
   const enabled=()=>activated()&&configured()&&!!sources.clients&&!!sources.history;
@@ -45,13 +48,45 @@ export function createNotionContext(db,config,transport,options={}){
     const c=context(id),eventId=randomUUID();
     const clientId=data.clientId===undefined?c.client_id:data.clientId,workId=data.workId===undefined?c.work_id:data.workId;
     run('INSERT INTO service_events(id,event_key,conversation_id,request_id,client_id,work_id,kind,summary,missing,next_step,status,qualification,actor,source,message_id,created,sync_state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',eventId,data.key,id,data.requestId||null,clientId,workId,data.kind,data.summary,data.missing??c.missing,data.nextStep??c.next_step,data.status||'Em atendimento',data.qualification||'Informado',data.actor||'Sistema',data.source||'Sistema',data.messageId||null,Date.now(),data.kind==='comercial'?'separate':clientId?'pending':'waiting_link');
+    if(data.kind==='contexto'&&data.currentSummary)queueSummary(id);
     return eventId;
+  }
+  function queueSummary(id){
+    const c=context(id);if(!summaryEnabled()||!c.client_id||c.kind==='comercial'||!c.summary)return;
+    const at=Date.now(),properties={'Resumo do atendimento — Central':rt(c.summary),'Pendências — Central':rt(c.missing),'Próximo passo — Central':rt(c.next_step),'Atualizado em — Central':{date:{start:new Date(at).toISOString()}}};
+    const origin=config.PUBLIC_ORIGIN||config.RENDER_EXTERNAL_URL||'';
+    if(/^https:\/\//.test(origin)){const link=new URL('/',origin);link.searchParams.set('conversation',id);properties['Conversa — Central']={url:link.href};}
+    run("INSERT INTO notion_client_summaries(client_id,conversation_id,revision,payload,updated) VALUES(?,?,?,?,?) ON CONFLICT(client_id) DO UPDATE SET conversation_id=excluded.conversation_id,revision=excluded.revision,payload=excluded.payload,state='pending',error=NULL,next_attempt=0,updated=excluded.updated",c.client_id,id,randomUUID(),JSON.stringify(properties),at);
+  }
+  async function processSummaries(){
+    if(!summaryEnabled())return;
+    for(const job of all("SELECT * FROM notion_client_summaries WHERE state IN ('pending','error') AND next_attempt<=? ORDER BY updated LIMIT 5",Date.now())){
+      if(stopped)break;
+      try{
+        const current=context(job.conversation_id);
+        if(current.client_id!==job.client_id||current.kind==='comercial'){run("UPDATE notion_client_summaries SET state='cancelled' WHERE client_id=? AND revision=?",job.client_id,job.revision);continue;}
+        // Only dedicated Central fields are updated. Never replace cadastral,
+        // contractual fields, page content or the append-only event history.
+        const page=await api('pages/'+uuid(job.client_id));checkParent(page,sources.clients);
+        if(get('SELECT revision FROM notion_client_summaries WHERE client_id=?',job.client_id)?.revision!==job.revision)continue;
+        const latest=context(job.conversation_id);if(latest.client_id!==job.client_id||latest.kind==='comercial'){run("UPDATE notion_client_summaries SET state='cancelled' WHERE client_id=? AND revision=?",job.client_id,job.revision);continue;}
+        const properties=JSON.parse(job.payload);
+        for(const field of Object.keys(properties))if(page.properties?.[field]?.type!==summaryFields[field])fail(409,'Campo de resumo ausente ou incompatível em Clientes: '+field+'.');
+        // A lost PATCH response is safely reconciled by reading its values next time.
+        const equal=(p,q)=>q.date?Date.parse(p?.date?.start)===Date.parse(q.date.start):q.url!==undefined?p?.url===q.url:plain(p)===plain(q);
+        if(!Object.entries(properties).every(([k,v])=>equal(page.properties[k],v))){
+          const saved=await api('pages/'+uuid(job.client_id),'PATCH',{properties});checkParent(saved,sources.clients);
+          if(uuid(saved.id)!==job.client_id||!Object.entries(properties).every(([k,v])=>equal(saved.properties?.[k],v)))fail(502,'O Notion não confirmou todos os campos do resumo.');
+        }
+        run("UPDATE notion_client_summaries SET state='synced',error=NULL WHERE client_id=? AND revision=?",job.client_id,job.revision);
+      }catch(e){run("UPDATE notion_client_summaries SET state='error',error=?,next_attempt=? WHERE client_id=? AND revision=?",e.message,Date.now()+Math.max(e.retryAfter||0,60000),job.client_id,job.revision);}
+    }
   }
   function localView(id){
     const c=context(id),snapshot=c.snapshot?JSON.parse(c.snapshot):null;
     return {...c,snapshot,discovery:get('SELECT state,error FROM context_lookup_jobs WHERE conversation_id=?',id)||null,clientUrl:c.client_id?url(c.client_id):null,history:all('SELECT id,request_id,kind,summary,missing,next_step,status,qualification,actor,source,message_id,created,sync_state,sync_error,notion_page_id FROM service_events WHERE conversation_id=? ORDER BY created DESC,rowid DESC LIMIT 40',id).map(e=>({...e,notionUrl:e.notion_page_id?url(e.notion_page_id):null})),requests:all('SELECT * FROM service_requests WHERE conversation_id=? ORDER BY updated DESC LIMIT 100',id),integration:status()};
   }
-  function status(){return {enabled:enabled(),configured:configured(),missing:required.filter(name=>!present(name)),invalid:invalidSources(),activationPending:!activated(),aiEnabled:!!options.aiEnabled?.(),optionalSources:Object.fromEntries(Object.entries(sources).filter(([k])=>!['clients','history'].includes(k)).map(([k,v])=>[k,!!v])),pendingEvents:get("SELECT COUNT(*) AS n FROM service_events WHERE sync_state IN ('pending','error')").n,uncertainEvents:get("SELECT COUNT(*) AS n FROM service_events WHERE sync_state='uncertain'").n};}
+  function status(){return {enabled:enabled(),configured:configured(),missing:required.filter(name=>!present(name)),invalid:invalidSources(),activationPending:!activated(),aiEnabled:!!options.aiEnabled?.(),summaryEnabled:summaryEnabled(),pendingSummaries:get("SELECT COUNT(*) AS n FROM notion_client_summaries WHERE state IN ('pending','error')").n,summaryErrors:all("SELECT error FROM notion_client_summaries WHERE state='error' ORDER BY updated DESC LIMIT 3").map(r=>r.error),optionalSources:Object.fromEntries(Object.entries(sources).filter(([k])=>!['clients','history'].includes(k)).map(([k,v])=>[k,!!v])),pendingEvents:get("SELECT COUNT(*) AS n FROM service_events WHERE sync_state IN ('pending','error')").n,uncertainEvents:get("SELECT COUNT(*) AS n FROM service_events WHERE sync_state='uncertain'").n};}
   let stopped=false,serial=Promise.resolve(),nextAt=0,retryUntil=0;const interval=options.requestIntervalMs??350;
   async function api(path,method='GET',body){
     ensureEnabled();
@@ -80,7 +115,7 @@ export function createNotionContext(db,config,transport,options={}){
     return{rows,complete:false};
   }
   const checkParent=(page,source)=>{if(page.archived||page.in_trash||uuid(page.parent?.data_source_id||'')!==uuid(source))fail(409,'O registro não pertence à base esperada ou foi arquivado.');};
-  const clientView=p=>({id:uuid(p.id),url:url(p.id),name:value(p,'Nome do Cliente'),phone:p.properties?.Telefone?.phone_number||'',stage:value(p,'Etapa do Atendimento'),registration:value(p,'Etapa do cadastro')});
+  const clientView=p=>({id:uuid(p.id),url:url(p.id),name:value(p,'Nome do Cliente'),phone:p.properties?.Telefone?.phone_number||'',stage:value(p,'Etapa do Atendimento'),registration:value(p,'Etapa do cadastro'),attendanceSummary:value(p,'Resumo do atendimento — Central'),attendanceMissing:value(p,'Pendências — Central'),attendanceNext:value(p,'Próximo passo — Central'),attendanceAt:value(p,'Atualizado em — Central')});
   async function client(id){const p=await api('pages/'+uuid(id));checkParent(p,sources.clients);return clientView(p);}
   async function lookup(conversation,search=''){
     ensureEnabled();const term=text(search,120),phone=norm(conversation.phone);
@@ -103,7 +138,8 @@ export function createNotionContext(db,config,transport,options={}){
       run("UPDATE conversation_context SET client_id=?,client_name=?,work_id=NULL,snapshot=NULL,checked_at=NULL,last_error=NULL,summary=CASE WHEN client_id IS NOT NULL AND client_id<>? THEN '' ELSE summary END,missing=CASE WHEN client_id IS NOT NULL AND client_id<>? THEN '' ELSE missing END,next_step=CASE WHEN client_id IS NOT NULL AND client_id<>? THEN '' ELSE next_step END,version=version+1,updated=? WHERE conversation_id=?",selected.id,selected.name,selected.id,selected.id,selected.id,Date.now(),conversation.id);
       // Only previously unbound events are associated; older confirmed bindings are preserved.
       run("UPDATE service_events SET client_id=?,sync_state='pending' WHERE conversation_id=? AND client_id IS NULL AND sync_state='waiting_link'",selected.id,conversation.id);
-      run('UPDATE service_requests SET client_id=? WHERE conversation_id=? AND client_id IS NULL',selected.id,conversation.id);
+      run("UPDATE service_requests SET client_id=? WHERE conversation_id=? AND client_id IS NULL AND kind<>'comercial'",selected.id,conversation.id);
+      queueSummary(conversation.id);
       addEvent(conversation.id,{key:eventKey,kind:'cliente',summary:'Cliente vinculado: '+selected.name+(reason?' — '+reason:''),actor:actor.signatureName,source:actor===aiActor?'IA':'Atendente',qualification:actor===aiActor?'Informado':'Confirmado'});
     });return localView(conversation.id);
   }
@@ -150,6 +186,9 @@ export function createNotionContext(db,config,transport,options={}){
       const current=checkVersion(conversation.id,initial.version);
       if(current.client_id)fail(409,'O cliente já foi vinculado por outra ação.');
       run('UPDATE conversation_context SET client_id=?,client_name=?,snapshot=NULL,checked_at=NULL,last_error=NULL,version=version+1,updated=? WHERE conversation_id=?',selected.id,selected.name,Date.now(),conversation.id);
+      run("UPDATE service_events SET client_id=?,sync_state='pending' WHERE conversation_id=? AND client_id IS NULL AND sync_state='waiting_link'",selected.id,conversation.id);
+      run('UPDATE service_requests SET client_id=? WHERE conversation_id=? AND client_id IS NULL AND kind<>\'comercial\'',selected.id,conversation.id);
+      queueSummary(conversation.id);
       addEvent(conversation.id,{key:'phone-lookup:'+conversation.id+':'+selected.id,kind:'cliente',summary:'Cadastro localizado pelo telefone do WhatsApp. A associação não confirma identidade pessoal, contratação ou situação de trabalho.',actor:'Sistema · busca de contexto',source:'Sistema',qualification:'Informado'});
     });
     return{state:'matched_by_phone',clientId:selected.id};
@@ -215,7 +254,7 @@ export function createNotionContext(db,config,transport,options={}){
       const relation=p.properties?.['Cliente cadastrado'];
       if(relation?.has_more||!relation?.relation?.some(r=>uuid(r.id)===current.client_id))fail(409,'O trabalho não tem vínculo confirmado com este cliente.');
     }
-    transaction(()=>{checkVersion(conversation.id,body.version);run('UPDATE conversation_context SET summary=?,missing=?,next_step=?,kind=?,work_id=?,version=version+1,updated=? WHERE conversation_id=?',summary,missing,next,kind,work,Date.now(),conversation.id);addEvent(conversation.id,{key:eventKey,kind:'contexto',summary,missing,nextStep:next,actor:actor.signatureName,source:'Atendente',qualification:body.qualification||'Informado'});});
+    transaction(()=>{checkVersion(conversation.id,body.version);run('UPDATE conversation_context SET summary=?,missing=?,next_step=?,kind=?,work_id=?,version=version+1,updated=? WHERE conversation_id=?',summary,missing,next,kind,work,Date.now(),conversation.id);addEvent(conversation.id,{key:eventKey,kind:'contexto',summary,missing,nextStep:next,currentSummary:true,actor:actor.signatureName,source:'Atendente',qualification:body.qualification||'Informado'});});
     return localView(conversation.id);
   }
   function request(conversation,body,actor){
@@ -237,16 +276,18 @@ export function createNotionContext(db,config,transport,options={}){
     transaction(()=>{checkVersion(conversation.id,body.version);run('UPDATE conversation_context SET mode=?,version=version+1,updated=? WHERE conversation_id=?',body.mode,Date.now(),conversation.id);if(body.mode==='human')run('UPDATE conversations SET owner_id=? WHERE id=?',actor.id,conversation.id);addEvent(conversation.id,{key:eventKey,kind:body.mode==='human'?'humano':'assistencia',summary:body.mode==='human'?'Atendimento assumido por '+actor.signatureName:'Assistência liberada; a execução depende da configuração e dos telefones autorizados no piloto de IA.',actor:actor.signatureName,source:'Atendente',qualification:'Confirmado'});});return localView(conversation.id);
   }
   function receivedFile(conversationId,messageId,kind){addEvent(conversationId,{key:'file:'+messageId,kind:'arquivo',summary:({image:'Imagem recebida',document:'Documento recebido',sticker:'Figurinha recebida',audio:'Áudio recebido'})[kind]||'Arquivo recebido',source:'Cliente',actor:'Contato do WhatsApp',messageId});}
-  function aiRecord(id,jobId,result,handoff=false){
+  function aiRecord(id,jobId,result,handoff=false,{updateCurrent=false,expectedVersion,clientId}={}){
     const eventKey='ai:'+jobId;if(get('SELECT id FROM service_events WHERE event_key=?',eventKey))return;
     const record=()=>{
       const c=context(id);let requestId=null;
+      const currentSummary=updateCurrent&&c.version===expectedVersion;
+      if(currentSummary)run('UPDATE conversation_context SET summary=?,missing=?,next_step=?,kind=?,version=version+1,updated=? WHERE conversation_id=?',result.summary,result.missing,result.nextStep,result.kind,Date.now(),id);
       if(handoff){
         const existing=get("SELECT id FROM service_requests WHERE conversation_id=? AND owner_id IS NULL AND status='Aguardando equipe'",id);
         requestId=existing?.id||randomUUID();
         if(!existing)run('INSERT INTO service_requests(id,conversation_id,client_id,work_id,title,kind,status,summary,missing,next_step,owner_id,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',requestId,id,result.kind==='comercial'?null:c.client_id,result.kind==='comercial'?null:c.work_id,'Atendimento encaminhado pela IA',result.kind,'Aguardando equipe',result.summary,result.missing,result.nextStep,null,Date.now(),Date.now());
       }
-      addEvent(id,{key:eventKey,kind:result.kind==='comercial'?'comercial':'contexto',requestId,...(result.kind==='comercial'?{clientId:null,workId:null}:{}),summary:result.summary,missing:result.missing,nextStep:result.nextStep,status:handoff?'Aguardando equipe':'Em atendimento',actor:'Domum · IA',source:'IA',qualification:'Interpretado'});
+      addEvent(id,{key:eventKey,kind:result.kind==='comercial'?'comercial':'contexto',currentSummary,requestId,...(clientId!==undefined?{clientId}:{}),...(result.kind==='comercial'?{clientId:null,workId:null}:{}),summary:result.summary,missing:result.missing,nextStep:result.nextStep,status:handoff?'Aguardando equipe':'Em atendimento',actor:'Domum · IA',source:'IA',qualification:'Interpretado'});
     };if(db.isTransaction)record();else transaction(record);
   }
   const creating=new Map();
@@ -311,11 +352,13 @@ export function createNotionContext(db,config,transport,options={}){
           run("UPDATE service_events SET notion_page_id=?,sync_state='synced',sync_error=NULL WHERE id=?",uuid(result.id),e.id);
         }catch(error){run('UPDATE service_events SET sync_state=?,sync_error=?,attempts=attempts+1,next_attempt=? WHERE id=?',error.uncertain||e.sync_state==='uncertain'?'uncertain':'error',error.message,Date.now()+Math.max(error.retryAfter||0,Math.min(3600000,60000*2**Math.min(e.attempts,5))),e.id);}
       }
+      await processSummaries();
     })().finally(()=>{worker=null;});return worker;
   }
   async function verify(){
     ensureEnabled();const invalid=invalidSources();if(invalid.length)fail(400,'Confira os identificadores de fonte em '+invalid.join(', ')+'.');const clients=await api('data_sources/'+uuid(sources.clients)),history=await api('data_sources/'+uuid(sources.history));
     const expected={clients:{'Nome do Cliente':'title',Telefone:'phone_number','ID de criação na central':'rich_text'},history:{Registro:'title','ID do evento':'rich_text','Cliente cadastrado':'relation','Data do acontecimento':'date',Resumo:'rich_text',Qualificação:'select'}};
+    if(summaryEnabled())Object.assign(expected.clients,summaryFields);
     const missing=[];for(const [name,schema]of Object.entries(expected))for(const [property,type]of Object.entries(schema))if(({clients,history})[name].properties?.[property]?.type!==type)missing.push(name+': '+property);
     if(missing.length)fail(409,'Confira as propriedades das bases: '+missing.join(', '));
     const sourceChecks=Object.entries(sources).map(([name,id])=>({name,field:sourceFields[name],sourceId:id,configured:!!id,accessible:['clients','history'].includes(name)}));

@@ -148,3 +148,7 @@ O diagnóstico também informa a última falha de envio observada nesta execuç�
 ## Assistente interno e contexto do cliente
 
 A aba Assistente interno conversa com um Custom Agent real do Notion, separada das mensagens de clientes. Configuração, créditos, aprovação de documentos e busca automática do cadastro por telefone estão no [guia de operadores e contexto](docs/chat-operadores-e-contexto.md). A ativação do chat interno é separada do piloto de respostas automáticas do WhatsApp.
+
+## Atendimento integrado
+
+Liberação geral, resumo cumulativo em Clientes, fila de histórico, seleção de cliente no assistente interno e transcrição estão descritos em [docs/atendimento-integrado.md](docs/atendimento-integrado.md). Esta seção atualiza o escopo de piloto das orientações anteriores. A configuração padrão permanece desligada; a ativação no Render e o acesso às bases precisam ser conferidos separadamente.

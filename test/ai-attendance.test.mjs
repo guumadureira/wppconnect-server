@@ -27,6 +27,40 @@ test('simulação gratuita não usa modelo nem grava atendimento',()=>{
   assert.equal(simulateAttendance('Ofereço parceria comercial').kind,'comercial');assert.throws(()=>simulateAttendance(''),/mensagem de teste/);
 });
 
+test('liberação geral atende novos números, preserva controle humano e teto total',async t=>{
+  const f=fixture(t,{AI_ALLOW_ALL_CONTACTS:'true',AI_ALLOWED_PHONES:'',AI_TOTAL_BUDGET_USD:'0.05'});
+  const c=f.incoming('Preciso de um projeto','5544000000009');await f.app.ai.process();
+  assert.equal(f.app.ai.status().allContacts,true);assert.equal(f.app.ai.status().scopeConfigured,true);
+  assert.equal(f.app.ai.result(c.id).state,'done');assert.equal(f.app.customerContext.view(c.id).summary,output.summary);
+  assert.equal(f.app.customerContext.view(c.id).next_step,output.nextStep);
+  f.app.ai.pause(c.id);f.incoming('Continuando','5544000000009');await f.app.ai.process();
+  assert.equal(f.calls.filter(x=>x.url.includes('openai.com')).length,1);
+  f.app.db.prepare('UPDATE ai_jobs SET cost_usd=0.05').run();
+  const other=f.incoming('Oi','5544000000008');await f.app.ai.process();
+  assert.equal(f.app.ai.result(other.id).state,'error');assert.equal(f.calls.filter(x=>x.url.includes('openai.com')).length,1);
+});
+
+test('resumo acumulado entra no turno seguinte; edição humana durante envio não é sobrescrita',async t=>{
+  let edited=false;
+  const f=fixture(t,{},async(url,o,app)=>{
+    if(edited&&url.includes('facebook.com'))app.db.prepare("UPDATE conversation_context SET summary='Correção humana',version=version+1").run();
+  });
+  const c=f.incoming();await f.app.ai.process();edited=true;
+  f.incoming('Agora tenho outro detalhe');await f.app.ai.process();
+  const input=JSON.parse(f.calls.filter(x=>x.url.includes('openai.com')).at(-1).body.input[0].content);
+  assert.equal(input.context.summary,output.summary);
+  assert.equal(f.app.customerContext.view(c.id).summary,'Correção humana');
+  assert.equal(f.app.customerContext.view(c.id).history.filter(e=>e.source==='IA').length,2);
+});
+
+test('falha de IA não substitui contexto anterior por mensagem genérica de erro',async t=>{
+  let fail=false;
+  const f=fixture(t,{},async url=>fail&&url.includes('openai.com')?Response.json({error:{}},{status:503}):null);
+  const c=f.incoming();await f.app.ai.process();fail=true;f.incoming('Outro detalhe');await f.app.ai.process();
+  assert.equal(f.app.customerContext.view(c.id).summary,output.summary);
+  assert.equal(f.app.customerContext.view(c.id).mode,'human');
+});
+
 test('cada resposta continua a conversa e retira saudação redundante sem inventar perguntas',async t=>{
   const replies=['Bom dia! Em qual cidade fica a casa?','Bom dia! A casa já está construída?','Boa tarde! Pode mandar quando encontrar.'];
   const f=fixture(t,{},async url=>url.includes('openai.com')?Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify({...output,reply:replies.shift()})}]}]}):undefined);
