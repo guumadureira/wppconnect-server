@@ -5,10 +5,15 @@ import { mkdtempSync,rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createCentral } from '../server.mjs';
+import {samePhone} from '../contact-phone.mjs';
 
 const ids={clients:'11111111-1111-4111-8111-111111111111',history:'22222222-2222-4222-8222-222222222222',works:'33333333-3333-4333-8333-333333333333',proposals:'44444444-4444-4444-8444-444444444444',projects:'55555555-5555-4555-8555-555555555555',tasks:'66666666-6666-4666-8666-666666666666',client:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',work:'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',other:'cccccccc-cccc-4ccc-8ccc-cccccccccccc'};
 const rt=text=>({rich_text:[{plain_text:text,text:{content:text}}]}),title=text=>({title:[{plain_text:text,text:{content:text}}]}),relation=id=>({relation:[{id}]}),select=name=>({select:{name}});
 const page=(id,source,properties)=>({id,parent:{data_source_id:source},properties});
+test('telefone reconhece apenas equivalência móvel brasileira, nunca sufixo ou fixo',()=>{
+  assert.equal(samePhone('+55 (44) 99823-1095','554498231095'),true);
+  for(const [a,b]of [['554432231095','5544932231095'],['554498231095','554198231095'],['+155498231095','554498231095'],['98231095','554498231095']])assert.equal(samePhone(a,b),false);
+});
 function remote(){
   const rows={
     [ids.clients]:[page(ids.client,ids.clients,{'Nome do Cliente':title('Cliente exemplo'),Telefone:{phone_number:'+55 (44) 99999-1234'},'Etapa do cadastro':select('Inicial'),'Etapa do Atendimento':select('Captação de Cliente'),'CPF/CNPJ':rt('PRIVATE-CPF'),'Valor do Contrato':{number:987654321},'Pasta principal Microsoft 365 — restrita':{url:'https://private.invalid/secret'}})],
@@ -194,4 +199,50 @@ test('assumir e liberar assistência são locais e não habilitam respostas auto
 test('histórico e solicitações persistem ao reiniciar o banco e dados existentes permanecem',async()=>{
   const dir=mkdtempSync(join(tmpdir(),'central-context-')),remoteServer=remote(),config={DATABASE_PATH:join(dir,'central.sqlite')};let f;
   try{f=await fixture(null,{enabled:false,config,remoteServer});await f.action('',{requestId:'persist-context',version:0,summary:'Retomar atendimento'},'PATCH');await f.action('/requests',{requestId:'persist-request',title:'Conferir arquivo',kind:'documentos'});await f.app.close();f=null;f=await fixture(null,{enabled:false,config,remoteServer});const c=await f.view();assert.equal(c.summary,'Retomar atendimento');assert.equal(c.requests.length,1);assert.equal(c.history.length,2);assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM messages').get().n,1);}finally{if(f)await f.app.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+
+test('primeiro contato localiza cadastro e lê apenas seções de atendimento antes de criar resposta',async t=>{
+  const r=remote(),base=r.transport;
+  r.transport=async(url,o)=>url.includes('/blocks/')?Response.json({results:[
+    {type:'paragraph',paragraph:{rich_text:[{plain_text:'PRIVATE fora da seção'}]}},
+    {type:'heading_2',heading_2:{rich_text:[{plain_text:'Contexto básico de atendimento'}]}},
+    {type:'paragraph',paragraph:{rich_text:[{plain_text:'Documentação em subdivisão; consultar serviço atual antes de informar andamento.'}]}},
+    {type:'heading_2',heading_2:{rich_text:[{plain_text:'Acessos internos'}]}},
+    {type:'paragraph',paragraph:{rich_text:[{plain_text:'PRIVATE link e financeiro'}]}}
+  ],has_more:false}):base(url,o);
+  const f=await fixture(t,{remoteServer:r});
+  const result=await f.app.customerContext.resolveBeforeReply(f.chat);
+  assert.equal(result.state,'matched_by_phone');assert.equal((await f.view()).client_id,ids.client);
+  const context=await f.app.customerContext.refresh(f.chat);
+  assert.match(context.snapshot.attendance.text,/Documentação em subdivisão/);
+  assert.ok(!JSON.stringify(context.snapshot.attendance).includes('PRIVATE'));
+  assert.equal(r.state.clientCreates,0);
+  assert.equal((await f.app.customerContext.resolveBeforeReply(f.chat)).state,'linked');
+});
+
+test('busca ambígua, incompleta ou ultrapassada não vincula nem cria cliente',async t=>{
+  for(const mode of ['duplicate','partial','stale']){
+    const r=remote(),base=r.transport;
+    r.transport=async(url,o)=>{
+      if(url.includes('/data_sources/'+ids.clients+'/query')){
+        if(mode==='duplicate'){const a=await (await base(url,o)).json();return Response.json({results:[...a.results,{...a.results[0],id:ids.other}],has_more:false});}
+        if(mode==='partial')return Response.json({results:[],has_more:true,next_cursor:'next'});
+      }
+      return base(url,o);
+    };
+    const f=await fixture(t,{remoteServer:r});
+    await assert.rejects(f.app.customerContext.resolveBeforeReply(f.chat,()=>mode!=='stale'),{status:409});
+    assert.equal((await f.view()).client_id,null);assert.equal(r.state.clientCreates,0);
+  }
+});
+
+
+test('busca em fila reconhece cliente mesmo com atendimento por IA desligado',async t=>{
+ const f=await fixture(t);assert.equal(f.app.ai.status().enabled,false);
+ await f.app.customerContext.processLookups();
+ assert.equal((await f.view()).client_id,ids.client);
+ assert.equal((await f.view()).discovery.state,'matched_by_phone');
+ assert.equal(f.remote.clientCreates,0);
+ assert.equal(f.app.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE direction='out'").get().n,0);
 });

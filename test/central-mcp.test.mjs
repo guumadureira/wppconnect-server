@@ -257,3 +257,25 @@ test('proposta alterada, nova mensagem e outro destinatário impedem preparaçã
     assert.equal(f.calls.filter(c=>c.url.includes('facebook.com')).length,0);
   }
 });
+
+test('operador autenticado prepara documento fora do piloto sem ampliar MCP e outra assinatura não confirma',async t=>{
+  const f=await fixture(t,{...notionConfig,CENTRAL_MCP_SEND_ENABLED:'false'},documentTransport()),other='5544000000002';f.incoming();f.incoming('Documento solicitado',other);
+  const request=async(path,body,cookie)=>{const r=await fetch(f.base+path,{method:'POST',headers:{origin:'http://localhost:3000','content-type':'application/json',...(cookie?{cookie}:{})},body:JSON.stringify(body)});return{status:r.status,body:await r.json(),cookie:r.headers.get('set-cookie')?.split(';')[0]};};
+  const action=(name,args,cookie)=>request('/api/operator-documents',{action:name,arguments:args},cookie);
+  assert.equal((await action('listar_documentos_notion',{telefone:other,paginaId:pageId})).status,401);
+  const admin={name:'Admin',email:'operator-test@example.invalid',password:'test-only-password'};await request('/api/setup',admin);
+  const hash=f.app.db.prepare('SELECT password FROM agents').get().password;
+  f.app.db.prepare("INSERT INTO agents(id,name,email,password,role) VALUES(?,?,?,?,'agent')").run(randomUUID(),'Operador','agent@example.invalid',hash);
+  const login={email:'agent@example.invalid',password:admin.password,signatureName:'Atendente Um'},cookie=(await request('/api/login',login)).cookie;
+  const alternate=(await request('/api/login',{...login,signatureName:'Atendente Dois'})).cookie;
+  const list=await action('listar_documentos_notion',{telefone:other,paginaId:pageId},cookie);assert.equal(list.status,200);
+  const d=(await action('preparar_documento_notion',{telefone:other,paginaId:pageId,arquivoId:list.body.documentos[0].arquivoId,texto:'Segue para conferir.',requestId:randomUUID()},cookie)).body;
+  assert.equal(d.estado,'prepared');assert.equal(f.calls.filter(c=>c.url.includes('facebook.com')).length,0);
+  assert.equal((await f.tool('consultar_envio',{envioId:d.envioId})).isError,true);
+  assert.equal((await action('consultar_envio',{envioId:d.envioId},alternate)).status,403);
+  const args={envioId:d.envioId,resumoCriptografico:d.resumoCriptografico,autorizadoPeloUsuario:true};
+  assert.equal((await action('confirmar_envio',args,alternate)).status,403);
+  const result=await action('confirmar_envio',args,cookie);assert.equal(result.body.aceitoPelaMeta,true);
+  await action('confirmar_envio',args,cookie);assert.equal(f.calls.filter(c=>c.url.endsWith('/messages')).length,1);
+  assert.equal((await f.tool('consultar_conversa',{telefone:other})).isError,true);
+});

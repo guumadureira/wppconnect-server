@@ -12,6 +12,7 @@ import { createAIAttendance, simulateAttendance } from './ai-attendance.mjs';
 import { createCentralMCP } from './central-mcp.mjs';
 import {createSupplierRegister} from './supplier-register.mjs';
 import {createHistoryImport} from './history-import.mjs';
+import {createOperatorChat} from './operator-chat.mjs';
 
 const derive = promisify(scrypt);
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -55,6 +56,7 @@ export function createCentral(config = process.env, transport = fetch, options =
   ai = createAIAttendance(db,config,transport,customerContext,{ready:!!ready,debounceMs:options.aiDebounceMs,media,suppliers,importedHistory:id=>manualHistory?.forAI(id)});
   manualHistory=createHistoryImport(db,customerContext,ai);
   const centralMCP=createCentralMCP(db,config,transport,{context:customerContext,ai,media,ready:!!ready});
+  const operatorChat=createOperatorChat(db,config,transport);
   // Only operational counts and timestamps; no payload, phone or credentials.
   // These observations start again with each server process.
   const metaCode = value => Number.isSafeInteger(value) && value > 0 ? value : null;
@@ -123,6 +125,7 @@ export function createCentral(config = process.env, transport = fetch, options =
         run("UPDATE conversations SET pending_since=?,last_inbound=MAX(COALESCE(last_inbound,0),?),last_received=?,updated=MAX(updated,?),status=CASE WHEN ?>=CAST(updated/1000 AS INTEGER)*1000 THEN 'open' ELSE status END WHERE id=?", pending,at,received,at,at,c.id);
       }
       ai.incoming(get('SELECT * FROM conversations WHERE id=?',c.id),get('SELECT * FROM messages WHERE id=?',messageId),{fresh,echo,type:m.type});
+      if(!echo)customerContext.queueLookup(get('SELECT * FROM conversations WHERE id=?',c.id));
     }
     for (const s of value.statuses || []) {
       if (!['sent','delivered','read','failed'].includes(s.status)) continue;
@@ -189,6 +192,7 @@ export function createCentral(config = process.env, transport = fetch, options =
         webhook.lastResult=observed.recordedMessages?'recorded':observed.ignoredNumberEvents?'other_number':observed.duplicates?'duplicate':observed.invalidMessages?'invalid_message':'no_new_message';
         setImmediate(()=>media.processPending().catch(()=>{}));
         setImmediate(()=>customerContext.processQueue().catch(()=>{}));
+        setImmediate(()=>customerContext.processLookups().catch(()=>{}));
         return reply(200,{ok:true});
       }
       const publicFiles = {
@@ -200,6 +204,7 @@ export function createCentral(config = process.env, transport = fetch, options =
         '/assets/domum-wordmark-light.png': ['domum-wordmark-light.png', 'image/png'],
         '/assets/domum-symbol.png': ['domum-symbol.png', 'image/png'],
         '/assets/domum-interface.css': ['domum-interface.css', 'text/css; charset=utf-8'],
+        '/assets/operator-chat.js': ['operator-chat.js','text/javascript; charset=utf-8'],
         '/assets/manrope-latin.woff2': ['fonts/manrope-latin.woff2', 'font/woff2'],
       };
       if (Object.hasOwn(publicFiles, url.pathname) && ['GET','HEAD'].includes(req.method)) {
@@ -249,6 +254,22 @@ export function createCentral(config = process.env, transport = fetch, options =
         return reply(200,{ok:true});
       }
       if (!user) fail(401,'Entre com seu usuário para continuar.');
+      if(url.pathname==='/api/operator-chat'&&req.method==='GET')return reply(200,operatorChat.list(user));
+      if(url.pathname==='/api/operator-chat/verify'&&req.method==='POST'){
+        if(user.role!=='admin')fail(403,'Somente administradores podem conferir a configuração do agente.');
+        return reply(200,await operatorChat.verify());
+      }
+      if(url.pathname==='/api/operator-chat/messages'&&req.method==='POST')return reply(200,await operatorChat.send(user,body));
+      if(url.pathname==='/api/operator-documents'&&req.method==='POST'){
+        const owner=hash(user.id+'\n'+String(user.signatureName||user.name).trim().toLocaleLowerCase('pt-BR'));
+        return reply(200,await centralMCP.operatorCall(body.action,body.arguments,owner));
+      }
+      const operatorMatch=url.pathname.match(/^\/api\/operator-chat\/([a-f0-9-]+)(?:\/(refresh|action))?$/i);
+      if(operatorMatch){
+        if(req.method==='GET'&&!operatorMatch[2])return reply(200,operatorChat.view(user,operatorMatch[1]));
+        if(req.method==='POST'&&operatorMatch[2]==='refresh')return reply(200,await operatorChat.refresh(user,operatorMatch[1]));
+        if(req.method==='POST'&&operatorMatch[2]==='action')return reply(200,await operatorChat.action(user,{...body,chatId:operatorMatch[1]}));
+      }
       if(url.pathname==='/api/integration/status'&&req.method==='GET'){
         if(user.role!=='admin')fail(403,'Somente administradores podem verificar esta conexão.');
         return reply(200,centralMCP.status());
@@ -497,15 +518,16 @@ export function createCentral(config = process.env, transport = fetch, options =
   const timer=setInterval(async()=>{
     if(delivering)return;
     delivering=true;
-    try{await deliverAlerts();await media.processPending();await customerContext.processQueue();await suppliers.process();}catch{console.error('Falha ao verificar lembretes, anexos ou integração.');}finally{delivering=false;}
+    try{await deliverAlerts();await media.processPending();await customerContext.processLookups();await customerContext.processQueue();await suppliers.process();}catch{console.error('Falha ao verificar lembretes, anexos ou integração.');}finally{delivering=false;}
   },60000);
   timer.unref();
-  return {server,db,intake,tick,deliverAlerts,media,customerContext,ai,suppliers,manualHistory,close:()=>{
+  return {server,db,intake,tick,deliverAlerts,media,customerContext,ai,suppliers,manualHistory,operatorChat,close:()=>{
     clearInterval(timer);
     clearInterval(aiTimer);
     return new Promise((resolve,reject)=>server.close(async error=>{
       await media.close();
       await ai.close();
+      await operatorChat.close();
       await customerContext.close();
       await suppliers.close();
       db.close();
