@@ -14,14 +14,14 @@ export function createOperatorChat(db,config,transport){
   const token=String(config.NOTION_AGENT_TOKEN||config.NOTION_TOKEN||'').trim(),agent=String(config.NOTION_OPERATOR_AGENT_ID||'').trim().toLowerCase();
   const owner=u=>digest(u.id+'\n'+String(u.signatureName||u.name).trim().toLocaleLowerCase('pt-BR'));
   const scrub=s=>String(s||'').split(token||'\0').join('[credencial omitida]').replace(/(?:sk-proj-|ntn_)[A-Za-z0-9_-]+/g,'[credencial omitida]');
-  function status(){const missing=[...(!token?['NOTION_TOKEN ou NOTION_AGENT_TOKEN']:[]),...(!uuid(agent)?['NOTION_OPERATOR_AGENT_ID']:[])];return{enabled:String(config.NOTION_OPERATOR_CHAT_ENABLED)==='true'&&!missing.length,activationPending:String(config.NOTION_OPERATOR_CHAT_ENABLED)!=='true',missing,provider:'notion',billing:'O agente usa os créditos e permissões do Notion; não a API OpenAI do atendimento.'};}
-  const requireReady=()=>{if(!status().enabled)fail(503,'Configure e habilite o chat de operadores com um agente do Notion antes de enviar comandos.');};
+  function status(){const missing=[...(!token?['NOTION_TOKEN ou NOTION_AGENT_TOKEN']:[]),...(!uuid(agent)?['NOTION_OPERATOR_AGENT_ID']:[])];return{configured:!missing.length,enabled:String(config.NOTION_OPERATOR_CHAT_ENABLED)==='true'&&!missing.length,activationPending:String(config.NOTION_OPERATOR_CHAT_ENABLED)!=='true',missing,provider:'notion',billing:'O agente usa os créditos e permissões do Notion; não a API OpenAI do atendimento.'};}
+  const requireReady=(readOnly=false)=>{if(!status().configured||!readOnly&&!status().enabled)fail(503,'Configure e habilite o chat de operadores com um agente do Notion antes de enviar comandos.');};
   function chat(u,id){if(!uuid(id))fail(400,'Chat inválido.');const c=get('SELECT * FROM operator_chats WHERE id=? AND owner=?',id,owner(u));if(!c)fail(404,'Chat não encontrado para esta conta e assinatura.');return c;}
   function view(u,id){const c=chat(u,id),messages=all('SELECT id,role,text,created FROM operator_chat_messages WHERE chat_id=? ORDER BY rowid DESC LIMIT 120',id).reverse(),actions=c.state==='requires_action'?JSON.parse(c.actions):[];return{id:c.id,title:c.title,state:c.state,error:c.error,updated:c.updated,messages,actions,reviewDigest:digest(JSON.stringify({id:c.id,actions,messages})),canSend:status().enabled&&c.agent_id===agent&&c.state==='completed'};}
   function list(u){return{...status(),chats:all('SELECT id,title,state,updated,error FROM operator_chats WHERE owner=? ORDER BY updated DESC LIMIT 30',owner(u))};}
   let retryUntil=0;
-  async function api(path,method='GET',body){
-    requireReady();if(Date.now()<retryUntil)fail(429,'O Notion pediu uma pausa. Aguarde antes de consultar novamente.');let r;
+  async function api(path,method='GET',body,readOnly=false){
+    requireReady(readOnly);if(Date.now()<retryUntil)fail(429,'O Notion pediu uma pausa. Aguarde antes de consultar novamente.');let r;
     try{r=await transport('https://api.notion.com/v1/'+path,{method,headers:{authorization:'Bearer '+token,'Notion-Version':'2026-03-11','content-type':'application/json',accept:'application/json'},...(body?{body:JSON.stringify(body)}:{}),redirect:'error',signal:AbortSignal.timeout(20000)});}catch{fail(502,'O Notion não confirmou o resultado. Não repita o comando automaticamente.',{unknown:method==='POST'&&path==='sessions'});}
     if(!r.ok){
       if(r.status===429){const seconds=Number(r.headers?.get('retry-after'));retryUntil=Date.now()+(Number.isFinite(seconds)&&seconds>0?seconds*1000:60000);}
@@ -30,7 +30,7 @@ export function createOperatorChat(db,config,transport){
     }
     try{return await r.json();}catch{fail(502,'O Notion retornou um resultado que não pôde ser confirmado.',{unknown:method==='POST'&&path==='sessions'});}
   }
-  async function verify(){const a=await api('agents/'+agent);if(a.id!==agent)fail(409,'O agente retornado não corresponde ao configurado.');return{...status(),verified:true,name:scrub(a.name).slice(0,160),agentStatus:a.status};}
+  async function verify(){const a=await api('agents/'+agent,'GET',undefined,true);if(a.id!==agent)fail(409,'O agente retornado não corresponde ao configurado.');return{...status(),verified:true,name:scrub(a.name).slice(0,160),agentStatus:a.status};}
   function applySession(id,s){
     const c=get('SELECT * FROM operator_chats WHERE id=?',id);
     if(!uuid(s.id)||s.agent_id!==c.agent_id||!states.has(s.status)||(c.remote_id&&c.remote_id!==s.id))fail(502,'O Notion retornou uma sessão incompatível.',{unknown:true});

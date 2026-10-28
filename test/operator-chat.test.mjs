@@ -47,7 +47,7 @@ test('ações exigem decisão explícita da prévia atual e não são aprovadas 
 });
 test('desativado não chama API e diagnóstico de acesso não executa o agente',async t=>{
   const f=fixture(t,{NOTION_OPERATOR_CHAT_ENABLED:'false'});assert.equal(f.chat.status().enabled,false);await assert.rejects(f.chat.send(user,{message:'Oi',requestId:randomUUID()}),{status:503});assert.equal(f.calls.length,0);
-  f.config.NOTION_OPERATOR_CHAT_ENABLED='true';const v=await f.chat.verify();assert.equal(v.verified,true);assert.equal(f.calls.length,1);assert.ok(f.calls[0].url.includes('/agents/'));
+  const v=await f.chat.verify();assert.equal(v.verified,true);assert.equal(v.enabled,false);assert.equal(f.calls.length,1);assert.ok(f.calls[0].url.includes('/agents/'));
 });
 test('reinício preserva conversa e marca solicitação em voo como incerta',async t=>{
   const f=fixture(t),c=await f.chat.send(user,{message:'Rascunho',requestId:randomUUID()});
