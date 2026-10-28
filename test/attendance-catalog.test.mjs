@@ -15,6 +15,12 @@ test('contatos sem demanda de engenharia nao recebem perguntas tecnicas',()=>{
     assert.deepEqual(serviceGuidesFor({latest}),[]);
   }
 });
+
+test('troca para emprego ou oferta não reutiliza o assunto técnico anterior',()=>{
+  for(const latest of ['Procuro emprego na obra','Segue meu currículo','Ofereço serviços de pintura'])assert.deepEqual(serviceGuidesFor({latest,recent:'Casa com infiltração',summary:'Projeto em Sarandi'}),[]);
+  assert.ok(serviceGuidesFor({latest:'Quero fazer uma casa de 100 metros em Sarandi'}).some(g=>g.subject.includes('Construcao')));
+  assert.ok(serviceGuidesFor({latest:'A parede está com infiltração'}).every(g=>!g.exampleQuestionIfMissing.includes('atendemos antes')));
+});
 test('o catalogo limita quantidade de sugestoes e nao exige checklist',()=>{
   const guides=serviceGuidesFor({latest:'Quero reformar a casa e regularizar a obra com projeto estrutural e matrícula'});
   assert.ok(guides.length<=2);

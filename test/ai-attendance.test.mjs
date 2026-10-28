@@ -27,6 +27,16 @@ test('simulação gratuita não usa modelo nem grava atendimento',()=>{
   assert.equal(simulateAttendance('Ofereço parceria comercial').kind,'comercial');assert.throws(()=>simulateAttendance(''),/mensagem de teste/);
 });
 
+test('modelo recebe guia opcional do assunto atual sem reaproveitar entrevista de obra para emprego',async t=>{
+  const f=fixture(t),c=f.incoming('Quero fazer uma casa de 100 metros em Sarandi');await f.app.ai.process();
+  const first=JSON.parse(f.calls.find(c=>c.url.includes('openai.com')).body.input[0].content);
+  assert.ok(first.serviceGuides.some(g=>g.subject.includes('Construcao')));
+  f.incoming('Na verdade procuro emprego na obra.');await f.app.ai.process();
+  const last=JSON.parse(f.calls.filter(c=>c.url.includes('openai.com')).at(-1).body.input[0].content);
+  assert.deepEqual(last.serviceGuides,[]);assert.ok(last.messages.some(m=>m.text.includes('procuro emprego')));
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM notion_client_operations').get().n,0);
+});
+
 test('oferta comercial fica na fila de fornecedores, fora do cadastro e histórico de clientes',async t=>{
   const result={...output,reply:'Obrigado por apresentar seu serviço. Por enquanto não precisamos; podemos conversar se surgir uma demanda.',kind:'comercial',summary:'Contato oferece pintura; empresa ainda não confirmada.',missing:'',nextStep:'Consultar somente se houver necessidade futura'};
   const f=fixture(t,{},async url=>url.includes('openai.com')?Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify(result)}]}]}):null);

@@ -41,7 +41,7 @@ const services=[
   {
     id:'construcao-e-execucao',
     label:'Construcao, execucao e acompanhamento de obra',
-    match:[/construir minha casa/,/quero construir/,/obra nova/,/executar obra/,/fazer a obra/,/empreitada/,/acompanhar obra/,/gerenciar obra/],
+    match:[/construir minha casa/,/quero construir/,/fazer (?:uma |minha )?ca[sd]a/,/obra nova/,/executar obra/,/fazer a obra/,/empreitada/,/acompanhar obra/,/gerenciar obra/],
     need:'Distinguir planejamento, projeto, execucao, acompanhamento e administracao de uma obra.',
     clues:['Se ja existe projeto','Fase atual da obra','O que espera que a Domum assuma'],
     question:'Voce ja tem o projeto pronto ou ainda esta planejando a construcao?',
@@ -62,7 +62,7 @@ const services=[
     match:[/manutenc/,/reparo/,/infiltr/,/goteir/,/vazament/,/rachadur/,/trinca/,/telhado/,/problema voltou/,/garantia/,/deu problema/],
     need:'Entender o problema observavel e localizar eventual trabalho anterior; reclamacao ou recorrencia nao comprovam automaticamente causa ou garantia.',
     clues:['Onde aparece o problema','Quando acontece ou comecou','Se e o mesmo local de trabalho anterior','Sinais de risco ou urgencia'],
-    question:'O problema acontece naquela mesma area que atendemos antes?',
+    question:'Em qual parte do imovel o problema aparece?',
     limit:'Nao diagnosticar causa, assumir responsabilidade, prometer garantia ou orientar reparo arriscado; urgencias exigem avaliacao humana.'
   }
 ];
@@ -71,6 +71,8 @@ const normalize=value=>String(value||'').normalize('NFD').replace(/[\u0300-\u036
 const score=(s,text)=>s.match.reduce((n,re)=>n+(re.test(text)?1:0),0);
 export function serviceGuidesFor({latest='',recent='',summary=''}={}){
   const current=normalize(latest).slice(-1800);
+  // A past job does not turn a new CV or offer into a construction interview.
+  if(/\b(?:emprego|curriculo|vaga|revendedor|catalogo)\b|(?:ofereco|oferecemos|vendemos).{0,40}(?:servic|produto|material)/.test(current))return[];
   const previous=normalize(recent).slice(-2500);
   const background=normalize(summary).slice(-1800);
   const matches=services.map(s=>({s,weight:score(s,current)*5+score(s,previous)*2+score(s,background)})).filter(x=>x.weight>0);

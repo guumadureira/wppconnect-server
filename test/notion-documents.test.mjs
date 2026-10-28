@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createNotionDocuments} from '../notion-documents.mjs';
-const pageId='11111111-1111-4111-8111-111111111111',config={NOTION_ENABLED:'true',NOTION_TOKEN:'test-only-key'};
+const pageId='a1111111-1111-4111-8111-111111111111',config={NOTION_ENABLED:'true',NOTION_TOKEN:'test-only-key'};
 test('configuração ausente impede consulta sem usar outras credenciais',async()=>{
   for(const config of [{},{NOTION_ENABLED:'false',NOTION_TOKEN:'test-only-key'},{NOTION_ENABLED:'true'}]){
     const docs=createNotionDocuments(config,()=>{assert.fail('Não deve acessar o Notion');});await assert.rejects(docs.list(pageId),{status:409});
@@ -49,4 +49,9 @@ test('limites de corpo, formato, expiração e redirecionamento impedem importa�
   }
   const f=setup({file:{name:'arquivo.pdf',type:'file',file:{url:'https://secure.notion-static.com/file.pdf',expiry_time:'2000-01-01T00:00:00Z'}},props:true}),list=await f.docs.list(pageId);
   await assert.rejects(f.docs.load(pageId,list.documentos[0].arquivoId),{status:409});assert.ok(f.calls.every(c=>c.url.startsWith('https://api.notion.com/')));
+});
+
+test('identidade de arquivo é estável com UUID em maiúsculas ou sem hífens',async()=>{
+  const f=setup({props:true}),a=await f.docs.list(pageId),b=await f.docs.list(pageId.replace(/-/g,'').toUpperCase());
+  assert.equal(a.documentos[0].arquivoId,b.documentos[0].arquivoId);
 });

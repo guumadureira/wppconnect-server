@@ -7,6 +7,8 @@
 - Conservação do vínculo cliente → trabalho → demanda. Um resumo interpretado pela IA nunca é confirmação da equipe.
 - Orientação para registrar correções feitas pelo cliente no resumo da demanda; nenhuma alteração automática do prompt global.
 - Simulação gratuita corrigida para não dizer "encaminhar para a equipe".
+- Catálogo de investigação por assunto, como referência opcional; ofertas de fornecedores e procura de emprego não herdam perguntas sobre obra do histórico anterior.
+- Brevidade sem abandonar a condução: se o cliente espera o próximo passo, fazer a pergunta básica pertinente, em vez de repetir que a conversa pode continuar. Exemplos de várias trocas para construção, terreno e projeto.
 
 ## Critérios de aceite para próxima etapa de implementação
 1. **Memória por demanda:** selecionar trabalho correto antes de construir o resumo usado pelo modelo; conferir origem, data e qualificação dos registros; não mesclar imóveis.
@@ -19,3 +21,5 @@
 
 ## Limites e evidência
 Esta alteração modifica o guia de comportamento, a resposta do simulador e testes estáticos. Não implementa ainda revisão automática de falhas, novas telas ou uma base de lições. Os testes estáticos verificam instruções presentes, mas não comprovam qualidade do modelo. Nenhum cliente deve receber mensagens como efeito colateral dessa alteração. Não mudar habilitação, contas, custos ou permissões no Render sem validação separada.
+
+Em 28/10/2026, a consulta autenticada ao serviço confirmou cadastro e histórico acessíveis, mas Trabalhos, Propostas, Projetos e Atividades ainda retornaram fonte não encontrada ao acesso de servidor. Os IDs estavam preenchidos. Esse resultado não distingue sozinho ID incorreto de falta de acesso; conferir a fonte e as Conexões da integração usada no Render. A consulta da conversa do piloto também confirmou que ela estava concluída e em modo humano; não reaberta nem reativada por esta revisão. Não alegar contexto operacional completo nem atendimento automático ativo nessa conversa.
