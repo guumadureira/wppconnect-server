@@ -27,6 +27,42 @@ test('simulação gratuita não usa modelo nem grava atendimento',()=>{
   assert.equal(simulateAttendance('Ofereço parceria comercial').kind,'comercial');assert.throws(()=>simulateAttendance(''),/mensagem de teste/);
 });
 
+test('cada resposta continua a conversa e retira saudação redundante sem inventar perguntas',async t=>{
+  const replies=['Bom dia! Em qual cidade fica a casa?','Bom dia! A casa já está construída?','Boa tarde! Pode mandar quando encontrar.'];
+  const f=fixture(t,{},async url=>url.includes('openai.com')?Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify({...output,reply:replies.shift()})}]}]}):undefined);
+  const chat=f.incoming('Quero regularizar minha casa');await f.app.ai.process();
+  const firstReply=f.app.db.prepare("SELECT id FROM messages WHERE direction='out'").get().id;
+  f.incoming('Em Sarandi');await f.app.ai.process();
+  f.incoming('Vou separar o projeto e te mando');await f.app.ai.process();
+  const requests=f.calls.filter(c=>c.url.includes('openai.com'));
+  const first=JSON.parse(requests[0].body.input[0].content),second=JSON.parse(requests[1].body.input[0].content);
+  assert.equal(first.turn.phase,'opening');assert.equal(first.turn.greetingAllowed,true);
+  assert.equal(second.turn.phase,'continuation');assert.equal(second.turn.greetingAllowed,false);
+  assert.equal(second.turn.previousReply.id,firstReply);assert.match(second.turn.previousReply.text,/qual cidade/);
+  assert.deepEqual(second.turn.unansweredMessageIds,second.messages.filter(m=>m.text==='Em Sarandi').map(m=>m.id));
+  const sent=f.calls.filter(c=>c.url.includes('facebook.com')).map(c=>c.body.text.body);
+  assert.deepEqual(sent,['Bom dia! Em qual cidade fica a casa?','A casa já está construída?','Pode mandar quando encontrar.']);
+  assert.equal(f.app.ai.result(chat.id).result.reply,sent.at(-1));
+  assert.deepEqual(f.app.db.prepare("SELECT body FROM messages WHERE direction='out' ORDER BY rowid").all().map(m=>m.body),sent);
+});
+
+test('rajada de mensagens conserva a última pergunta enviada e ignora envios falhos e outra conversa',async t=>{
+  const f=fixture(t),c=f.incoming('Quero informações');await f.app.ai.process();
+  const firstReply=f.app.db.prepare("SELECT id FROM messages WHERE direction='out'").get().id;
+  const other=f.incoming('Outro contato','5544000000002');
+  const insert=f.app.db.prepare("INSERT INTO messages(id,conversation_id,direction,body,status,created) VALUES(?,?,'out',?,?,?)");
+  insert.run('other-reply',other.id,'Outro assunto','sent',Date.now());
+  insert.run('failed-reply',c.id,'Pergunta que nunca saiu','failed',Date.now());
+  insert.run('unknown-reply',c.id,'Resultado incerto','unknown',Date.now());
+  for(let i=0;i<26;i++)f.incoming('Detalhe '+i);
+  await f.app.ai.process();
+  const input=JSON.parse(f.calls.filter(c=>c.url.includes('openai.com')).at(-1).body.input[0].content);
+  assert.equal(input.messages.length,25);assert.equal(input.messages[0].id,firstReply);
+  assert.equal(input.turn.previousReply.id,firstReply);assert.equal(input.turn.greetingAllowed,false);
+  assert.equal(input.turn.unansweredMessageIds.length,24);
+  assert.ok(input.messages.every(m=>!['other-reply','failed-reply','unknown-reply'].includes(m.id)));
+});
+
 test('modelo recebe guia opcional do assunto atual sem reaproveitar entrevista de obra para emprego',async t=>{
   const f=fixture(t),c=f.incoming('Quero fazer uma casa de 100 metros em Sarandi');await f.app.ai.process();
   const first=JSON.parse(f.calls.find(c=>c.url.includes('openai.com')).body.input[0].content);

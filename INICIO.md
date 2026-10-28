@@ -97,6 +97,8 @@ As alterações de contexto e situação usam versões para evitar sobrescrita p
 
 O piloto opcional de IA e o ensaio sem consumo estão descritos em [docs/atendimento-ia.md](docs/atendimento-ia.md). A configuração padrão permanece desligada e sem consumo; a existência de uma chave não ativa respostas. A liberação real exige telefone de teste, limite de gasto autorizado e configuração privada no servidor. O cadastro inicial automático pode ser habilitado com AI_AUTO_REGISTER, somente no piloto e com fonte dos dados e duplicidade conferidas. A interpretação de documentos continua com a equipe.
 
+As regras de continuidade, cumprimentos e condução breve estão em [docs/continuidade-atendimento.md](docs/continuidade-atendimento.md), com critérios para revisar o piloto depois do deploy. O comportamento do atendimento WhatsApp é definido na Central; alterar o agente de operadores ou configurar webhooks do Notion não muda essas regras.
+
 - A assinatura automática se aplica às mensagens enviadas pela central. Ecos do aplicativo Business não identificam automaticamente o atendente.
 - O prazo de alerta usa tempo corrido, sem calendário de horário comercial. O padrão é 30 minutos.
 - Notificações do navegador exigem permissão e a central aberta. Avisos com a página fechada dependem de um destino externo de alertas; nenhum está configurado neste ambiente.
