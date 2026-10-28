@@ -30,5 +30,5 @@ export function createAudioTranscription(db,config,transport,media,canSpend){
       return data.text.trim();
     }catch{run("UPDATE ai_transcriptions SET state='error' WHERE message_id=?",messageId);fail('Não consegui entender este áudio com segurança. A equipe precisa ouvi-lo; não haverá nova cobrança automática de transcrição.');}
   }
-  return{read,cost:month=>get('SELECT COALESCE(SUM(cost_usd),0) AS n FROM ai_transcriptions'+(month?' WHERE billing_month=?':''),...(month?[month]:[])).n};
+  return{read,cached:messageId=>get("SELECT text FROM ai_transcriptions WHERE message_id=? AND state='done'",messageId)?.text||'',cost:month=>get('SELECT COALESCE(SUM(cost_usd),0) AS n FROM ai_transcriptions'+(month?' WHERE billing_month=?':''),...(month?[month]:[])).n};
 }

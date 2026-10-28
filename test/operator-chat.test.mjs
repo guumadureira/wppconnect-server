@@ -4,7 +4,7 @@ import {DatabaseSync} from 'node:sqlite';
 import {randomUUID} from 'node:crypto';
 import {createOperatorChat} from '../operator-chat.mjs';
 const agent='11111111-1111-4111-8111-111111111111',user={id:'u1',name:'Operador',signatureName:'Gustavo'},other={id:'u2',name:'Outro'};
-function fixture(t,extra={}){
+function fixture(t,extra={},conversationContext){
   const db=new DatabaseSync(':memory:'),calls=[],remote=new Map(),config={NOTION_OPERATOR_CHAT_ENABLED:'true',NOTION_OPERATOR_AGENT_ID:agent,NOTION_TOKEN:'test-notion-secret',...extra};
   const state={fail:false,actions:false,events:[],pageMore:false};
   const transport=async(url,o)=>{
@@ -17,8 +17,21 @@ function fixture(t,extra={}){
     if(url.endsWith('/events/query')){assert.equal(JSON.parse(o.body).sorts[0].direction,'ascending');const sessionId=url.split('/').at(-3);return Response.json({results:state.events.map(e=>({...e,session_id:sessionId})),has_more:state.pageMore});}
     const id=url.split('/').at(-1);return Response.json({...remote.get(id),status:state.actions?'requires_action':'completed'});
   };
-  const chat=createOperatorChat(db,config,transport);t.after(async()=>{await chat.close();db.close();});return{db,calls,state,config,chat};
+  const chat=createOperatorChat(db,config,transport,{conversationContext});t.after(async()=>{await chat.close();db.close();});return{db,calls,state,config,chat};
 }
+
+test('tarefa interna tem cliente fixo e contexto renovado em cada comando, sem envio implícito',async t=>{
+  const conversationId=randomUUID(),seen=[];
+  const f=fixture(t,{},async id=>{seen.push(id);return{conversation:{id,phone:'5544000000001'},summary:'Contexto '+seen.length};});
+  let c=await f.chat.send(user,{message:'Localize documentos',conversationId,requestId:randomUUID()});
+  assert.equal(c.conversationId,conversationId);assert.match(f.calls[0].body.prompt_context,/Contexto 1/);
+  assert.match(f.calls[0].body.prompt_context,/aprovação humana/);
+  c=await f.chat.refresh(user,c.id);
+  await assert.rejects(f.chat.send(user,{chatId:c.id,conversationId:randomUUID(),message:'Outro cliente',requestId:randomUUID()}),{status:409});
+  await f.chat.send(user,{chatId:c.id,message:'Prepare a solicitação para revisão',requestId:randomUUID()});
+  assert.deepEqual(seen,[conversationId,conversationId]);assert.match(f.calls.at(-1).body.prompt_context,/Contexto 2/);
+  assert.ok(f.calls.every(c=>c.url.startsWith('https://api.notion.com/')));
+});
 test('chat usa agente real do Notion e histórico é separado por conta e assinatura',async t=>{
   const f=fixture(t),requestId=randomUUID(),body={message:'Prepare uma proposta para revisão',requestId};
   const c=await f.chat.send(user,body);assert.equal(c.state,'queued');assert.equal(c.messages.length,1);assert.equal(f.calls.length,1);assert.equal(f.calls[0].body.agent_id,agent);

@@ -61,6 +61,28 @@ test('áudio vira texto de contexto, conserva original e custo conjunto, sem rep
   assert.ok(f.app.ai.status().usedTotalUsd>=0.0045);assert.equal(f.app.customerContext.view(c.id).mode,'assisted');
   f.incoming(false);await f.app.ai.process();assert.equal(f.calls.filter(c=>c.url.endsWith('/transcriptions')).length,1);
 });
+
+test('áudio seguido por texto é entendido antes de responder ao lote, sem ignorar falhas',async t=>{
+  const f=await fixture(t),c=f.incoming(true);f.incoming(false);await f.app.ai.process();
+  const request=f.calls.find(c=>c.url.endsWith('/responses'));
+  assert.ok(request);const input=JSON.parse(JSON.parse(request.options.body).input[0].content);
+  assert.ok(input.messages.some(m=>m.source==='transcricao_automatica'&&m.text.includes('regularizar')));
+  assert.equal(f.app.ai.result(c.id).state,'done');
+  const broken=await fixture(t,{},()=>Response.json({error:{}},{status:500}));
+  const chat=broken.incoming(true);broken.incoming(false);await broken.app.ai.process();
+  assert.equal(broken.app.ai.result(chat.id).state,'error');
+  assert.equal(broken.calls.filter(c=>c.url.endsWith('/responses')).length,0);
+});
+
+test('áudio já respondido por humano não gera transcrição retroativa',async t=>{
+  const f=await fixture(t),c=f.incoming(true);
+  f.app.ai.pause(c.id);
+  f.app.db.prepare("INSERT INTO messages(id,conversation_id,direction,body,status,created) VALUES('human-reply',?,'out','Ouvi o áudio, pode continuar','sent',?)").run(c.id,Date.now());
+  f.app.db.prepare("UPDATE conversation_context SET mode='assisted' WHERE conversation_id=?").run(c.id);f.app.ai.release(c);
+  f.incoming(false);await f.app.ai.process();
+  assert.equal(f.calls.filter(c=>c.url.endsWith('/transcriptions')).length,0);
+  assert.equal(f.app.ai.result(c.id).state,'done');
+});
 test('limite e tomada humana durante transcrição impedem chamada ou resposta posterior',async t=>{
   const small=await fixture(t,{AI_TOTAL_BUDGET_USD:'0.001'});small.incoming(true);await small.app.ai.process();assert.equal(small.calls.length,0);
   let finish,started;const waiting=new Promise(r=>finish=r),began=new Promise(r=>started=r);

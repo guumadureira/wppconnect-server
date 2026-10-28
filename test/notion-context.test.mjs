@@ -14,6 +14,46 @@ test('telefone reconhece apenas equivalência móvel brasileira, nunca sufixo ou
   assert.equal(samePhone('+55 (44) 99823-1095','554498231095'),true);
   for(const [a,b]of [['554432231095','5544932231095'],['554498231095','554198231095'],['+155498231095','554498231095'],['98231095','554498231095']])assert.equal(samePhone(a,b),false);
 });
+
+test('resumo atual atualiza somente campos dedicados no cliente e reconcilia PATCH sem duplicar histórico',async t=>{
+  const r=remote(),base=r.transport,p=r.state.rows[ids.clients][0];let patches=0,lost=true;
+  for(const [name,type]of Object.entries({'Resumo do atendimento — Central':'rich_text','Pendências — Central':'rich_text','Próximo passo — Central':'rich_text','Atualizado em — Central':'date','Conversa — Central':'url'}))p.properties[name]={type,...(type==='rich_text'?rt(''):{[type]:null})};
+  r.transport=async(url,o)=>{
+    if(o.method==='PATCH'){
+      assert.equal(url,'https://api.notion.com/v1/pages/'+ids.client);patches++;
+      const properties=JSON.parse(o.body).properties;
+      assert.ok(Object.keys(properties).every(k=>k.endsWith('— Central')));
+      for(const [k,v]of Object.entries(properties))p.properties[k]={...p.properties[k],...v};
+      p.properties['Atualizado em — Central'].date.start=p.properties['Atualizado em — Central'].date.start.replace('Z','+00:00');
+      if(lost){lost=false;throw Error('lost-response');}return Response.json(p);
+    }
+    return base(url,o);
+  };
+  const f=await fixture(t,{remoteServer:r,config:{NOTION_CLIENT_SUMMARY_ENABLED:'true'}});await f.bind();
+  let ctx=await f.view();
+  await f.action('',{version:ctx.version,requestId:'summary-1',summary:'Casa em Sarandi; aguarda matrícula.',missing:'Matrícula',nextStep:'Aguardar documento'},'PATCH');
+  await f.app.customerContext.processQueue(true);
+  assert.equal(patches,1);assert.equal(f.app.customerContext.status().pendingSummaries,1);
+  const historyCount=r.state.historyCreates;
+  f.app.db.prepare('UPDATE notion_client_summaries SET next_attempt=0').run();
+  await f.app.customerContext.processQueue(true);
+  assert.equal(patches,1);assert.equal(f.app.customerContext.status().pendingSummaries,0);assert.equal(r.state.historyCreates,historyCount);
+  ctx=await f.view();await f.action('',{version:ctx.version,requestId:'summary-2',summary:'Matrícula recebida; conferir regularização.',missing:'',nextStep:'Conferir documento'},'PATCH');
+  await f.app.customerContext.processQueue(true);
+  assert.equal(patches,2);assert.equal(p.properties['Pendências — Central'].rich_text[0].text.content,'');
+  assert.equal(p.properties['CPF/CNPJ'].rich_text[0].text.content,'PRIVATE-CPF');
+  assert.equal(p.properties['Valor do Contrato'].number,987654321);
+  assert.ok(r.state.rows[ids.history].some(p=>p.properties.Resumo.rich_text[0].text.content==='Casa em Sarandi; aguarda matrícula.'));
+});
+
+test('vínculo automático encaminha eventos antigos para histórico sem incluir ofertas comerciais',async t=>{
+  const f=await fixture(t),ctx=await f.view();
+  f.app.customerContext.aiRecord(f.chat.id,'prior',{kind:'atendimento',summary:'Necessidade conhecida antes do vínculo',missing:'',nextStep:''},false,{updateCurrent:true,expectedVersion:ctx.version});
+  f.app.customerContext.aiRecord(f.chat.id,'offer',{kind:'comercial',summary:'Oferta separada',missing:'',nextStep:''});
+  await f.app.customerContext.resolveBeforeReply(f.chat);await f.app.customerContext.processQueue(true);
+  assert.ok(f.remote.rows[ids.history].some(p=>p.properties.Resumo.rich_text[0].text.content==='Necessidade conhecida antes do vínculo'));
+  assert.ok(f.remote.rows[ids.history].every(p=>p.properties.Resumo.rich_text[0].text.content!=='Oferta separada'));
+});
 function remote(){
   const rows={
     [ids.clients]:[page(ids.client,ids.clients,{'Nome do Cliente':title('Cliente exemplo'),Telefone:{phone_number:'+55 (44) 99999-1234'},'Etapa do cadastro':select('Inicial'),'Etapa do Atendimento':select('Captação de Cliente'),'CPF/CNPJ':rt('PRIVATE-CPF'),'Valor do Contrato':{number:987654321},'Pasta principal Microsoft 365 — restrita':{url:'https://private.invalid/secret'}})],

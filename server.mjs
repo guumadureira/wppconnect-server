@@ -13,6 +13,7 @@ import { createCentralMCP } from './central-mcp.mjs';
 import {createSupplierRegister} from './supplier-register.mjs';
 import {createHistoryImport} from './history-import.mjs';
 import {createOperatorChat} from './operator-chat.mjs';
+import {createOperatorContext} from './operator-context.mjs';
 
 const derive = promisify(scrypt);
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -56,7 +57,8 @@ export function createCentral(config = process.env, transport = fetch, options =
   ai = createAIAttendance(db,config,transport,customerContext,{ready:!!ready,debounceMs:options.aiDebounceMs,media,suppliers,importedHistory:id=>manualHistory?.forAI(id)});
   manualHistory=createHistoryImport(db,customerContext,ai);
   const centralMCP=createCentralMCP(db,config,transport,{context:customerContext,ai,media,ready:!!ready});
-  const operatorChat=createOperatorChat(db,config,transport);
+  const operatorContext=createOperatorContext(db,customerContext);
+  const operatorChat=createOperatorChat(db,config,transport,{conversationContext:operatorContext});
   // Only operational counts and timestamps; no payload, phone or credentials.
   // These observations start again with each server process.
   const metaCode = value => Number.isSafeInteger(value) && value > 0 ? value : null;
@@ -254,6 +256,8 @@ export function createCentral(config = process.env, transport = fetch, options =
         return reply(200,{ok:true});
       }
       if (!user) fail(401,'Entre com seu usuário para continuar.');
+      const operatorContextMatch=url.pathname.match(/^\/api\/operator-context\/([a-f0-9-]{36})$/i);
+      if(operatorContextMatch&&req.method==='GET')return reply(200,await operatorContext(operatorContextMatch[1]));
       if(url.pathname==='/api/operator-chat'&&req.method==='GET')return reply(200,operatorChat.list(user));
       if(url.pathname==='/api/operator-chat/verify'&&req.method==='POST'){
         if(user.role!=='admin')fail(403,'Somente administradores podem conferir a configuração do agente.');

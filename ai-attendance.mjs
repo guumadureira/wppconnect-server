@@ -5,6 +5,7 @@ import {knowledgeFor} from './attendance-knowledge.mjs';
 import {serviceGuidesFor} from './attendance-catalog.mjs';
 import {supplierCategories} from './supplier-register.mjs';
 import {attendanceTurn,removeRepeatedGreeting} from './attendance-turn.mjs';
+import {samePhone} from './contact-phone.mjs';
 
 // Fixed model and standard text rates verified on 2026-10-26. No model tools.
 const MODEL='gpt-5.4-mini-2026-03-17',INPUT_USD=0.75/1e6,OUTPUT_USD=4.5/1e6,MAX_OUTPUT=1800;
@@ -24,14 +25,16 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
   const interrupted=all("SELECT * FROM ai_jobs WHERE state='running'");
   run("UPDATE ai_jobs SET state='error',error='Execução interrompida; conferir antes de retomar.',updated=? WHERE state='running'",Date.now());
   const phones=String(config.AI_ALLOWED_PHONES||'').split(',').map(v=>v.trim()).filter(v=>/^[1-9]\d{7,14}$/.test(v));
+  const allContacts=String(config.AI_ALLOW_ALL_CONTACTS).trim()==='true';
+  const allowed=phone=>/^[1-9]\d{7,14}$/.test(phone)&&(allContacts||phones.some(p=>samePhone(p,phone)));
   const budget=Number(config.AI_MONTHLY_BUDGET_USD)||0;
   const totalBudget=Number(config.AI_TOTAL_BUDGET_USD)||0;
-  const enabled=()=>String(config.AI_ENABLED).trim()==='true'&&!!String(config.OPENAI_API_KEY||'').trim()&&phones.length>0&&budget>0&&budget<=100&&(config.AI_TOTAL_BUDGET_USD===undefined||(totalBudget>0&&totalBudget<=100))&&ready;
+  const enabled=()=>String(config.AI_ENABLED).trim()==='true'&&!!String(config.OPENAI_API_KEY||'').trim()&&(allContacts||phones.length>0)&&budget>0&&budget<=100&&(config.AI_TOTAL_BUDGET_USD===undefined||(totalBudget>0&&totalBudget<=100))&&ready;
   const ensure=id=>{run('INSERT OR IGNORE INTO ai_control(conversation_id) VALUES(?)',id);return get('SELECT * FROM ai_control WHERE conversation_id=?',id);};
   const transcriber=createAudioTranscription(db,config,transport,media,cost=>spent()+cost<=budget&&(!totalBudget||totalSpent()+cost<=totalBudget));
   const spent=()=>get('SELECT COALESCE(SUM(cost_usd),0) AS n FROM ai_jobs WHERE billing_month=?',month()).n+transcriber.cost(month());
   const totalSpent=()=>get('SELECT COALESCE(SUM(cost_usd),0) AS n FROM ai_jobs').n+transcriber.cost();
-  function status(){return{enabled:enabled(),model:MODEL,credentialPresent:!!String(config.OPENAI_API_KEY||'').trim(),activationPending:String(config.AI_ENABLED).trim()!=='true',pilotConfigured:phones.length>0,budgetUsd:budget>0&&budget<=100?budget:0,usedUsd:spent(),totalBudgetUsd:totalBudget,usedTotalUsd:totalSpent(),audioEnabled:String(config.AI_AUDIO_ENABLED)==='true',autoRegistration:String(config.AI_AUTO_REGISTER)==='true',whatsappReady:ready,pending:get("SELECT COUNT(*) AS n FROM ai_jobs WHERE state IN ('pending','running')").n,handoffs:all("SELECT a.conversation_id,c.name,a.handoff FROM ai_control a JOIN conversations c ON c.id=a.conversation_id WHERE a.handoff<>'' ORDER BY c.updated DESC LIMIT 30")};}
+  function status(){return{enabled:enabled(),model:MODEL,credentialPresent:!!String(config.OPENAI_API_KEY||'').trim(),activationPending:String(config.AI_ENABLED).trim()!=='true',pilotConfigured:phones.length>0,allContacts,scopeConfigured:allContacts||phones.length>0,budgetUsd:budget>0&&budget<=100?budget:0,usedUsd:spent(),totalBudgetUsd:totalBudget,usedTotalUsd:totalSpent(),audioEnabled:String(config.AI_AUDIO_ENABLED)==='true',autoRegistration:String(config.AI_AUTO_REGISTER)==='true',whatsappReady:ready,pending:get("SELECT COUNT(*) AS n FROM ai_jobs WHERE state IN ('pending','running')").n,handoffs:all("SELECT a.conversation_id,c.name,a.handoff FROM ai_control a JOIN conversations c ON c.id=a.conversation_id WHERE a.handoff<>'' ORDER BY c.updated DESC LIMIT 30")};}
   function pause(id,reason=''){
     ensure(id);run('UPDATE ai_control SET epoch=epoch+1,handoff=? WHERE conversation_id=?',reason,id);
     run("UPDATE ai_jobs SET state='cancelled',updated=? WHERE conversation_id=? AND state='pending'",Date.now(),id);
@@ -39,12 +42,12 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
   }
   function release(conversation){
     if(!enabled())fail(503,'Configure a chave, o piloto, o limite de consumo e a conexão WhatsApp antes de liberar a IA.');
-    if(!phones.includes(conversation.phone))fail(403,'Este telefone não está autorizado no piloto da IA.');
+    if(!allowed(conversation.phone))fail(403,'Este telefone não está autorizado no piloto da IA.');
     ensure(conversation.id);run("UPDATE ai_control SET epoch=epoch+1,handoff='' WHERE conversation_id=?",conversation.id);
   }
   function incoming(conversation,message,{fresh=false,echo=false,type='text'}={}){
     if(echo){pause(conversation.id);return;}
-    if(!enabled()||!phones.includes(conversation.phone))return;
+    if(!enabled()||!allowed(conversation.phone))return;
     const c=context.view(conversation.id);
     if(fresh&&!conversation.owner_id){run("UPDATE conversation_context SET mode='assisted',version=version+1 WHERE conversation_id=?",conversation.id);}
     else if(c.mode!=='assisted')return;
@@ -60,7 +63,7 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
   }
   const valid=job=>{
     const c=get('SELECT *,rowid AS chat_row FROM conversations WHERE id=?',job.conversation_id),control=ensure(job.conversation_id),ctx=context.view(job.conversation_id);
-    return !stopped&&enabled()&&phones.includes(c.phone)&&c.status==='open'&&ctx.mode==='assisted'&&control.epoch===job.epoch&&(job.contextVersion===undefined||ctx.version===job.contextVersion)&&c.last_received===get('SELECT rowid AS n FROM messages WHERE id=?',job.message_id)?.n&&Date.now()-c.last_inbound<24*3600000;
+    return !stopped&&enabled()&&allowed(c.phone)&&c.status==='open'&&ctx.mode==='assisted'&&control.epoch===job.epoch&&(job.contextVersion===undefined||ctx.version===job.contextVersion)&&c.last_received===get('SELECT rowid AS n FROM messages WHERE id=?',job.message_id)?.n&&Date.now()-c.last_inbound<24*3600000;
   };
   function resultView(id){const row=get('SELECT state,result,error,updated FROM ai_jobs WHERE conversation_id=? ORDER BY created DESC,rowid DESC LIMIT 1',id);return row?{...row,result:row.result?JSON.parse(row.result):null,handoff:ensure(id).handoff}:null;}
   function validated(result){
@@ -87,6 +90,7 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
     if(history.filter(m=>m.direction==='in').some(m=>/\b(?:fornecedor|representante|vendemos|oferecemos|parceria)\b|ofereço|proposta comercial/i.test(m.body)))throw Error('Commercial contact requires review');
     const normalize=s=>String(s).normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().trim();
     for(const field of ['name','city','service']){
+      if(field==='city'&&!intake.city.trim()&&!intake.cityMessageId)continue;
       const source=history.find(m=>m.id===intake[field+'MessageId']&&m.direction==='in');
       if(typeof intake[field]!=='string'||intake[field].trim().length<2||intake[field].length>120||!source||!normalize(source.body).includes(normalize(intake[field])))throw Error('Registration source unavailable');
       if(field==='name'){
@@ -124,12 +128,16 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
       const transcripts=new Map();
       if(String(config.AI_AUDIO_ENABLED)==='true')for(const message of history){
         if(message.direction!=='in'||!get("SELECT 1 FROM message_media mm JOIN media m ON m.id=mm.media_id WHERE mm.message_id=? AND m.kind='audio'",message.id))continue;
-        let text;try{text=await transcriber.read(message.id,()=>valid(job));}catch(e){if(message.id===job.message_id)throw e;continue;}if(!valid(job))return;transcripts.set(message.id,text);
+        // Old answered audio must not trigger new charges or block a new request.
+        // Conversely, an unanswered voice note followed by text still needs to be heard.
+        const unanswered=turn.unansweredMessageIds.includes(message.id);
+        const text=unanswered?await transcriber.read(message.id,()=>valid(job)):transcriber.cached(message.id);
+        if(!valid(job))return;if(!text)continue;transcripts.set(message.id,text);
         if(message.id===job.message_id&&/(?:quero|preciso).{0,30}(?:humano|humana|atendente)|(?:falar|conversar).{0,25}(?:pessoa|gustavo|atendente)/i.test(text)){handoff(conversation.id,job.id,'Contato solicitou atendimento humano por áudio.');return;}
       }
       const attachments=all('SELECT m.kind,m.name,m.state,mm.message_id FROM message_media mm JOIN media m ON m.id=mm.media_id JOIN messages x ON x.id=mm.message_id WHERE x.conversation_id=? ORDER BY x.rowid DESC LIMIT 5',conversation.id);
       // Only the allowlisted operational subset from the Notion adapter, never a raw page.
-      const snapshot=ctx.snapshot&&!ctx.last_error?{attendance:ctx.snapshot.attendance,client:{name:ctx.snapshot.client?.name,stage:ctx.snapshot.client?.stage,registration:ctx.snapshot.client?.registration},sections:Object.fromEntries(Object.entries(ctx.snapshot.sections||{}).map(([k,v])=>[k,{configured:v.configured,complete:v.complete,error:!!v.error,rows:(v.rows||[]).slice(0,8).map(r=>({title:r.title,status:r.status,due:r.due,next:r.next,contract:r.contract}))}]))}:null;
+      const snapshot=ctx.snapshot&&!ctx.last_error?{attendance:ctx.snapshot.attendance,client:{name:ctx.snapshot.client?.name,stage:ctx.snapshot.client?.stage,registration:ctx.snapshot.client?.registration,attendanceSummary:ctx.snapshot.client?.attendanceSummary,attendanceMissing:ctx.snapshot.client?.attendanceMissing,attendanceNext:ctx.snapshot.client?.attendanceNext,attendanceAt:ctx.snapshot.client?.attendanceAt},sections:Object.fromEntries(Object.entries(ctx.snapshot.sections||{}).map(([k,v])=>[k,{configured:v.configured,complete:v.complete,error:!!v.error,rows:(v.rows||[]).slice(0,8).map(r=>({title:r.title,status:r.status,due:r.due,next:r.next,contract:r.contract}))}]))}:null;
       const input=JSON.stringify({currentDate:new Date().toISOString(),turn,clientLookup,referenceGuide:knowledgeFor(history.slice(-8).map(m=>transcripts.get(m.id)||m.body).join(' ')),serviceGuides:serviceGuidesFor({latest:transcripts.get(job.message_id)||history.at(-1)?.body||'',recent:history.slice(-8).map(m=>transcripts.get(m.id)||m.body).join(' '),summary:ctx.summary}),importedHistory:importedHistory?.(conversation.id),registrationAvailable:String(config.AI_AUTO_REGISTER)==='true'&&context.status().enabled,attachments,context:{notionUnavailable:!!ctx.last_error,clientLinked:!!ctx.client_id,summary:ctx.summary,missing:ctx.missing,nextStep:ctx.next_step,notion:snapshot,history:ctx.history.slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next_step,source:e.source,qualification:e.qualification,at:e.created})),notionHistory:(!ctx.last_error&&ctx.snapshot?.history?.rows||[]).slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next,source:e.source,qualification:e.qualification,at:e.at}))},messages:history.map(m=>({id:m.id,from:m.direction==='in'?'contato':m.agent_name||'equipe',text:(transcripts.get(m.id)||m.body).slice(0,transcripts.has(m.id)?8000:2000),...(transcripts.has(m.id)?{source:'transcricao_automatica',original:'audio'}:{})}))});
       if(Buffer.byteLength(input)>36000)throw Error('Context too large');
       const body={model:MODEL,store:false,instructions,input:[{role:'user',content:input}],reasoning:{effort:'none'},max_output_tokens:MAX_OUTPUT,text:{format:{type:'json_schema',name:'domum_attendance',strict:true,schema}}};
@@ -171,11 +179,13 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
         run('UPDATE conversations SET pending_since=CASE WHEN last_received IS ? THEN NULL ELSE pending_since END,updated=MAX(updated,?) WHERE id=?',conversation.last_received,at,conversation.id);
       }
       run("UPDATE ai_jobs SET state='done',updated=? WHERE id=?",Date.now(),job.id);
-      context.aiRecord(conversation.id,job.id,result,result.handoff);
+      const stillCurrent=valid(job);
+      context.aiRecord(conversation.id,job.id,result,result.handoff&&stillCurrent,{expectedVersion:job.contextVersion,updateCurrent:stillCurrent,clientId:ctx.client_id});
+      if(stillCurrent)job.contextVersion=context.view(conversation.id).version;
       if(result.kind==='comercial'&&result.supplier?.complete&&!result.handoff&&result.reply.trim()&&valid(job)){
         const closed=run("UPDATE conversations SET status='closed',pending_since=NULL WHERE id=? AND last_received=? AND status='open'",conversation.id,conversation.last_received);
         if(closed.changes)pause(conversation.id);
-      }else if(result.handoff)pause(conversation.id,result.reason||'Atendimento pronto para a equipe.');
+      }else if(result.handoff&&stillCurrent&&valid(job))pause(conversation.id,result.reason||'Atendimento pronto para a equipe.');
     }catch(error){
       if(!valid(job)){run("UPDATE ai_jobs SET state='cancelled',updated=? WHERE id=?",Date.now(),job.id);return;}
       const reason=error.aiReason||'A IA não concluiu esta etapa. A equipe precisa conferir; não haverá reenvio automático.';
