@@ -4,6 +4,7 @@ import {createAudioTranscription} from './audio-transcription.mjs';
 import {knowledgeFor} from './attendance-knowledge.mjs';
 import {serviceGuidesFor} from './attendance-catalog.mjs';
 import {supplierCategories} from './supplier-register.mjs';
+import {attendanceTurn,removeRepeatedGreeting} from './attendance-turn.mjs';
 
 // Fixed model and standard text rates verified on 2026-10-26. No model tools.
 const MODEL='gpt-5.4-mini-2026-03-17',INPUT_USD=0.75/1e6,OUTPUT_USD=4.5/1e6,MAX_OUTPUT=1800;
@@ -114,7 +115,12 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
       if(!valid(job)){run("UPDATE ai_jobs SET state='cancelled' WHERE id=?",job.id);return;}
       // Meta timestamps have second precision; replies have milliseconds. Use the
       // persisted arrival order (also used by last_received) to preserve turn order.
-      const history=all("SELECT id,direction,body,agent_name FROM messages WHERE conversation_id=? AND (direction='in' OR status IN ('sent','delivered','read')) ORDER BY rowid DESC LIMIT 24",conversation.id).reverse();
+      const history=all("SELECT rowid AS arrival,id,direction,body,agent_name,created FROM messages WHERE conversation_id=? AND (direction='in' OR status IN ('sent','delivered','read')) ORDER BY rowid DESC LIMIT 24",conversation.id).reverse();
+      const lastReply=get("SELECT rowid AS arrival,id,direction,body,agent_name,created FROM messages WHERE conversation_id=? AND direction='out' AND status IN ('sent','delivered','read') ORDER BY rowid DESC LIMIT 1",conversation.id);
+      // A burst of customer messages must not remove the team's last question
+      // from context or make an established conversation look like a new one.
+      if(lastReply&&!history.some(m=>m.id===lastReply.id))history.unshift(lastReply);
+      const turn=attendanceTurn(history,lastReply);
       const transcripts=new Map();
       if(String(config.AI_AUDIO_ENABLED)==='true')for(const message of history){
         if(message.direction!=='in'||!get("SELECT 1 FROM message_media mm JOIN media m ON m.id=mm.media_id WHERE mm.message_id=? AND m.kind='audio'",message.id))continue;
@@ -124,7 +130,7 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
       const attachments=all('SELECT m.kind,m.name,m.state,mm.message_id FROM message_media mm JOIN media m ON m.id=mm.media_id JOIN messages x ON x.id=mm.message_id WHERE x.conversation_id=? ORDER BY x.rowid DESC LIMIT 5',conversation.id);
       // Only the allowlisted operational subset from the Notion adapter, never a raw page.
       const snapshot=ctx.snapshot&&!ctx.last_error?{attendance:ctx.snapshot.attendance,client:{name:ctx.snapshot.client?.name,stage:ctx.snapshot.client?.stage,registration:ctx.snapshot.client?.registration},sections:Object.fromEntries(Object.entries(ctx.snapshot.sections||{}).map(([k,v])=>[k,{configured:v.configured,complete:v.complete,error:!!v.error,rows:(v.rows||[]).slice(0,8).map(r=>({title:r.title,status:r.status,due:r.due,next:r.next,contract:r.contract}))}]))}:null;
-      const input=JSON.stringify({currentDate:new Date().toISOString(),clientLookup,referenceGuide:knowledgeFor(history.slice(-8).map(m=>transcripts.get(m.id)||m.body).join(' ')),serviceGuides:serviceGuidesFor({latest:transcripts.get(job.message_id)||history.at(-1)?.body||'',recent:history.slice(-8).map(m=>transcripts.get(m.id)||m.body).join(' '),summary:ctx.summary}),importedHistory:importedHistory?.(conversation.id),registrationAvailable:String(config.AI_AUTO_REGISTER)==='true'&&context.status().enabled,attachments,context:{notionUnavailable:!!ctx.last_error,clientLinked:!!ctx.client_id,summary:ctx.summary,missing:ctx.missing,nextStep:ctx.next_step,notion:snapshot,history:ctx.history.slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next_step,source:e.source,qualification:e.qualification,at:e.created})),notionHistory:(!ctx.last_error&&ctx.snapshot?.history?.rows||[]).slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next,source:e.source,qualification:e.qualification,at:e.at}))},messages:history.map(m=>({id:m.id,from:m.direction==='in'?'contato':m.agent_name||'equipe',text:(transcripts.get(m.id)||m.body).slice(0,transcripts.has(m.id)?8000:2000),...(transcripts.has(m.id)?{source:'transcricao_automatica',original:'audio'}:{})}))});
+      const input=JSON.stringify({currentDate:new Date().toISOString(),turn,clientLookup,referenceGuide:knowledgeFor(history.slice(-8).map(m=>transcripts.get(m.id)||m.body).join(' ')),serviceGuides:serviceGuidesFor({latest:transcripts.get(job.message_id)||history.at(-1)?.body||'',recent:history.slice(-8).map(m=>transcripts.get(m.id)||m.body).join(' '),summary:ctx.summary}),importedHistory:importedHistory?.(conversation.id),registrationAvailable:String(config.AI_AUTO_REGISTER)==='true'&&context.status().enabled,attachments,context:{notionUnavailable:!!ctx.last_error,clientLinked:!!ctx.client_id,summary:ctx.summary,missing:ctx.missing,nextStep:ctx.next_step,notion:snapshot,history:ctx.history.slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next_step,source:e.source,qualification:e.qualification,at:e.created})),notionHistory:(!ctx.last_error&&ctx.snapshot?.history?.rows||[]).slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next,source:e.source,qualification:e.qualification,at:e.at}))},messages:history.map(m=>({id:m.id,from:m.direction==='in'?'contato':m.agent_name||'equipe',text:(transcripts.get(m.id)||m.body).slice(0,transcripts.has(m.id)?8000:2000),...(transcripts.has(m.id)?{source:'transcricao_automatica',original:'audio'}:{})}))});
       if(Buffer.byteLength(input)>36000)throw Error('Context too large');
       const body={model:MODEL,store:false,instructions,input:[{role:'user',content:input}],reasoning:{effort:'none'},max_output_tokens:MAX_OUTPUT,text:{format:{type:'json_schema',name:'domum_attendance',strict:true,schema}}};
       // Reserve by UTF-8 bytes (a conservative upper bound for input tokens), including schema/overhead.
@@ -142,6 +148,7 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
       if(Number.isSafeInteger(data.usage?.input_tokens)&&Number.isSafeInteger(data.usage?.output_tokens)&&data.usage.input_tokens>=0&&data.usage.output_tokens>=0)run('UPDATE ai_jobs SET cost_usd=? WHERE id=?',data.usage.input_tokens*INPUT_USD+data.usage.output_tokens*OUTPUT_USD,job.id);
       if(data.status!=='completed')throw Error('Incomplete output');
       const result=validated(JSON.parse((data.output||[]).filter(o=>o.type==='message').flatMap(o=>o.content||[]).filter(c=>c.type==='output_text').map(c=>c.text).join('')));
+      result.reply=removeRepeatedGreeting(result.reply,turn);
       supplierEvidence(result,history);
       run('UPDATE ai_jobs SET result=? WHERE id=?',JSON.stringify(result),job.id);
       if(!valid(job)){run("UPDATE ai_jobs SET state='cancelled',updated=? WHERE id=?",Date.now(),job.id);return;}
