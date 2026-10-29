@@ -2,11 +2,11 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
 import {randomUUID} from 'node:crypto';
-import {createOperatorChat} from '../operator-chat.mjs';
+import {createOperatorChat,boundedContext} from '../operator-chat.mjs';
 const agent='11111111-1111-4111-8111-111111111111',user={id:'u1',name:'Operador',signatureName:'Gustavo'},other={id:'u2',name:'Outro'};
 function fixture(t,extra={},conversationContext){
   const db=new DatabaseSync(':memory:'),calls=[],remote=new Map(),config={NOTION_OPERATOR_CHAT_ENABLED:'true',NOTION_OPERATOR_AGENT_ID:agent,NOTION_TOKEN:'test-notion-secret',...extra};
-  const state={fail:false,actions:false,events:[],pageMore:false};
+  const state={fail:false,actions:false,events:[],pageMore:false,eventFailure:false,fileOnly:false};
   const transport=async(url,o)=>{
     assert.ok(url.startsWith('https://api.notion.com/v1/'));assert.equal(o.headers.authorization,'Bearer test-notion-secret');calls.push({url,body:o.body?JSON.parse(o.body):null});
     if(state.fail)throw Error('test-notion-secret private error');
@@ -14,7 +14,7 @@ function fixture(t,extra={},conversationContext){
     if(url.endsWith('/sessions')){
       const body=JSON.parse(o.body),id=body.session_id||randomUUID(),s={id,agent_id:agent,status:state.actions?'requires_action':'queued',required_actions:state.actions?[{action_id:'22222222-2222-4222-8222-222222222222',title:'Salvar minuta para revisão',options:[{id:'approve',label:'Aprovar'},{id:'reject',label:'Recusar'}]}]:[]};remote.set(id,s);return Response.json(s);
     }
-    if(url.endsWith('/events/query')){assert.equal(JSON.parse(o.body).sorts[0].direction,'ascending');const sessionId=url.split('/').at(-3);return Response.json({results:state.events.map(e=>({...e,session_id:sessionId})),has_more:state.pageMore});}
+    if(url.endsWith('/events/query')){if(state.eventFailure)throw Error('read failed');assert.equal(JSON.parse(o.body).sorts[0].direction,'ascending');const sessionId=url.split('/').at(-3);return Response.json({results:state.events.map(e=>({...e,session_id:sessionId})),has_more:state.pageMore});}
     const id=url.split('/').at(-1);return Response.json({...remote.get(id),status:state.actions?'requires_action':'completed'});
   };
   const chat=createOperatorChat(db,config,transport,{conversationContext});t.after(async()=>{await chat.close();db.close();});return{db,calls,state,config,chat};
@@ -50,13 +50,13 @@ test('resultado incerto não é repetido automaticamente e chave não aparece no
   await assert.rejects(f.chat.send(user,{chatId:c.id,message:'Repita',requestId:randomUUID()}),{status:409});assert.equal(f.calls.length,1);
 });
 test('ações exigem decisão explícita da prévia atual e não são aprovadas pelo texto do agente',async t=>{
-  const f=fixture(t);f.state.actions=true;const c=await f.chat.send(user,{message:'Preparar minuta',requestId:randomUUID()});
-  assert.equal(c.state,'requires_action');assert.equal(f.calls.length,1);
+  const f=fixture(t);f.state.actions=true;let c=await f.chat.send(user,{message:'Preparar minuta',requestId:randomUUID()});c=await f.chat.refresh(user,c.id);
+  assert.equal(c.state,'requires_action');const initialCalls=f.calls.length;
   const body={chatId:c.id,actionId:c.actions[0].id,option:'approve',reviewDigest:c.reviewDigest,requestId:randomUUID()};
-  await assert.rejects(f.chat.action(user,body),{status:409});assert.equal(f.calls.length,1);
+  await assert.rejects(f.chat.action(user,body),{status:409});assert.equal(f.calls.length,initialCalls);
   await assert.rejects(f.chat.action(other,{...body,confirmed:true}),{status:404});
   await assert.rejects(f.chat.action(user,{...body,confirmed:true,reviewDigest:'stale'}),{status:409});
-  const sent=await f.chat.action(user,{...body,confirmed:true});assert.equal(sent.id,c.id);assert.equal(f.calls.length,2);assert.equal(f.calls[1].body.actions[0].option_id,'approve');
+  const sent=await f.chat.action(user,{...body,confirmed:true});assert.equal(sent.id,c.id);assert.equal(f.calls.length,initialCalls+1);assert.equal(f.calls.at(-1).body.actions[0].option_id,'approve');
 });
 test('desativado não chama API e diagnóstico de acesso não executa o agente',async t=>{
   const f=fixture(t,{NOTION_OPERATOR_CHAT_ENABLED:'false'});assert.equal(f.chat.status().enabled,false);await assert.rejects(f.chat.send(user,{message:'Oi',requestId:randomUUID()}),{status:503});assert.equal(f.calls.length,0);
@@ -66,4 +66,23 @@ test('reinício preserva conversa e marca solicitação em voo como incerta',asy
   const f=fixture(t),c=await f.chat.send(user,{message:'Rascunho',requestId:randomUUID()});
   f.db.prepare("UPDATE operator_chats SET state='sending'").run();const next=createOperatorChat(f.db,f.config,()=>{throw Error('No retry');});
   assert.equal(next.view(user,c.id).state,'unknown');assert.equal(f.calls.length,1);
+});
+
+test('resposta concluída mas não lida continua recuperável sem reenviar comando',async t=>{
+  const f=fixture(t),c=await f.chat.send(user,{message:'Consultar cadastro',requestId:randomUUID()});
+  f.state.eventFailure=true;await assert.rejects(f.chat.refresh(user,c.id));
+  assert.equal(f.chat.view(user,c.id).needsRefresh,true);assert.equal(f.chat.view(user,c.id).canSend,false);
+  f.state.eventFailure=false;f.state.events=[{id:randomUUID(),type:'agent.message',sequence:1,content:[{type:'text',text:'Cadastro encontrado.'}]}];
+  const recovered=await f.chat.refresh(user,c.id);assert.equal(recovered.messages.at(-1).text,'Cadastro encontrado.');assert.equal(recovered.needsRefresh,false);
+  assert.equal(f.calls.filter(c=>c.url.endsWith('/sessions')).length,1);
+});
+test('arquivo sem texto não desaparece e sessão vazia mostra resultado explícito',async t=>{
+  const f=fixture(t),c=await f.chat.send(user,{message:'Preparar arquivo',requestId:randomUUID()});
+  const empty=await f.chat.refresh(user,c.id);assert.match(empty.error,/sem uma resposta/);
+  f.state.events=[{id:randomUUID(),type:'agent.message',sequence:1,content:[{type:'file',name:'Proposta.pdf',url:'https://private.invalid/secret'}]}];
+  const file=await f.chat.refresh(user,c.id);assert.match(file.messages.at(-1).text,/Proposta.pdf/);assert.ok(!JSON.stringify(file).includes('private.invalid'));assert.equal(file.error,null);
+});
+test('contexto do operador respeita limite da API sem cortar JSON ou identidade',()=>{
+  const context={conversation:{id:'a',phone:'5544000000001'},client:{id:'b'},summary:'Resumo',messages:Array.from({length:8},()=>({text:'x'.repeat(1000)})),history:Array.from({length:6},()=>({summary:'h'.repeat(2000)})),sections:{works:{records:Array.from({length:12},()=>({title:'p'.repeat(1000)}))}}};
+  const prompt=boundedContext(context);assert.ok(prompt.length<=10000);const json=JSON.parse(prompt.slice(prompt.indexOf('{')));assert.equal(json.conversation.phone,'5544000000001');assert.equal(json.truncated,true);assert.equal(context.messages.length,8);
 });

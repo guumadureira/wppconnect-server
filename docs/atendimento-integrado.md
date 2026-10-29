@@ -39,6 +39,24 @@ Selecione **Cliente desta tarefa**, consulte o contexto e escreva o comando. O c
 
 O agente é software, não uma pessoa. Precisa de `NOTION_OPERATOR_CHAT_ENABLED=true`, `NOTION_OPERATOR_AGENT_ID` e credencial com acesso ao agente, além das páginas envolvidas. A conexão do agente personalizado com o MCP da Central também precisa estar habilitada nele. O chat não herda automaticamente permissões da conta humana. Arquivo que existe apenas no chat/sandbox do agente precisa ser anexado a uma página acessível antes do envio do original. Não transformar uma página vazia em substituto da proposta.
 
+Quando o agente concluir mas a leitura falhar, o chat continua buscando a resposta, com pausa após erros. **Atualizar** consulta a mesma execução e não reenvia o comando. A interface informa quando uma execução terminou sem texto e identifica arquivos produzidos pelo agente; esses arquivos ainda precisam estar em página acessível para o envio original. O contexto enviado respeita o limite de 10.000 caracteres da API, preservando a identidade do cliente e reduzindo o material mais antigo.
+
+O resumo em Clientes compara datas com precisão de minuto, compatível com o retorno do Notion. Um horário arredondado não mantém o registro em erro; divergências de conteúdo continuam identificadas pelo nome do campo.
+
+## Condução do atendimento
+
+A IA responde primeiro à dúvida e usa o contexto para fazer uma pergunta útil ao serviço. Uma resposta curta não deve deixar o cliente sem caminho; quando ele combina de mandar documentos depois, o atendimento aguarda. As últimas respostas da equipe ajudam a evitar cumprimentos e explicações repetidos. Dados pessoais incidentais não devem compor o resumo operacional.
+
+A orientação de Maringá, Sarandi e Registro de Imóveis fica em `attendance-knowledge.mjs`, com fonte oficial, assunto, data de conferência e validade de 30 dias. É apoio à identificação da demanda; não substitui consulta municipal, análise do imóvel ou promessa de aprovação. Referências vencidas pedem nova conferência antes de afirmar regras específicas. A jurisdição informada recentemente prevalece sobre o resumo anterior.
+
+Fontes conferidas em 28/10/2026: [Código de Maringá](https://sapl.cmm.pr.gov.br/ta/130/text), [Código de Sarandi](https://sapl.sarandi.pr.leg.br/ta/1422/text), [Lei de Registros Públicos](https://www2.camara.leg.br/legin/fed/lei/1970-1979/lei-6015-31-dezembro-1973-357511-normaatualizada-pl.html).
+
+## Histórico anterior e grupos
+
+A importação manual já existente permite revisar o TXT exportado de uma conversa individual, selecionar o período de sete dias e confirmar os participantes. O histórico importado contextualiza a IA; não provoca respostas a pedidos antigos nem comprova andamento atual. Esta versão não recupera automaticamente o arquivo anterior do telefone.
+
+Grupos existentes no aplicativo não são sincronizados por esta Central. A documentação de coexistência do [provedor 8x8](https://developer.8x8.com/connect/docs/whatsapp/whatsapp-business-app-coexistence/) também os exclui da sincronização; isso não valida a elegibilidade desta conta para outros produtos de grupos da Meta. Não trocar o número, refazer cadastro ou contratar provedor para tentar contornar essa limitação sem verificar o caso.
+
 ## Áudio
 
 Mensagens de voz OGG/Opus de até cinco minutos são transcritas dentro do mesmo teto, antes da resposta. A IA recebe texto marcado como transcrição automática e conserva o arquivo original. Um áudio seguido por texto antes da resposta também é considerado; falha desse áudio não é ignorada. Áudios antigos já respondidos não provocam nova transcrição. Transcrições concluídas são reaproveitadas; falhas com consumo incerto não são repetidas automaticamente.
