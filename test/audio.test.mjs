@@ -95,8 +95,8 @@ test('pedido humano por áudio é reconhecido; falha de transcrição mantém re
   const f=await fixture(t,{},async()=>{throw Error('fake-openai private');});f.incoming(true);await f.app.ai.process();await f.app.ai.process();assert.equal(f.calls.length,1);assert.equal(f.app.ai.status().usedTotalUsd,0.0045);assert.ok(!JSON.stringify(f.app.ai.status()).includes('fake-openai'));
 });
 test('referências distinguem municípios e ficam limitadas quando a conferência vence',()=>{
-  const at=Date.parse('2026-10-27T12:00:00Z');assert.equal(knowledgeFor('regularizar em Sarandi',at)[0].topic,'Sarandi');
-  assert.ok(knowledgeFor('alvará em Maringá',at).every(x=>x.topic!=='Sarandi'));
+  const at=Date.parse('2026-10-28T12:00:00Z');assert.match(knowledgeFor('regularizar em Sarandi',at)[0].topic,/^Sarandi/);
+  assert.ok(knowledgeFor('alvará em Maringá',at).every(x=>!x.topic.startsWith('Sarandi')));
   assert.ok(knowledgeFor('alvará em Maringá',at+31*86400000).every(x=>!x.current&&x.guidance.includes('nova conferência')));
 });
 

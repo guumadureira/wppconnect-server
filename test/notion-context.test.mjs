@@ -24,7 +24,7 @@ test('resumo atual atualiza somente campos dedicados no cliente e reconcilia PAT
       const properties=JSON.parse(o.body).properties;
       assert.ok(Object.keys(properties).every(k=>k.endsWith('— Central')));
       for(const [k,v]of Object.entries(properties))p.properties[k]={...p.properties[k],...v};
-      p.properties['Atualizado em — Central'].date.start=p.properties['Atualizado em — Central'].date.start.replace('Z','+00:00');
+      p.properties['Atualizado em — Central'].date.start=p.properties['Atualizado em — Central'].date.start.replace(/:\d{2}\.\d{3}Z$/,':00.000+00:00');
       if(lost){lost=false;throw Error('lost-response');}return Response.json(p);
     }
     return base(url,o);

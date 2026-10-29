@@ -10,6 +10,7 @@ export function attendanceTurn(history,lastReply,now=Date.now()){
   return{
     phase:!lastReply?'opening':continuation?'continuation':'resumption',
     greetingAllowed:!continuation,
+    recentReplies:history.filter(m=>m.direction==='out').slice(-4).map(m=>m.body.slice(0,700)),
     latestMessageId:history.at(-1)?.id||null,
     unansweredMessageIds:history.filter(m=>m.direction==='in'&&(!lastReply||m.arrival>lastReply.arrival)).map(m=>m.id),
     previousReply:lastReply?{id:lastReply.id,text:lastReply.body.slice(0,2000),at:lastReply.created}:null

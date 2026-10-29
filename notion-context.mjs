@@ -53,7 +53,7 @@ export function createNotionContext(db,config,transport,options={}){
   }
   function queueSummary(id){
     const c=context(id);if(!summaryEnabled()||!c.client_id||c.kind==='comercial'||!c.summary)return;
-    const at=Date.now(),properties={'Resumo do atendimento — Central':rt(c.summary),'Pendências — Central':rt(c.missing),'Próximo passo — Central':rt(c.next_step),'Atualizado em — Central':{date:{start:new Date(at).toISOString()}}};
+    const at=Date.now(),properties={'Resumo do atendimento — Central':rt(c.summary),'Pendências — Central':rt(c.missing),'Próximo passo — Central':rt(c.next_step),'Atualizado em — Central':{date:{start:new Date(Math.floor(at/60000)*60000).toISOString()}}};
     const origin=config.PUBLIC_ORIGIN||config.RENDER_EXTERNAL_URL||'';
     if(/^https:\/\//.test(origin)){const link=new URL('/',origin);link.searchParams.set('conversation',id);properties['Conversa — Central']={url:link.href};}
     run("INSERT INTO notion_client_summaries(client_id,conversation_id,revision,payload,updated) VALUES(?,?,?,?,?) ON CONFLICT(client_id) DO UPDATE SET conversation_id=excluded.conversation_id,revision=excluded.revision,payload=excluded.payload,state='pending',error=NULL,next_attempt=0,updated=excluded.updated",c.client_id,id,randomUUID(),JSON.stringify(properties),at);
@@ -73,10 +73,11 @@ export function createNotionContext(db,config,transport,options={}){
         const properties=JSON.parse(job.payload);
         for(const field of Object.keys(properties))if(page.properties?.[field]?.type!==summaryFields[field])fail(409,'Campo de resumo ausente ou incompatível em Clientes: '+field+'.');
         // A lost PATCH response is safely reconciled by reading its values next time.
-        const equal=(p,q)=>q.date?Date.parse(p?.date?.start)===Date.parse(q.date.start):q.url!==undefined?p?.url===q.url:plain(p)===plain(q);
+        const equal=(p,q)=>q.date?Math.floor(Date.parse(p?.date?.start)/60000)===Math.floor(Date.parse(q.date.start)/60000):q.url!==undefined?p?.url===q.url:plain(p)===plain(q);
         if(!Object.entries(properties).every(([k,v])=>equal(page.properties[k],v))){
           const saved=await api('pages/'+uuid(job.client_id),'PATCH',{properties});checkParent(saved,sources.clients);
-          if(uuid(saved.id)!==job.client_id||!Object.entries(properties).every(([k,v])=>equal(saved.properties?.[k],v)))fail(502,'O Notion não confirmou todos os campos do resumo.');
+          const changed=Object.entries(properties).filter(([k,v])=>!equal(saved.properties?.[k],v)).map(([k])=>k);
+          if(uuid(saved.id)!==job.client_id||changed.length)fail(502,'O Notion não confirmou os campos do resumo: '+(changed.join(', ')||'identificador do cliente')+'.');
         }
         run("UPDATE notion_client_summaries SET state='synced',error=NULL WHERE client_id=? AND revision=?",job.client_id,job.revision);
       }catch(e){run("UPDATE notion_client_summaries SET state='error',error=?,next_attempt=? WHERE client_id=? AND revision=?",e.message,Date.now()+Math.max(e.retryAfter||0,60000),job.client_id,job.revision);}
