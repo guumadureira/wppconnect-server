@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import {samePhone} from './contact-phone.mjs';
+import {samePhone,canonicalPhone} from './contact-phone.mjs';
 
 const fail=(status,message,extra={})=>{throw Object.assign(new Error(message),{status,...extra});};
 const norm=value=>String(value||'').replace(/\D/g,'');
@@ -16,6 +16,8 @@ const eventTypes={comercial:'Oferta comercial recebida',contexto:'Contexto atual
 
 export function createNotionContext(db,config,transport,options={}){
   const aiActor=Object.freeze({id:'domum-ai-registration',signatureName:'Domum · IA',role:'internal_ai'});
+  const systemActor=Object.freeze({id:'domum-contact-registration',signatureName:'Central · cadastro automático',role:'internal_system'});
+  const automaticContacts=()=>String(config.NOTION_AUTO_REGISTER_CONTACTS).trim()==='true';
   const get=(sql,...args)=>db.prepare(sql).get(...args),all=(sql,...args)=>db.prepare(sql).all(...args),run=(sql,...args)=>db.prepare(sql).run(...args);
   db.exec(`CREATE TABLE IF NOT EXISTS conversation_context(conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),client_id TEXT,client_name TEXT,work_id TEXT,kind TEXT NOT NULL DEFAULT 'atendimento',summary TEXT NOT NULL DEFAULT '',missing TEXT NOT NULL DEFAULT '',next_step TEXT NOT NULL DEFAULT '',mode TEXT NOT NULL DEFAULT 'human',version INTEGER NOT NULL DEFAULT 0,snapshot TEXT,checked_at INTEGER,last_error TEXT,updated INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS service_requests(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL REFERENCES conversations(id),client_id TEXT,work_id TEXT,title TEXT NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL,summary TEXT NOT NULL,missing TEXT NOT NULL,next_step TEXT NOT NULL,owner_id TEXT,version INTEGER NOT NULL DEFAULT 0,created INTEGER NOT NULL,updated INTEGER NOT NULL);
@@ -87,7 +89,7 @@ export function createNotionContext(db,config,transport,options={}){
     const c=context(id),snapshot=c.snapshot?JSON.parse(c.snapshot):null;
     return {...c,snapshot,discovery:get('SELECT state,error FROM context_lookup_jobs WHERE conversation_id=?',id)||null,clientUrl:c.client_id?url(c.client_id):null,history:all('SELECT id,request_id,kind,summary,missing,next_step,status,qualification,actor,source,message_id,created,sync_state,sync_error,notion_page_id FROM service_events WHERE conversation_id=? ORDER BY created DESC,rowid DESC LIMIT 40',id).map(e=>({...e,notionUrl:e.notion_page_id?url(e.notion_page_id):null})),requests:all('SELECT * FROM service_requests WHERE conversation_id=? ORDER BY updated DESC LIMIT 100',id),integration:status()};
   }
-  function status(){return {enabled:enabled(),configured:configured(),missing:required.filter(name=>!present(name)),invalid:invalidSources(),activationPending:!activated(),aiEnabled:!!options.aiEnabled?.(),summaryEnabled:summaryEnabled(),pendingSummaries:get("SELECT COUNT(*) AS n FROM notion_client_summaries WHERE state IN ('pending','error')").n,summaryErrors:all("SELECT error FROM notion_client_summaries WHERE state='error' ORDER BY updated DESC LIMIT 3").map(r=>r.error),optionalSources:Object.fromEntries(Object.entries(sources).filter(([k])=>!['clients','history'].includes(k)).map(([k,v])=>[k,!!v])),pendingEvents:get("SELECT COUNT(*) AS n FROM service_events WHERE sync_state IN ('pending','error')").n,uncertainEvents:get("SELECT COUNT(*) AS n FROM service_events WHERE sync_state='uncertain'").n};}
+  function status(){return {automaticContacts:automaticContacts(),pendingContacts:all("SELECT state,error FROM context_lookup_jobs WHERE state IN ('pending','error')"),enabled:enabled(),configured:configured(),missing:required.filter(name=>!present(name)),invalid:invalidSources(),activationPending:!activated(),aiEnabled:!!options.aiEnabled?.(),summaryEnabled:summaryEnabled(),pendingSummaries:get("SELECT COUNT(*) AS n FROM notion_client_summaries WHERE state IN ('pending','error')").n,summaryErrors:all("SELECT error FROM notion_client_summaries WHERE state='error' ORDER BY updated DESC LIMIT 3").map(r=>r.error),optionalSources:Object.fromEntries(Object.entries(sources).filter(([k])=>!['clients','history'].includes(k)).map(([k,v])=>[k,!!v])),pendingEvents:get("SELECT COUNT(*) AS n FROM service_events WHERE sync_state IN ('pending','error')").n,uncertainEvents:get("SELECT COUNT(*) AS n FROM service_events WHERE sync_state='uncertain'").n};}
   let stopped=false,serial=Promise.resolve(),nextAt=0,retryUntil=0;const interval=options.requestIntervalMs??350;
   async function api(path,method='GET',body){
     ensureEnabled();
@@ -130,6 +132,7 @@ export function createNotionContext(db,config,transport,options={}){
     const eventKey=key(conversation.id,actor,body.requestId);
     if(get('SELECT id FROM service_events WHERE event_key=?',eventKey))return localView(conversation.id);
     checkVersion(conversation.id,body.version);const selected=await client(body.clientId);
+    if(actor===systemActor&&(!body.guard?.()||!samePhone(selected.phone,conversation.phone)))fail(409,'Cadastro automático interrompido: confira a associação do telefone.');
     if(actor===aiActor&&(!body.guard?.()||!samePhone(selected.phone,conversation.phone)||selected.name.normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().trim()!==String(body.name).normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().trim()))fail(409,'O cadastro automático foi interrompido para conferência.');
     const reason=text(body.reason||'',500);
     if(!samePhone(selected.phone,conversation.phone)&&(!reason||actor.role!=='admin'))fail(409,'Telefone diferente: a associação exige conferência e justificativa de um administrador.');
@@ -141,7 +144,7 @@ export function createNotionContext(db,config,transport,options={}){
       run("UPDATE service_events SET client_id=?,sync_state='pending' WHERE conversation_id=? AND client_id IS NULL AND sync_state='waiting_link'",selected.id,conversation.id);
       run("UPDATE service_requests SET client_id=? WHERE conversation_id=? AND client_id IS NULL AND kind<>'comercial'",selected.id,conversation.id);
       queueSummary(conversation.id);
-      addEvent(conversation.id,{key:eventKey,kind:'cliente',summary:'Cliente vinculado: '+selected.name+(reason?' — '+reason:''),actor:actor.signatureName,source:actor===aiActor?'IA':'Atendente',qualification:actor===aiActor?'Informado':'Confirmado'});
+      addEvent(conversation.id,{key:eventKey,kind:'cliente',summary:'Cliente vinculado: '+selected.name+(actor===systemActor?'. Nome de exibição do WhatsApp, ainda não confirmado pelo contato.':'')+(reason?' — '+reason:''),actor:actor.signatureName,source:actor===aiActor?'IA':actor===systemActor?'Sistema':'Atendente',qualification:actor===aiActor||actor===systemActor?'Informado':'Confirmado'});
     });return localView(conversation.id);
   }
   const refreshing=new Map();
@@ -213,7 +216,24 @@ export function createNotionContext(db,config,transport,options={}){
         const guard=()=>!stopped&&get('SELECT last_received FROM conversations WHERE id=?',c.id)?.last_received===job.last_received;
         if(!guard()){run("UPDATE context_lookup_jobs SET state='cancelled' WHERE conversation_id=? AND last_received=?",c.id,job.last_received);continue;}
         try{
+          // Let an active AI turn classify a commercial offer before creating a client page.
+          if(automaticContacts()&&options.aiEnabled?.()&&get("SELECT id FROM ai_jobs WHERE conversation_id=? AND state IN ('pending','running')",c.id))continue;
+          if(automaticContacts()&&context(c.id).kind==='comercial'){
+            run("UPDATE service_events SET sync_state='separate' WHERE conversation_id=? AND event_key LIKE 'incoming:%' AND sync_state='waiting_link'",c.id);
+            run("UPDATE context_lookup_jobs SET state='commercial',error=NULL WHERE conversation_id=? AND last_received=?",c.id,job.last_received);continue;
+          }
           const result=await resolve(c,guard);
+          if(automaticContacts()&&result.state==='not_found'&&guard()){
+            const name=/[A-Za-zÀ-ÿ]/.test(c.name)?c.name.slice(0,120):'Contato '+canonicalPhone(c.phone);
+            await createClient(c,{name,version:context(c.id).version,requestId:'automatic-contact',guard},systemActor);
+            result.state='created';
+          }
+          const current=context(c.id),uninterpreted='Última mensagem recebida (ainda sem interpretação): ';
+          if(automaticContacts()&&guard()&&current.client_id&&(!current.summary||current.summary.startsWith(uninterpreted))){
+            const latest=get("SELECT body FROM messages WHERE conversation_id=? AND direction='in' ORDER BY rowid DESC LIMIT 1",c.id);
+            const summary=latest?uninterpreted+text(latest.body,1500):'';
+            if(summary&&summary!==current.summary){run('UPDATE conversation_context SET summary=?,version=version+1,updated=? WHERE conversation_id=? AND summary=?',summary,Date.now(),c.id,current.summary);queueSummary(c.id);}
+          }
           if(guard()&&context(c.id).client_id)await refresh(c);
           run('UPDATE context_lookup_jobs SET state=?,error=NULL,next_attempt=0 WHERE conversation_id=? AND last_received=?',result.state,c.id,job.last_received);
         }catch(e){run("UPDATE context_lookup_jobs SET state='error',error=?,next_attempt=? WHERE conversation_id=? AND last_received=?",e.status===409?'Cadastro exige conferência.':'Consulta do cadastro indisponível.',Date.now()+Math.max(e.retryAfter||0,60000),c.id,job.last_received);}
@@ -277,6 +297,11 @@ export function createNotionContext(db,config,transport,options={}){
     transaction(()=>{checkVersion(conversation.id,body.version);run('UPDATE conversation_context SET mode=?,version=version+1,updated=? WHERE conversation_id=?',body.mode,Date.now(),conversation.id);if(body.mode==='human')run('UPDATE conversations SET owner_id=? WHERE id=?',actor.id,conversation.id);addEvent(conversation.id,{key:eventKey,kind:body.mode==='human'?'humano':'assistencia',summary:body.mode==='human'?'Atendimento assumido por '+actor.signatureName:'Assistência liberada; a execução depende da configuração e dos telefones autorizados no piloto de IA.',actor:actor.signatureName,source:'Atendente',qualification:'Confirmado'});});return localView(conversation.id);
   }
   function receivedFile(conversationId,messageId,kind){addEvent(conversationId,{key:'file:'+messageId,kind:'arquivo',summary:({image:'Imagem recebida',document:'Documento recebido',sticker:'Figurinha recebida',audio:'Áudio recebido'})[kind]||'Arquivo recebido',source:'Cliente',actor:'Contato do WhatsApp',messageId});}
+  function receivedMessage(conversationId,messageId,body){
+    if(!automaticContacts())return;
+    const commercial=context(conversationId).kind==='comercial';
+    addEvent(conversationId,{key:'incoming:'+messageId,kind:commercial?'comercial':'mensagem recebida',summary:'Mensagem recebida: '+text(body,1800),missing:'',nextStep:'',source:'Cliente',actor:'Contato do WhatsApp',messageId,...(commercial?{clientId:null,workId:null}:{})});
+  }
   function aiRecord(id,jobId,result,handoff=false,{updateCurrent=false,expectedVersion,clientId}={}){
     const eventKey='ai:'+jobId;if(get('SELECT id FROM service_events WHERE event_key=?',eventKey))return;
     const record=()=>{
@@ -293,13 +318,14 @@ export function createNotionContext(db,config,transport,options={}){
   }
   const creating=new Map();
   async function createClient(conversation,body,actor){
-    ensureEnabled();if(actor.role!=='admin'&&actor!==aiActor)fail(403,'Somente administradores podem criar cadastros no Notion nesta etapa.');
-    if(creating.has(conversation.id))fail(409,'Uma criação de cadastro já está em andamento.');
+    ensureEnabled();if(actor.role!=='admin'&&actor!==aiActor&&actor!==systemActor)fail(403,'Somente administradores podem criar cadastros no Notion nesta etapa.');
+    const phoneKey=canonicalPhone(conversation.phone);
+    if(creating.has(phoneKey))fail(409,'Uma criação de cadastro já está em andamento.');
     const operation=(async()=>{
-      const checkGuard=()=>{checkVersion(conversation.id,body.version);if(actor===aiActor&&!body.guard?.())fail(409,'Cadastro automático interrompido: o atendimento mudou.');};
+      const checkGuard=()=>{checkVersion(conversation.id,body.version);if((actor===aiActor||actor===systemActor)&&!body.guard?.())fail(409,'Cadastro automático interrompido: o atendimento mudou.');};
       checkGuard();const name=text(body.name,120),city=text(body.city||'',120);if(!name||!/[A-Za-zÀ-ÿ]/.test(name))fail(400,'Informe o nome do solicitante, sem usar apenas o telefone.');
       const opKey=key(conversation.id,actor,body.requestId);
-      let op=get('SELECT * FROM notion_client_operations WHERE operation_key=?',opKey)||get("SELECT * FROM notion_client_operations WHERE conversation_id=? AND state IN ('creating','uncertain') ORDER BY created LIMIT 1",conversation.id);
+      let op=get('SELECT * FROM notion_client_operations WHERE operation_key=?',opKey)||all("SELECT o.*,c.phone FROM notion_client_operations o JOIN conversations c ON c.id=o.conversation_id WHERE o.state IN ('creating','uncertain') ORDER BY o.created").find(o=>samePhone(o.phone,conversation.phone));
       if(op?.client_id)return link(conversation,{...body,clientId:op.client_id,confirmed:true},actor);
       if(op){const found=await query(sources.clients,{property:'ID de criação na central',rich_text:{equals:op.id}});if(found.rows.length===1&&found.complete){run("UPDATE notion_client_operations SET state='done',client_id=?,error=NULL WHERE id=?",uuid(found.rows[0].id),op.id);return link(conversation,{...body,clientId:found.rows[0].id,confirmed:true},actor);}if(op.state==='uncertain'||found.rows.length)fail(409,'Uma criação anterior ficou sem confirmação. Confira o Notion e vincule o cadastro existente; não foi criado outro.');}
       const existing=await lookup(conversation);if(!existing.complete||existing.matches.length>1)fail(409,'Há correspondências ambíguas. Busque e confirme o cliente antes de criar outro.');
@@ -313,7 +339,7 @@ export function createNotionContext(db,config,transport,options={}){
         const clientId=uuid(created.id);run("UPDATE notion_client_operations SET state='done',client_id=?,error=NULL WHERE id=?",clientId,id);
         return await link(conversation,{...body,clientId,confirmed:true},actor);
       }catch(e){const completed=get('SELECT client_id FROM notion_client_operations WHERE id=?',id);if(!completed?.client_id)run('UPDATE notion_client_operations SET state=?,error=? WHERE id=?',e.uncertain?'uncertain':'error',e.message,id);throw e;}
-    })();creating.set(conversation.id,operation);try{return await operation;}finally{creating.delete(conversation.id);}
+    })();creating.set(phoneKey,operation);try{return await operation;}finally{creating.delete(phoneKey);}
   }
   async function registerFromAI(conversation,intake,guard){
     if(String(config.AI_AUTO_REGISTER)!=='true'||!guard?.())fail(403,'Cadastro automático não está liberado para este atendimento.');
@@ -375,7 +401,7 @@ export function createNotionContext(db,config,transport,options={}){
     if(!descriptions[state])return;
     addEvent(conversationId,{key:'mcp:'+draftId,kind:'contexto',summary:descriptions[state],missing:'',nextStep:state==='sent'?'Conferir entrega na central.':'Conferir resultado com a equipe.',actor:'Notion · integração',source:'Sistema',qualification:'Confirmado',messageId});
   }
-  return{status,view:localView,lookup,link,refresh,resolveBeforeReply:resolve,queueLookup,processLookups,save,request,updateRequest,control,receivedFile,aiRecord,createClient,registerFromAI,processQueue,verify,integrationRecord,
+  return{status,view:localView,lookup,link,refresh,resolveBeforeReply:resolve,queueLookup,processLookups,save,request,updateRequest,control,receivedFile,receivedMessage,aiRecord,createClient,registerFromAI,processQueue,verify,integrationRecord,
     close:async()=>{stopped=true;await Promise.allSettled([worker,lookupWorker,...refreshing.values(),...resolving.values(),...creating.values(),serial].filter(Boolean));},
   };
 }

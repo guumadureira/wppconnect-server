@@ -32,6 +32,7 @@ test('contatos normalizam telefone, rejeitam duplicação e preservam conversa a
   assert.equal(saved.status, 201);
   assert.equal(saved.body.contact.phone, '5544999990000');
   assert.equal((await request('/api/contacts', 'POST', { ...contact, phone: '5544999990000' }, cookie)).status, 409);
+  for(const phone of ['44999990000','(44) 9999-0000','+55 44 9999-0000'])assert.equal((await request('/api/contacts','POST',{...contact,phone},cookie)).status,409);
   for (const invalid of [{ phone: '44' }, { phone: 'invalid' }, { name: '' }, { email: 'invalid' }, { notes: 'x'.repeat(2001) }]) {
     assert.equal((await request('/api/contacts', 'POST', { ...contact, ...invalid }, cookie)).status, 400);
   }
@@ -44,12 +45,18 @@ test('contatos normalizam telefone, rejeitam duplicação e preservam conversa a
   assert.equal(same.body.conversation.id, opened.body.conversation.id);
   const path = '/api/contacts/' + saved.body.contact.id;
   assert.equal((await request(path, 'PATCH', { ...contact, name: 'Nome salvo pelo atendente' }, cookie)).status, 200);
+  assert.equal((await request(path,'PATCH',{...contact,phone:'4499990000',name:'Nome salvo pelo atendente'},cookie)).status,200);
   assert.equal((await request(path, 'PATCH', { ...contact, phone: '+55 44 98888-0000' }, cookie)).status, 400);
   const state = (await request('/api/state', 'GET', undefined, cookie)).body;
   assert.equal(state.contacts.length, 1);
   assert.equal(state.conversations.length, 1);
   assert.equal(state.conversations[0].name, 'Nome salvo pelo atendente');
   assert.equal(state.messages.length, 0);
+  app.intake({metadata:{phone_number_id:undefined},messages:[{id:'phone-variant',from:'554499990000',type:'text',text:{body:'Teste'}}]});
+  const linked=(await request('/api/state','GET',undefined,cookie)).body;
+  assert.equal(linked.conversations.length,1);
+  assert.equal(linked.conversations[0].contact_id,saved.body.contact.id);
+  assert.equal(linked.messages.length,1);
 });
 
 test('cadastro de contato não abre janela de envio real nem chama a Meta', async t => {

@@ -12,7 +12,50 @@ const rt=text=>({rich_text:[{plain_text:text,text:{content:text}}]}),title=text=
 const page=(id,source,properties)=>({id,parent:{data_source_id:source},properties});
 test('telefone reconhece apenas equivalência móvel brasileira, nunca sufixo ou fixo',()=>{
   assert.equal(samePhone('+55 (44) 99823-1095','554498231095'),true);
+  for(const number of ['(44) 99823-1095','44 9823-1095','5544998231095'])assert.equal(samePhone(number,'554498231095'),true);
   for(const [a,b]of [['554432231095','5544932231095'],['554498231095','554198231095'],['+155498231095','554498231095'],['98231095','554498231095']])assert.equal(samePhone(a,b),false);
+});
+
+test('cadastro e histórico automáticos funcionam sem IA nem agenda; variações reutilizam a página',async t=>{
+  const r=remote();r.state.rows[ids.clients]=[];
+  const f=await fixture(t,{remoteServer:r,config:{NOTION_AUTO_REGISTER_CONTACTS:'true'}});
+  await f.app.customerContext.processLookups();await f.app.customerContext.processQueue(true);
+  assert.equal(r.state.clientCreates,1);const first=await f.view();assert.ok(first.client_id);
+  assert.equal(first.mode,'human');assert.match(first.summary,/Pedido de teste/);
+  assert.ok(r.state.rows[ids.history].some(p=>p.properties.Resumo.rich_text[0].text.content.includes('Pedido de teste')));
+  f.app.intake({metadata:{phone_number_id:'test-phone'},messages:[{id:'another',from:'554499991234',type:'text',text:{body:'O imóvel está em Sarandi.'}}]});
+  await f.app.customerContext.processLookups();await f.app.customerContext.processQueue(true);
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM conversations').get().n,1);
+  assert.equal(r.state.clientCreates,1);assert.equal((await f.view()).client_id,first.client_id);
+  assert.match((await f.view()).summary,/Sarandi/);
+  assert.ok(r.state.rows[ids.history].some(p=>p.properties.Resumo.rich_text[0].text.content.includes('Sarandi')));
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM contacts').get().n,0);
+});
+
+test('cadastro existente com DDD local é vinculado sem duplicar; ambiguidade e falhas não criam páginas',async t=>{
+  const r=remote();r.state.rows[ids.clients][0].properties.Telefone.phone_number='(44) 9999-1234';
+  const f=await fixture(t,{remoteServer:r,config:{NOTION_AUTO_REGISTER_CONTACTS:'true'}});
+  await f.app.customerContext.processLookups();assert.equal((await f.view()).client_id,ids.client);assert.equal(r.state.clientCreates,0);
+  for(const failure of ['duplicate','network']){
+    const r2=remote();if(failure==='duplicate')r2.state.rows[ids.clients].push({...r2.state.rows[ids.clients][0],id:ids.other});else r2.state.queryFailure=true;
+    const f2=await fixture(t,{remoteServer:r2,config:{NOTION_AUTO_REGISTER_CONTACTS:'true'}});
+    await f2.app.customerContext.processLookups();assert.equal((await f2.view()).client_id,null);assert.equal(r2.state.clientCreates,0);
+    assert.equal(f2.app.customerContext.status().pendingContacts[0].state,'error');
+  }
+});
+
+test('cadastro automático reconcilia resposta perdida e mantém fornecedores separados',async t=>{
+  const r=remote();r.state.rows[ids.clients]=[];r.state.clientMode='lost';
+  const f=await fixture(t,{remoteServer:r,config:{NOTION_AUTO_REGISTER_CONTACTS:'true'}});
+  await f.app.customerContext.processLookups();assert.equal(r.state.clientCreates,1);
+  f.app.db.prepare('UPDATE context_lookup_jobs SET next_attempt=0').run();
+  await f.app.customerContext.processLookups();assert.equal(r.state.clientCreates,1);assert.ok((await f.view()).client_id);
+  const r2=remote();r2.state.rows[ids.clients]=[];
+  const f2=await fixture(t,{remoteServer:r2,config:{NOTION_AUTO_REGISTER_CONTACTS:'true'}});
+  f2.app.db.prepare("UPDATE conversation_context SET kind='comercial' WHERE conversation_id=?").run(f2.chat.id);
+  await f2.app.customerContext.processLookups();await f2.app.customerContext.processQueue(true);
+  assert.equal(r2.state.clientCreates,0);assert.equal(r2.state.historyCreates,0);
+  assert.equal((await f2.view()).discovery.state,'commercial');
 });
 
 test('resumo atual atualiza somente campos dedicados no cliente e reconcilia PATCH sem duplicar histórico',async t=>{
