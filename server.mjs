@@ -14,6 +14,7 @@ import {createSupplierRegister} from './supplier-register.mjs';
 import {createHistoryImport} from './history-import.mjs';
 import {createOperatorChat} from './operator-chat.mjs';
 import {createOperatorContext} from './operator-context.mjs';
+import {samePhone,normalizeContactPhone} from './contact-phone.mjs';
 
 const derive = promisify(scrypt);
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -43,11 +44,19 @@ export function createCentral(config = process.env, transport = fetch, options =
     CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1),minutes INTEGER NOT NULL DEFAULT 30);
     INSERT OR IGNORE INTO settings(id) VALUES(1);
     CREATE TABLE IF NOT EXISTS alerts(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,kind TEXT NOT NULL,due INTEGER NOT NULL,delivered INTEGER NOT NULL DEFAULT 0,attempted INTEGER);
+    CREATE TABLE IF NOT EXISTS incoming_receipts(sequence INTEGER PRIMARY KEY AUTOINCREMENT,message_id TEXT UNIQUE NOT NULL,conversation_id TEXT NOT NULL,received INTEGER NOT NULL);
   `);
   if (!db.prepare('PRAGMA table_info(sessions)').all().some(column => column.name === 'signature_name')) db.exec('ALTER TABLE sessions ADD COLUMN signature_name TEXT');
   const get = (sql, ...args) => db.prepare(sql).get(...args);
   const all = (sql, ...args) => db.prepare(sql).all(...args);
   const run = (sql, ...args) => db.prepare(sql).run(...args);
+  const matchingPhones=(table,phone)=>all('SELECT * FROM '+table).filter(row=>samePhone(row.phone,phone));
+  const uniquePhone=(table,phone)=>{
+    const exact=get('SELECT * FROM '+table+' WHERE phone=?',phone);if(exact)return exact;
+    const matches=matchingPhones(table,phone);
+    if(matches.length>1)fail(409,'Há cadastros duplicados para esse telefone. Confira os registros antes de continuar.');
+    return matches[0];
+  };
   const live = config.WHATSAPP_MODE === 'live';
   const media = createMediaStore(db,config,transport,live);
   let ai,manualHistory;
@@ -103,10 +112,10 @@ export function createCentral(config = process.env, transport = fetch, options =
       if (!/^\d{5,20}$/.test(phone)) {result.invalidMessages++;continue;}
       const timestamp = Number(m.timestamp) * 1000;
       const at = Number.isFinite(timestamp) && timestamp > 0 ? Math.min(timestamp, now()) : now();
-      let c = get('SELECT * FROM conversations WHERE phone=?', phone);
+      let c = uniquePhone('conversations', phone);
       const fresh=!c;
       if (!c) {
-        const name = get('SELECT name FROM contacts WHERE phone=?',phone)?.name || clean(value.contacts?.find(p => p.wa_id === phone)?.profile?.name) || phone;
+        const name = uniquePhone('contacts',phone)?.name || clean(value.contacts?.find(p => p.wa_id === phone)?.profile?.name) || phone;
         const id = randomUUID();
         run('INSERT INTO conversations(id,name,phone,updated) VALUES(?,?,?,?)', id, name, phone, at);
         c = get('SELECT * FROM conversations WHERE id=?', id);
@@ -120,6 +129,8 @@ export function createCentral(config = process.env, transport = fetch, options =
       if (echo) {
         run('UPDATE conversations SET pending_since=CASE WHEN last_inbound<? THEN NULL ELSE pending_since END,updated=MAX(updated,?) WHERE id=?', at, at, c.id);
       } else {
+        run('INSERT INTO incoming_receipts(message_id,conversation_id,received) VALUES(?,?,?)',messageId,c.id,now());
+        customerContext.receivedMessage(c.id,messageId,body);
         const lastOut = get("SELECT MAX(created) AS at FROM messages WHERE conversation_id=? AND direction='out' AND status IN ('sent','delivered','read')", c.id)?.at || 0;
         // Provider timestamps have second precision. Keep ambiguous same-second
         // inbound messages pending rather than silently losing a customer reply.
@@ -207,6 +218,8 @@ export function createCentral(config = process.env, transport = fetch, options =
         '/assets/domum-symbol.png': ['domum-symbol.png', 'image/png'],
         '/assets/domum-interface.css': ['domum-interface.css', 'text/css; charset=utf-8'],
         '/assets/operator-chat.js': ['operator-chat.js','text/javascript; charset=utf-8'],
+        '/assets/incoming-alerts.js': ['incoming-alerts.js','text/javascript; charset=utf-8'],
+        '/assets/incoming-alerts.mjs': ['incoming-alerts.mjs','text/javascript; charset=utf-8'],
         '/assets/manrope-latin.woff2': ['fonts/manrope-latin.woff2', 'font/woff2'],
       };
       if (Object.hasOwn(publicFiles, url.pathname) && ['GET','HEAD'].includes(req.method)) {
@@ -256,6 +269,15 @@ export function createCentral(config = process.env, transport = fetch, options =
         return reply(200,{ok:true});
       }
       if (!user) fail(401,'Entre com seu usuário para continuar.');
+      if(url.pathname==='/api/incoming-events'&&req.method==='GET'){
+        const latest=get('SELECT COALESCE(MAX(sequence),0) AS n FROM incoming_receipts').n;
+        if(!url.searchParams.has('after'))return reply(200,{cursor:latest,events:[]});
+        const raw=url.searchParams.get('after'),after=Number(raw);
+        if(!/^\d+$/.test(raw)||!Number.isSafeInteger(after))fail(400,'Marcador de notificações inválido.');
+        if(after>latest)return reply(200,{cursor:latest,events:[],reset:true});
+        const events=all('SELECT r.sequence,r.message_id,r.conversation_id,r.received,c.name FROM incoming_receipts r JOIN conversations c ON c.id=r.conversation_id WHERE r.sequence>? ORDER BY r.sequence LIMIT 100',after);
+        return reply(200,{events,cursor:events.at(-1)?.sequence??latest,more:events.length===100});
+      }
       const operatorContextMatch=url.pathname.match(/^\/api\/operator-context\/([a-f0-9-]{36})$/i);
       if(operatorContextMatch&&req.method==='GET')return reply(200,await operatorContext(operatorContextMatch[1]));
       if(url.pathname==='/api/operator-chat'&&req.method==='GET')return reply(200,operatorChat.list(user));
@@ -384,7 +406,7 @@ export function createCentral(config = process.env, transport = fetch, options =
         res.setHeader('set-cookie','central_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');return reply(200,{ok:true});
       }
       if (url.pathname==='/api/state' && req.method==='GET') {
-        tick();return reply(200,{user,mode:live?'live':'demo',connected:!!ready,externalAlerts:!!config.ALERT_WEBHOOK_URL,agents:all('SELECT id,name,email,role,active FROM agents'),contacts:all('SELECT * FROM contacts ORDER BY name COLLATE NOCASE'),conversations:all('SELECT * FROM conversations ORDER BY updated DESC'),messages:[...media.messages(all('SELECT * FROM messages ORDER BY created')),...manualHistory.messages()].sort((a,b)=>a.created-b.created),suppliers:suppliers.status(),mediaStorage:media.stats(),contexts:all('SELECT conversation_id,client_name,kind,mode,version FROM conversation_context'),notion:customerContext.status(),ai:ai.status(),settings:get('SELECT minutes FROM settings WHERE id=1')});
+        tick();return reply(200,{incomingCursor:get('SELECT COALESCE(MAX(sequence),0) AS n FROM incoming_receipts').n,user,mode:live?'live':'demo',connected:!!ready,externalAlerts:!!config.ALERT_WEBHOOK_URL,agents:all('SELECT id,name,email,role,active FROM agents'),contacts:all('SELECT * FROM contacts ORDER BY name COLLATE NOCASE'),conversations:all('SELECT * FROM conversations ORDER BY updated DESC').map(c=>{const matches=matchingPhones('contacts',c.phone);return {...c,contact_id:matches.length===1?matches[0].id:null};}),messages:[...media.messages(all('SELECT * FROM messages ORDER BY created')),...manualHistory.messages()].sort((a,b)=>a.created-b.created),suppliers:suppliers.status(),mediaStorage:media.stats(),contexts:all('SELECT conversation_id,client_name,kind,mode,version FROM conversation_context'),notion:customerContext.status(),ai:ai.status(),settings:get('SELECT minutes FROM settings WHERE id=1')});
       }
       if (url.pathname === '/api/contacts' && req.method === 'GET') return reply(200,{contacts:all('SELECT * FROM contacts ORDER BY name COLLATE NOCASE')});
       const contactMatch=url.pathname.match(/^\/api\/contacts\/([^/]+)$/);
@@ -392,20 +414,19 @@ export function createCentral(config = process.env, transport = fetch, options =
         const existing=contactMatch?get('SELECT * FROM contacts WHERE id=?',contactMatch[1]):null;
         if(contactMatch&&!existing)fail(404,'Contato não encontrado.');
         const name=body.name,email=body.email??existing?.email??'',notes=body.notes??existing?.notes??'';
-        const phone=typeof body.phone==='string'?body.phone.replace(/[\s().-]/g,'').replace(/^\+/,''):existing?.phone;
+        const phone=body.phone===undefined?existing?.phone:normalizeContactPhone(body.phone);
         if(typeof name!=='string'||!name.trim()||name.trim().length>120)fail(400,'Informe o nome do contato, com até 120 caracteres.');
         if(!phone||!(/^[1-9]\d{7,14}$/).test(phone))fail(400,'Informe o telefone com código do país e DDD, por exemplo +55 44 99999-9999.');
-        if(existing&&phone!==existing.phone)fail(400,'Para outro número, cadastre um novo contato. O histórico permanece vinculado ao número original.');
+        if(existing&&!samePhone(phone,existing.phone))fail(400,'Para outro número, cadastre um novo contato. O histórico permanece vinculado ao número original.');
         if(typeof email!=='string'||email.length>254||(email.trim()&&!(/^[^\s@]+@[^\s@]+\.[^\s@]+$/).test(email.trim())))fail(400,'Informe um e-mail válido ou deixe o campo vazio.');
         if(typeof notes!=='string'||notes.length>2000)fail(400,'Use até 2000 caracteres nas observações.');
-        const duplicate=get('SELECT id FROM contacts WHERE phone=?',phone);
-        if(duplicate&&duplicate.id!==existing?.id)fail(409,'Esse telefone já está salvo nos contatos.');
+        if(matchingPhones('contacts',phone).some(row=>row.id!==existing?.id))fail(409,'Esse telefone já está salvo nos contatos, possivelmente em outro formato.');
         const id=existing?.id||randomUUID(),at=now();
         db.exec('BEGIN');
         try{
           if(existing)run('UPDATE contacts SET name=?,email=?,notes=?,updated=? WHERE id=?',name.trim(),email.trim(),notes.trim(),at,id);
           else run('INSERT INTO contacts(id,name,phone,email,notes,created,updated) VALUES(?,?,?,?,?,?,?)',id,name.trim(),phone,email.trim(),notes.trim(),at,at);
-          run('UPDATE conversations SET name=? WHERE phone=?',name.trim(),phone);
+          for(const chat of matchingPhones('conversations',phone))run('UPDATE conversations SET name=? WHERE id=?',name.trim(),chat.id);
           db.exec('COMMIT');
         }catch(error){db.exec('ROLLBACK');throw error;}
         return reply(existing?200:201,{contact:get('SELECT * FROM contacts WHERE id=?',id)});
@@ -413,7 +434,7 @@ export function createCentral(config = process.env, transport = fetch, options =
       if(url.pathname==='/api/conversations'&&req.method==='POST'){
         const contact=get('SELECT * FROM contacts WHERE id=?',clean(body.contactId,80));
         if(!contact)fail(404,'Selecione um contato salvo.');
-        let conversation=get('SELECT * FROM conversations WHERE phone=?',contact.phone);
+        let conversation=uniquePhone('conversations',contact.phone);
         if(!conversation){
           const id=randomUUID();run('INSERT INTO conversations(id,name,phone,updated) VALUES(?,?,?,?)',id,contact.name,contact.phone,now());
           conversation=get('SELECT * FROM conversations WHERE id=?',id);

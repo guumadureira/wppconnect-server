@@ -70,3 +70,7 @@ dialog{border-radius:18px;box-shadow:0 25px 100px #21180d30}dialog::backdrop{bac
 
 .operator-shortcuts{display:flex;flex-wrap:wrap;gap:8px;padding:12px 18px;border-top:1px solid var(--line,#e7ded7)}
 .operator-message>button{margin-top:12px;font-size:11px}
+/* Incoming activity remains visible even after an automatic response. */
+#incoming-alerts{white-space:nowrap;min-width:108px}
+#incoming-alerts.has-new-messages{background:#ffeadb;border-color:#c86631;color:#663312;font-weight:700}
+#dialog #test-incoming-alerts,#dialog #mute-incoming-alerts,#dialog #open-latest-alert{display:block;width:100%;margin-top:10px}
