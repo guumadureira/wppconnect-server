@@ -39,6 +39,18 @@ Selecione **Cliente desta tarefa**, consulte o contexto e escreva o comando. O c
 
 O agente é software, não uma pessoa. Precisa de `NOTION_OPERATOR_CHAT_ENABLED=true`, `NOTION_OPERATOR_AGENT_ID` e credencial com acesso ao agente, além das páginas envolvidas. A conexão do agente personalizado com o MCP da Central também precisa estar habilitada nele. O chat não herda automaticamente permissões da conta humana. Arquivo que existe apenas no chat/sandbox do agente precisa ser anexado a uma página acessível antes do envio do original. Não transformar uma página vazia em substituto da proposta.
 
+O assistente oferece três pedidos rápidos: **Sugerir resposta**, **Atualizar situação** e **Localizar documento**. O clique preenche o comando para edição; não inicia uma execução paga automaticamente nem substitui um comando já digitado. Selecione o cliente antes. Para documentos, descreva qual arquivo procura.
+
+Nas respostas do agente, **Revisar para o cliente** abre uma edição com nome e telefone de destino. Retire comentários internos, confira o conteúdo e leve-o para a conversa. A mensagem fica como rascunho até o operador clicar em **Enviar**. Rascunhos existentes são preservados, e troca de atendente ou encerramento da conversa impedem a transferência.
+
+A consulta de andamento pede fontes e datas, distinguindo conclusão, execução e planejamento. Resultados são limitados às páginas e ferramentas autorizadas ao agente; consulta parcial não prova ausência de trabalho ou documento.
+
+### Arquivos no SharePoint
+
+A conexão Microsoft do chat comum do Notion não é herdada automaticamente pelo agente personalizado. A [documentação oficial](https://www.notion.com/help/connect-sharepoint-and-onedrive-to-notion-agents), consultada em 29/10/2026, ainda apresenta a conexão de agentes personalizados como “Coming soon”. Nesta configuração, o usuário confirmou que SharePoint não aparece em Ferramentas e acesso. A busca direta por esse agente permanece indisponível.
+
+O caminho atualmente implementado é carregar o arquivo original numa página acessível do Notion, localizar o anexo e conferir a prévia de envio na Central. Um link privado do SharePoint não equivale a esse anexo. O código não baixa links externos arbitrários nem converte uma página em substituto silencioso do documento solicitado. A alternativa futura é uma conexão própria da Central ao Microsoft 365, com recursos e acesso definidos; ela não foi ativada por esta atualização.
+
 Quando o agente concluir mas a leitura falhar, o chat continua buscando a resposta, com pausa após erros. **Atualizar** consulta a mesma execução e não reenvia o comando. A interface informa quando uma execução terminou sem texto e identifica arquivos produzidos pelo agente; esses arquivos ainda precisam estar em página acessível para o envio original. O contexto enviado respeita o limite de 10.000 caracteres da API, preservando a identidade do cliente e reduzindo o material mais antigo.
 
 O resumo em Clientes compara datas com precisão de minuto, compatível com o retorno do Notion. Um horário arredondado não mantém o registro em erro; divergências de conteúdo continuam identificadas pelo nome do campo.

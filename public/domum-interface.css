@@ -67,3 +67,6 @@ dialog{border-radius:18px;box-shadow:0 25px 100px #21180d30}dialog::backdrop{bac
 .operator-client-panel{padding:12px 18px;border-bottom:1px solid var(--line,#e5ddd5);display:flex;flex-wrap:wrap;align-items:end;gap:10px}.operator-client-panel label{display:grid;gap:4px;flex:1;min-width:180px}.operator-client-panel select{width:100%;padding:8px}.operator-client-panel details{flex-basis:100%;max-height:220px;overflow:auto}.operator-client-panel small{flex-basis:100%}
 
 @media(max-width:600px){.main[data-view="assistant"]{overflow:auto}.main[data-view="assistant"] #view-content{overflow:visible;flex:none}.operator-workspace{height:auto;min-height:650px}.operator-chat{min-height:540px}.operator-messages{min-height:180px;max-height:50vh}.operator-composer,.operator-head,.operator-client-panel{flex-shrink:0}}
+
+.operator-shortcuts{display:flex;flex-wrap:wrap;gap:8px;padding:12px 18px;border-top:1px solid var(--line,#e7ded7)}
+.operator-message>button{margin-top:12px;font-size:11px}
