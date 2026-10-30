@@ -198,6 +198,21 @@ test('resposta pelo aplicativo Business pausa a IA mesmo durante geração',asyn
   f.app.intake({metadata:{phone_number_id:'test-phone'},message_echoes:[{id:'human-echo',to:phone,type:'text',text:{body:'Vou cuidar disso.'},timestamp:Math.floor(Date.now()/1000)}]},'smb_message_echoes');finish();await work;
   assert.equal(f.calls.length,1);assert.equal(f.app.customerContext.view(c.id).mode,'human');
 });
+
+test('eco humano mantém autoria, deduplica e entra no contexto após liberação explícita',async t=>{
+  const f=fixture(t),c=f.incoming();
+  const echo={metadata:{phone_number_id:'test-phone'},message_echoes:[{id:'echo-context',to:phone,type:'text',text:{body:'Combinamos conferir o projeto na sexta-feira.'},timestamp:Math.floor(Date.now()/1000)}]};
+  f.app.intake(echo,'smb_message_echoes');f.app.intake(echo,'smb_message_echoes');
+  await f.app.ai.process();assert.equal(f.calls.length,0);
+  const saved=f.app.db.prepare("SELECT * FROM messages WHERE provider_id='echo-context'").all();
+  assert.equal(saved.length,1);assert.equal(saved[0].direction,'out');assert.match(saved[0].agent_name,/Aplicativo Business/);
+  assert.equal(f.app.customerContext.view(c.id).mode,'human');
+  f.app.db.prepare("UPDATE conversation_context SET mode='assisted' WHERE conversation_id=?").run(c.id);f.app.ai.release(c);
+  f.incoming('Qual foi o combinado?');await f.app.ai.process();
+  const input=JSON.parse(f.calls.find(call=>call.url.includes('openai.com')).body.input[0].content);
+  assert.ok(JSON.stringify(input).includes('Combinamos conferir o projeto na sexta-feira.'));
+  assert.equal(f.calls.filter(call=>call.url.includes('openai.com')).length,1);
+});
 test('alteração humana no contexto durante a geração invalida a resposta antiga',async t=>{
   let started,finish;const began=new Promise(r=>started=r),waiting=new Promise(r=>finish=r);
   const f=fixture(t,{},async url=>{if(url.includes('openai.com')){started();await waiting;}});const c=f.incoming();const work=f.app.ai.process();await began;

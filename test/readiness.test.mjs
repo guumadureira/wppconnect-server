@@ -26,7 +26,7 @@ test('diagnóstico distingue configuração de conexão real e não expõe crede
   const config = { DATABASE_PATH: ':memory:', WHATSAPP_MODE: 'live', WHATSAPP_ACCESS_TOKEN: 'test-only-private-value' };
   const { app, request } = await start(config);
   t.after(() => app.close());
-  assert.deepEqual((await request('/healthz')).body, { status: 'ok', mode: 'live' });
+  assert.deepEqual((await request('/healthz')).body, { status: 'ok', mode: 'live', revision: null });
   assert.equal((await request('/api/connection-status')).status, 401);
   const admin = { name: 'Admin', email: 'admin@example.invalid', password: 'test-only-password-123' };
   await request('/api/setup', 'POST', admin);
