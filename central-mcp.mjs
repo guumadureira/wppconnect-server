@@ -46,7 +46,7 @@ export function createCentralMCP(db,config,transport,{context,ai,media,ready}){
   function eligible(d,operator=null){
     const c=conversation(d.phone,operator),ctx=context.view(c.id);
     if(c.id!==d.conversation_id||ctx.client_id!==d.client_id||ctx.version!==d.context_version||c.last_received!==d.last_received)fail(409,'A conversa ou o contexto mudou. Prepare nova prévia e peça nova autorização.');
-    if(c.status!=='open')fail(409,'A conversa está concluída. Reabra na central.');
+    // Administrative completion does not close Meta's messaging window.
     if(Date.now()>d.expires)fail(409,'A prévia expirou. Prepare outra e peça nova autorização.');
     if(!ready)fail(503,'Conexão real do WhatsApp indisponível.');
     if(!c.last_inbound||Date.now()-c.last_inbound>86400000)fail(409,'Janela de 24 horas encerrada. Este conector não envia modelos de mensagem.');
@@ -88,7 +88,7 @@ export function createCentralMCP(db,config,transport,{context,ai,media,ready}){
     const initial=context.view(c.id);
     const job=(async()=>{
       const file=await(pagePDF?notionDocuments.exportPage(args.paginaId,args.resumoConteudo):notionDocuments.load(args.paginaId,args.arquivoId)),latest=conversation(c.phone,operator),current=context.view(c.id);
-      if(latest.id!==c.id||latest.status!=='open'||latest.last_received!==c.last_received||current.version!==initial.version||current.client_id!==initial.client_id)fail(409,'Conversa ou vínculo alterado durante a importação. Liste e prepare novamente.');
+      if(latest.id!==c.id||latest.status!==c.status||latest.last_received!==c.last_received||current.version!==initial.version||current.client_id!==initial.client_id)fail(409,'Conversa ou vínculo alterado durante a importação. Liste e prepare novamente.');
       db.exec('BEGIN IMMEDIATE');
       try{
         const saved=media.store('document',file.mime,file.name,file.data);
@@ -126,7 +126,7 @@ export function createCentralMCP(db,config,transport,{context,ai,media,ready}){
       try{
         const content=p.anexo?await media.payload(p.anexo.id,p.texto):{type:'text',text:{body:p.texto}};
         const latest=conversation(d.phone,operator),current=context.view(c.id);
-        if(latest.status!=='open'||latest.last_received!==d.last_received||current.version!==version||current.client_id!==d.client_id)fail(409,'Conversa alterada durante a preparação. Envio cancelado.');
+        if(latest.status!==c.status||latest.last_received!==d.last_received||current.version!==version||current.client_id!==d.client_id)fail(409,'Conversa alterada durante a preparação. Envio cancelado.');
         dispatched=true;
         const response=await transport(`https://graph.facebook.com/${config.META_GRAPH_VERSION}/${config.WHATSAPP_PHONE_NUMBER_ID}/messages`,{method:'POST',headers:{authorization:'Bearer '+config.WHATSAPP_ACCESS_TOKEN,'content-type':'application/json'},body:JSON.stringify({messaging_product:'whatsapp',to:d.phone,...content}),redirect:'error',signal:AbortSignal.timeout(15000)});
         const data=await response.json();

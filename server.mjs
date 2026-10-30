@@ -15,6 +15,7 @@ import {createHistoryImport} from './history-import.mjs';
 import {createOperatorChat} from './operator-chat.mjs';
 import {createOperatorContext} from './operator-context.mjs';
 import {samePhone,normalizeContactPhone} from './contact-phone.mjs';
+import {createAIQuality} from './ai-quality.mjs';
 
 const derive = promisify(scrypt);
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -68,6 +69,7 @@ export function createCentral(config = process.env, transport = fetch, options =
   const centralMCP=createCentralMCP(db,config,transport,{context:customerContext,ai,media,ready:!!ready});
   const operatorContext=createOperatorContext(db,customerContext);
   const operatorChat=createOperatorChat(db,config,transport,{conversationContext:operatorContext});
+  const quality=createAIQuality(db);
   // Only operational counts and timestamps; no payload, phone or credentials.
   // These observations start again with each server process.
   const metaCode = value => Number.isSafeInteger(value) && value > 0 ? value : null;
@@ -169,7 +171,7 @@ export function createCentral(config = process.env, transport = fetch, options =
       res.setHeader('x-content-type-options','nosniff');
       res.setHeader('referrer-policy','same-origin');
       res.setHeader('content-security-policy',"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'");
-      if(url.pathname==='/healthz' && req.method==='GET')return reply(200,{status:'ok',mode:live?'live':'demo'});
+      if(url.pathname==='/healthz' && req.method==='GET')return reply(200,{status:'ok',mode:live?'live':'demo',revision:/^[a-f0-9]{40}$/i.test(config.RENDER_GIT_COMMIT||'')?config.RENDER_GIT_COMMIT:null});
       // Dedicated service credential; never reuse or bypass browser-session authentication.
       if(url.pathname==='/mcp')return await centralMCP.handle(req,res,{origin,readBody,reply});
       if (url.pathname === '/webhooks/whatsapp') {
@@ -219,6 +221,7 @@ export function createCentral(config = process.env, transport = fetch, options =
         '/assets/domum-interface.css': ['domum-interface.css', 'text/css; charset=utf-8'],
         '/assets/operator-chat.js': ['operator-chat.js','text/javascript; charset=utf-8'],
         '/assets/incoming-alerts.js': ['incoming-alerts.js','text/javascript; charset=utf-8'],
+        '/assets/ai-quality.js': ['ai-quality.js','text/javascript; charset=utf-8'],
         '/assets/incoming-alerts.mjs': ['incoming-alerts.mjs','text/javascript; charset=utf-8'],
         '/assets/manrope-latin.woff2': ['fonts/manrope-latin.woff2', 'font/woff2'],
       };
@@ -306,6 +309,15 @@ export function createCentral(config = process.env, transport = fetch, options =
         if(user.role!=='admin')fail(403,'Somente administradores podem sincronizar fornecedores.');
         if(!suppliers.status().enabled)fail(503,'Configure NOTION_SUPPLIERS_DATA_SOURCE_ID e o acesso à base antes de sincronizar.');
         await suppliers.process(true);return reply(200,suppliers.status());
+      }
+      const qualityMatch=url.pathname.match(/^\/api\/conversations\/([^/]+)\/ai-quality(?:\/([a-f0-9-]+))?$/i);
+      if(qualityMatch){
+        const [,id,reportId]=qualityMatch;
+        if(!get('SELECT id FROM conversations WHERE id=?',id))fail(404,'Conversa não encontrada.');
+        if(req.method==='GET'&&!reportId)return reply(200,{reports:quality.list(id)});
+        if(req.method==='POST'&&!reportId)return reply(201,{reports:quality.report(id,body,user)});
+        if(req.method==='PATCH'&&reportId)return reply(200,{reports:quality.review(id,reportId,body,user)});
+        fail(405,'Método não permitido.');
       }
       const historyMatch=url.pathname.match(/^\/api\/conversations\/([^/]+)\/history-import\/(inspect|preview|confirm)$/);
       if(historyMatch&&req.method==='POST'){
@@ -399,7 +411,8 @@ export function createCentral(config = process.env, transport = fetch, options =
       if(url.pathname==='/api/connection-status' && req.method==='GET'){
         if(user.role!=='admin')fail(403,'Somente administradores podem consultar a configuração.');
         const required=['WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_ACCESS_TOKEN','META_APP_SECRET','WEBHOOK_VERIFY_TOKEN','META_GRAPH_VERSION'];
-        return reply(200,{mode:live?'live':'demo',credentialsConfigured:!!ready,connectionVerified:false,missing:required.filter(name=>!config[name]),webhookPath:'/webhooks/whatsapp',publicHttps:origin.startsWith('https://'),webhook,lastSendFailure});
+        const businessAppEchoes=get("SELECT COUNT(*) AS recorded,MAX(created) AS lastMessageAt FROM messages WHERE direction='out' AND agent_name='Aplicativo Business (atendente não identificado)'");
+        return reply(200,{mode:live?'live':'demo',credentialsConfigured:!!ready,connectionVerified:false,missing:required.filter(name=>!config[name]),webhookPath:'/webhooks/whatsapp',publicHttps:origin.startsWith('https://'),webhook,businessAppEchoes,lastSendFailure});
       }
       if (url.pathname==='/api/logout' && req.method==='POST') {
         if(token)run('DELETE FROM sessions WHERE token=?',hash(token));

@@ -1,16 +1,22 @@
 // Runs independently of the conversation refresh, including while writing or in a dialog.
 (()=>{
-  let audio=null,enabled=false,unseen=[],failed=false;
+  let audio=null,enabled=true,unseen=[],failed=false;
   const baseTitle=document.title;
-  try{enabled=localStorage.getItem('domum-incoming-alerts')==='true';}catch{}
+  try{enabled=localStorage.getItem('domum-incoming-alerts')!=='false';}catch{}
   const session=()=>!localMode&&state?.user?state.user.id:null;
   function update(){
     const button=document.getElementById('incoming-alerts');if(!button)return;
     const ready=enabled&&audio?.state==='running';
-    button.textContent=unseen.length?unseen.length+' novas mensagens':failed?'Avisos sem conexão':ready?'Avisos ativos':'Ativar avisos';
+    button.textContent=unseen.length?unseen.length+' novas mensagens':failed?'Avisos sem conexão':!enabled?'Avisos silenciados':ready?'Avisos ativos':'Avisos · liberar som';
     button.classList.toggle('has-new-messages',unseen.length>0);
     button.title=failed?'Aguardando reconexão para buscar mensagens.':'Sons e notificações de todas as mensagens recebidas, mesmo com a IA atendendo.';
     document.title=unseen.length?'('+unseen.length+') Novas mensagens · Domum':baseTitle;
+    document.querySelectorAll('[data-chat]').forEach(row=>{
+      const count=unseen.filter(e=>e.conversation_id===row.dataset.chat).length;
+      row.classList.toggle('has-unread',count>0);
+      const badge=row.querySelector('.unread-count');
+      if(badge){badge.hidden=!count;badge.textContent=count?String(count):'';badge.setAttribute('aria-label',count+' mensagens não lidas');}
+    });
   }
   function sound(){
     if(!enabled||audio?.state!=='running')return;
@@ -22,12 +28,24 @@
       oscillator.onended=()=>{oscillator.disconnect();gain.disconnect();};
     }catch{}
   }
+  async function unlockSound(){
+    if(!enabled||!session()||audio?.state==='running')return;
+    try{
+      const Context=window.AudioContext||window.webkitAudioContext;
+      if(Context){audio=audio||new Context();audio.onstatechange=update;if(audio.state!=='running')await audio.resume();}
+    }catch{}update();
+  }
+  // Browser policy requires a gesture after loading; never ask permission on load.
+  document.addEventListener('pointerdown',()=>{unlockSound();},{passive:true});
+  document.addEventListener('keydown',()=>{unlockSound();},{passive:true});
   async function activate(){
     enabled=true;try{localStorage.setItem('domum-incoming-alerts','true');}catch{}
-    const Context=window.AudioContext||window.webkitAudioContext;
-    if(Context){audio=audio||new Context();audio.onstatechange=update;audio.resume().then(sound).catch(()=>{});}
+    // Request permission while the explicit button gesture is still active.
+    let permissionRequest;
+    try{if('Notification'in window)permissionRequest=Notification.requestPermission();}catch{}
+    await unlockSound();sound();
     let permission='unsupported';
-    try{if('Notification'in window)permission=await Notification.requestPermission();}catch{}
+    try{if(permissionRequest)permission=await permissionRequest;}catch{}
     if(permission==='granted')try{const note=new Notification('Avisos da Central ativados',{body:'Este é um aviso de teste.',tag:'domum-alert-test',silent:true});setTimeout(()=>note.close(),5000);}catch{}
     update();
     toast(permission==='granted'?'Avisos ativados. Mantenha a aba aberta, mesmo minimizada.':'Som ativado quando permitido pelo navegador. Para avisos do sistema, permita notificações nas configurações do site.');
@@ -53,9 +71,9 @@
   window.centralIncomingAlerts={update,activate,isEnabled:()=>enabled,seen(id){unseen=unseen.filter(e=>e.conversation_id!==id);update();}};
   document.addEventListener('click',event=>{
     if(!event.target.closest('#incoming-alerts'))return;
-    modal('Avisos de mensagens','<p>Toda mensagem recebida gera um aviso, inclusive quando a IA responde. Mantenha esta aba aberta ou minimizada.</p><p>Após recarregar, ative o som novamente se o navegador pedir. Computador suspenso ou aba descartada podem atrasar os avisos.</p><button type="button" id="test-incoming-alerts">Ativar e testar som e avisos</button><button type="button" id="mute-incoming-alerts">Silenciar som e avisos do sistema</button>'+(unseen.length?'<button type="button" id="open-latest-alert">Abrir última conversa ('+unseen.length+' mensagens)</button>':''),'Fechar',async()=>{});
+    modal('Avisos de mensagens','<p>Os avisos ficam ligados por padrão. Toda mensagem recebida gera destaque, inclusive quando a IA responde. Mantenha esta aba aberta ou minimizada.</p><p>O som é liberado ao clicar ou digitar na Central. Avisos do sistema precisam da permissão do navegador; use o botão abaixo para autorizar. Computador suspenso ou aba descartada podem atrasar avisos.</p><button type="button" id="test-incoming-alerts">Ativar e testar som e avisos</button><button type="button" id="mute-incoming-alerts">Silenciar som e avisos do sistema</button>'+(unseen.length?'<button type="button" id="open-latest-alert">Abrir última conversa ('+unseen.length+' mensagens)</button>':''),'Fechar',async()=>{});
     document.getElementById('test-incoming-alerts').onclick=()=>activate().catch(e=>toast(e.message,true));
-    document.getElementById('mute-incoming-alerts').onclick=()=>{enabled=false;try{localStorage.removeItem('domum-incoming-alerts');}catch{}update();toast('Avisos visuais continuam ativos. Som e notificações do sistema silenciados.');};
+    document.getElementById('mute-incoming-alerts').onclick=()=>{enabled=false;try{localStorage.setItem('domum-incoming-alerts','false');}catch{}update();toast('Avisos visuais continuam ativos. Som e notificações do sistema silenciados.');};
     const open=document.getElementById('open-latest-alert');if(open)open.onclick=()=>{document.getElementById('dialog').close();openConversation(unseen.at(-1).conversation_id).catch(e=>toast(e.message,true));};
   });
   import('/assets/incoming-alerts.mjs').then(({createIncomingAlerts})=>{

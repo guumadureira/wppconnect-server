@@ -136,6 +136,28 @@ async function selectDocument(f){
   assert.ok(!JSON.stringify(r).includes('private-test'));assert.ok(!JSON.stringify(r).includes('test-only-notion-token'));
   return{telefone:phone,paginaId:pageId,arquivoId:r.structuredContent.documentos[0].arquivoId,texto:'Segue a proposta para conferir.',requestId:randomUUID()};
 }
+
+test('Notion envia texto e documento em conversa concluída sem reabrir ou liberar a IA',async t=>{
+  for(const document of [false,true]){
+    const f=await fixture(t,notionConfig,documentTransport()),c=f.incoming();
+    f.app.db.prepare("UPDATE conversations SET status='closed' WHERE id=?").run(c.id);
+    const d=document?(await f.tool('preparar_documento_notion',await selectDocument(f))).structuredContent:await f.prepare();
+    assert.ok(d?.envioId);
+    const sent=(await f.send(d)).structuredContent;
+    assert.equal(sent.estado,'sent');assert.equal(sent.entregaConfirmada,false);
+    await f.send(d);
+    assert.equal(f.calls.filter(call=>call.url.endsWith('/messages')).length,1);
+    assert.equal(f.app.db.prepare('SELECT status FROM conversations WHERE id=?').get(c.id).status,'closed');
+    assert.equal(f.app.customerContext.view(c.id).mode,'human');
+  }
+});
+
+test('conversa concluída continua respeitando a janela de envio do WhatsApp',async t=>{
+  const f=await fixture(t),c=f.incoming();
+  f.app.db.prepare("UPDATE conversations SET status='closed',last_inbound=? WHERE id=?").run(Date.now()-90000000,c.id);
+  assert.equal((await f.send(await f.prepare())).isError,true);
+  assert.equal(f.calls.length,0);
+});
 test('documento do Notion é copiado para conversa exata e só enviado após confirmação, sem duplicação',async t=>{
   const state={},f=await fixture(t,notionConfig,documentTransport(state)),c=f.incoming();
   const args=await selectDocument(f),d=(await f.tool('preparar_documento_notion',args)).structuredContent;

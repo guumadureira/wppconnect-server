@@ -74,3 +74,25 @@ dialog{border-radius:18px;box-shadow:0 25px 100px #21180d30}dialog::backdrop{bac
 #incoming-alerts{white-space:nowrap;min-width:108px}
 #incoming-alerts.has-new-messages{background:#ffeadb;border-color:#c86631;color:#663312;font-weight:700}
 #dialog #test-incoming-alerts,#dialog #mute-incoming-alerts,#dialog #open-latest-alert{display:block;width:100%;margin-top:10px}
+/* Compact conversation workspace; the full menu remains available on demand. */
+#toggle-sidebar{flex-shrink:0;font-size:17px;line-height:1;padding:7px 9px;background:transparent;border-color:var(--line)}
+.topbar{gap:12px}.workspace-path{margin-right:auto}
+.main[data-view="inbox"] .intro{min-height:27px;margin-bottom:8px}
+.main[data-view="inbox"] .intro h1{font-size:18px;margin:0}
+.main[data-view="inbox"] .intro p{display:none}
+.conversation.has-unread .conv-top strong{color:#8a3d17}
+.conversation.has-unread{box-shadow:inset 3px 0 #d47b45;background:#fff5eb}
+.unread-count{background:#a64f28;color:#fff;border-radius:12px;min-width:20px;padding:2px 6px;font-size:10px;text-align:center;font-weight:750}
+.unread-count[hidden]{display:none}
+@media(min-width:851px){
+  .app.sidebar-collapsed{grid-template-columns:76px minmax(0,1fr)}
+  .sidebar-collapsed .sidebar{padding:24px 10px 16px;gap:24px}
+  .sidebar-collapsed .brand{padding:0;justify-content:center}
+  .sidebar-collapsed .brand-full,.sidebar-collapsed .navtext,.sidebar-collapsed .activity-heading,.sidebar-collapsed .activity-label,.sidebar-collapsed .aside-foot{display:none}
+  .sidebar-collapsed .brand-compact{display:block;width:35px}
+  .sidebar-collapsed .nav{justify-content:center;padding:12px}
+  .sidebar-collapsed .activity-metric{justify-content:center;gap:3px;padding:9px 2px}
+  .sidebar-collapsed .activity-value{min-width:22px;font-size:12px}
+  .main[data-view="inbox"] .chat-head{min-height:60px;padding-top:9px;padding-bottom:9px}
+}
+@media(max-width:850px){#toggle-sidebar{display:none}}
