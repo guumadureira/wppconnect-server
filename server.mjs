@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { createWhatsAppSignup } from './whatsapp-signup.mjs';
 import { createMediaStore } from './media.mjs';
 import { createNotionContext } from './notion-context.mjs';
+import {createNotionGlobalContext} from './notion-global-context.mjs';
 import { createAIAttendance, simulateAttendance } from './ai-attendance.mjs';
 import { createCentralMCP } from './central-mcp.mjs';
 import {createSupplierRegister} from './supplier-register.mjs';
@@ -62,9 +63,10 @@ export function createCentral(config = process.env, transport = fetch, options =
   const media = createMediaStore(db,config,transport,live);
   let ai,manualHistory;
   const customerContext = createNotionContext(db,config,transport,{requestIntervalMs:options.notionRequestIntervalMs,aiEnabled:()=>ai?.status().enabled||false});
+  const globalContext=createNotionGlobalContext(config,transport);
   const ready = live && ['WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_ACCESS_TOKEN','META_APP_SECRET','WEBHOOK_VERIFY_TOKEN','META_GRAPH_VERSION'].every(k => config[k]);
   const suppliers=createSupplierRegister(db,config,transport);
-  ai = createAIAttendance(db,config,transport,customerContext,{ready:!!ready,debounceMs:options.aiDebounceMs,media,suppliers,importedHistory:id=>manualHistory?.forAI(id)});
+  ai = createAIAttendance(db,config,transport,customerContext,{ready:!!ready,debounceMs:options.aiDebounceMs,media,suppliers,globalContext,importedHistory:id=>manualHistory?.forAI(id)});
   manualHistory=createHistoryImport(db,customerContext,ai);
   const centralMCP=createCentralMCP(db,config,transport,{context:customerContext,ai,media,ready:!!ready});
   const operatorContext=createOperatorContext(db,customerContext);
@@ -329,6 +331,16 @@ export function createCentral(config = process.env, transport = fetch, options =
         if(user.role!=='admin')fail(403,'Somente administradores podem abrir o teste.');
         return reply(200,simulateAttendance(body.message));
       }
+      if(url.pathname==='/api/notion/global-context/status'&&req.method==='GET'){
+        if(user.role!=='admin')fail(403,'Somente administradores podem consultar o contexto geral.');
+        return reply(200,globalContext.status());
+      }
+      if(url.pathname==='/api/notion/global-context/refresh'&&req.method==='POST'){
+        if(user.role!=='admin')fail(403,'Somente administradores podem atualizar o contexto geral.');
+        const state=await globalContext.refresh(true);
+        return reply(200,{available:state.available,checkedAt:state.checkedAt||null,
+          source:state.source,diagnostic:globalContext.status()});
+      }
       if(url.pathname==='/api/notion/status'&&req.method==='GET')return reply(200,customerContext.status());
       if(url.pathname==='/api/notion/verify'&&req.method==='POST'){
         if(user.role!=='admin')fail(403,'Somente administradores podem verificar a integração.');
@@ -559,7 +571,7 @@ export function createCentral(config = process.env, transport = fetch, options =
     try{await deliverAlerts();await media.processPending();await customerContext.processLookups();await customerContext.processQueue();await suppliers.process();}catch{console.error('Falha ao verificar lembretes, anexos ou integração.');}finally{delivering=false;}
   },60000);
   timer.unref();
-  return {server,db,intake,tick,deliverAlerts,media,customerContext,ai,suppliers,manualHistory,operatorChat,close:()=>{
+  return {server,db,intake,tick,deliverAlerts,media,customerContext,globalContext,ai,suppliers,manualHistory,operatorChat,close:()=>{
     clearInterval(timer);
     clearInterval(aiTimer);
     return new Promise((resolve,reject)=>server.close(async error=>{
