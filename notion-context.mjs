@@ -54,7 +54,7 @@ export function createNotionContext(db,config,transport,options={}){
     return eventId;
   }
   function queueSummary(id){
-    const c=context(id);if(!summaryEnabled()||!c.client_id||c.kind==='comercial'||!c.summary)return;
+    const c=context(id);if(!summaryEnabled()||!c.client_id||c.kind==='comercial'||!c.summary||options.isDirectionContact?.(get('SELECT phone FROM conversations WHERE id=?',id)?.phone))return;
     const at=Date.now(),properties={'Resumo do atendimento — Central':rt(c.summary),'Pendências — Central':rt(c.missing),'Próximo passo — Central':rt(c.next_step),'Atualizado em — Central':{date:{start:new Date(Math.floor(at/60000)*60000).toISOString()}}};
     const origin=config.PUBLIC_ORIGIN||config.RENDER_EXTERNAL_URL||'';
     if(/^https:\/\//.test(origin)){const link=new URL('/',origin);link.searchParams.set('conversation',id);properties['Conversa — Central']={url:link.href};}
@@ -229,7 +229,7 @@ export function createNotionContext(db,config,transport,options={}){
             result.state='created';
           }
           const current=context(c.id),uninterpreted='Última mensagem recebida (ainda sem interpretação): ';
-          if(automaticContacts()&&guard()&&current.client_id&&(!current.summary||current.summary.startsWith(uninterpreted))){
+          if(automaticContacts()&&!options.isDirectionContact?.(c.phone)&&guard()&&current.client_id&&(!current.summary||current.summary.startsWith(uninterpreted))){
             const latest=get("SELECT body FROM messages WHERE conversation_id=? AND direction='in' ORDER BY rowid DESC LIMIT 1",c.id);
             const summary=latest?uninterpreted+text(latest.body,1500):'';
             if(summary&&summary!==current.summary){run('UPDATE conversation_context SET summary=?,version=version+1,updated=? WHERE conversation_id=? AND summary=?',summary,Date.now(),c.id,current.summary);queueSummary(c.id);}
@@ -298,7 +298,7 @@ export function createNotionContext(db,config,transport,options={}){
   }
   function receivedFile(conversationId,messageId,kind){addEvent(conversationId,{key:'file:'+messageId,kind:'arquivo',summary:({image:'Imagem recebida',document:'Documento recebido',sticker:'Figurinha recebida',audio:'Áudio recebido'})[kind]||'Arquivo recebido',source:'Cliente',actor:'Contato do WhatsApp',messageId});}
   function receivedMessage(conversationId,messageId,body){
-    if(!automaticContacts())return;
+    if(!automaticContacts()||options.isDirectionContact?.(get('SELECT phone FROM conversations WHERE id=?',conversationId)?.phone))return;
     const commercial=context(conversationId).kind==='comercial';
     addEvent(conversationId,{key:'incoming:'+messageId,kind:commercial?'comercial':'mensagem recebida',summary:'Mensagem recebida: '+text(body,1800),missing:'',nextStep:'',source:'Cliente',actor:'Contato do WhatsApp',messageId,...(commercial?{clientId:null,workId:null}:{})});
   }
