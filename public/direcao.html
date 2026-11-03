@@ -132,7 +132,6 @@
     return article;
   }
   async function refresh(){
-    if(busy)return;
     refreshButton.disabled=true;
     list.replaceChildren();
     try{
