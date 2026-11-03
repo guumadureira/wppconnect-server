@@ -16,6 +16,7 @@ import {createOperatorChat} from './operator-chat.mjs';
 import {createOperatorContext} from './operator-context.mjs';
 import {samePhone,normalizeContactPhone} from './contact-phone.mjs';
 import {createDirectionContactGuard} from './direction-contact.mjs';
+import {createDirectionDecisions} from './direction-decisions.mjs';
 import {createAIQuality} from './ai-quality.mjs';
 
 const derive = promisify(scrypt);
@@ -66,7 +67,8 @@ export function createCentral(config = process.env, transport = fetch, options =
   const customerContext = createNotionContext(db,config,transport,{requestIntervalMs:options.notionRequestIntervalMs,aiEnabled:()=>ai?.status().enabled||false,isDirectionContact:directionGuard.isDirectionContact});
   const ready = live && ['WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_ACCESS_TOKEN','META_APP_SECRET','WEBHOOK_VERIFY_TOKEN','META_GRAPH_VERSION'].every(k => config[k]);
   const suppliers=createSupplierRegister(db,config,transport);
-  ai = createAIAttendance(db,config,transport,customerContext,{ready:!!ready,debounceMs:options.aiDebounceMs,media,suppliers,isDirectionContact:directionGuard.isDirectionContact,importedHistory:id=>manualHistory?.forAI(id)});
+  const directionDecisions=createDirectionDecisions(db,config);
+  ai = createAIAttendance(db,config,transport,customerContext,{ready:!!ready,debounceMs:options.aiDebounceMs,media,suppliers,isDirectionContact:directionGuard.isDirectionContact,directionDecisions,importedHistory:id=>manualHistory?.forAI(id)});
   manualHistory=createHistoryImport(db,customerContext,ai);
   const centralMCP=createCentralMCP(db,config,transport,{context:customerContext,ai,media,ready:!!ready});
   const operatorContext=createOperatorContext(db,customerContext);
@@ -274,6 +276,17 @@ export function createCentral(config = process.env, transport = fetch, options =
         return reply(200,{ok:true});
       }
       if (!user) fail(401,'Entre com seu usuário para continuar.');
+      if(url.pathname==='/api/direction/decisions'){
+        if(req.method==='GET')return reply(200,{decisions:directionDecisions.list(user,url.searchParams.get('status')||'pending')});
+        if(req.method==='POST')return reply(201,{decision:directionDecisions.create(body,user)});
+        fail(405,'Método não permitido.');
+      }
+      const decisionMatch=url.pathname.match(/^\/api\/direction\/decisions\/([a-f0-9-]{36})$/i);
+      if(decisionMatch){
+        if(req.method==='GET')return reply(200,{decision:directionDecisions.detail(decisionMatch[1],user)});
+        if(req.method==='PATCH')return reply(200,{decision:directionDecisions.act(decisionMatch[1],body,user)});
+        fail(405,'Método não permitido.');
+      }
       if(url.pathname==='/api/incoming-events'&&req.method==='GET'){
         const latest=get('SELECT COALESCE(MAX(sequence),0) AS n FROM incoming_receipts').n;
         if(!url.searchParams.has('after'))return reply(200,{cursor:latest,events:[]});
@@ -561,7 +574,7 @@ export function createCentral(config = process.env, transport = fetch, options =
     try{await deliverAlerts();await media.processPending();await customerContext.processLookups();await customerContext.processQueue();await suppliers.process();}catch{console.error('Falha ao verificar lembretes, anexos ou integração.');}finally{delivering=false;}
   },60000);
   timer.unref();
-  return {server,db,intake,tick,deliverAlerts,media,customerContext,ai,suppliers,manualHistory,operatorChat,close:()=>{
+  return {server,db,intake,tick,deliverAlerts,media,customerContext,ai,suppliers,directionDecisions,manualHistory,operatorChat,close:()=>{
     clearInterval(timer);
     clearInterval(aiTimer);
     return new Promise((resolve,reject)=>server.close(async error=>{
