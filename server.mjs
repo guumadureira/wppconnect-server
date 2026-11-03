@@ -240,7 +240,8 @@ export function createCentral(config = process.env, transport = fetch, options =
         return res.end(readFileSync(new URL('./public/index.html',import.meta.url)));
       }
       const signupPage = ['/connect/whatsapp','/assets/whatsapp-signup.mjs'].includes(url.pathname);
-      if (!url.pathname.startsWith('/api/') && !signupPage) fail(404,'Página não encontrada.');
+      const directionPage=url.pathname==='/direcao';
+      if (!url.pathname.startsWith('/api/') && !signupPage && !directionPage) fail(404,'Página não encontrada.');
       if (!['GET','HEAD'].includes(req.method) && req.headers.origin !== origin) fail(403,'Origem não autorizada.');
       let body = {};
       if (['POST','PATCH'].includes(req.method) && !(url.pathname==='/api/media'&&req.method==='POST')) {const raw=await readBody();try{body=JSON.parse(raw.toString() || '{}');}catch{fail(400,'Dados inválidos.');}if(!body||typeof body!=='object'||Array.isArray(body))fail(400,'Dados inválidos.');}
@@ -276,6 +277,11 @@ export function createCentral(config = process.env, transport = fetch, options =
         return reply(200,{ok:true});
       }
       if (!user) fail(401,'Entre com seu usuário para continuar.');
+      if(directionPage&&req.method==='GET'){
+        directionDecisions.list(user,'pending');
+        res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store'});
+        return res.end(readFileSync(new URL('./public/direcao.html',import.meta.url)));
+      }
       if(url.pathname==='/api/direction/decisions'){
         if(req.method==='GET')return reply(200,{decisions:directionDecisions.list(user,url.searchParams.get('status')||'pending')});
         if(req.method==='POST')return reply(201,{decision:directionDecisions.create(body,user)});
