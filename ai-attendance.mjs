@@ -17,7 +17,7 @@ schema.required.push('supplier');schema.properties.supplier={anyOf:[supplierSche
 const fail=(status,message)=>{throw Object.assign(new Error(message),{status});};
 const month=()=>new Date().toISOString().slice(0,7);
 
-export function createAIAttendance(db,config,transport,context,{ready=false,debounceMs=2500,media,suppliers,importedHistory}={}){
+export function createAIAttendance(db,config,transport,context,{ready=false,debounceMs=2500,media,suppliers,isDirectionContact=()=>false,importedHistory}={}){
   const get=(sql,...a)=>db.prepare(sql).get(...a),all=(sql,...a)=>db.prepare(sql).all(...a),run=(sql,...a)=>db.prepare(sql).run(...a);
   db.exec(`CREATE TABLE IF NOT EXISTS ai_jobs(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL REFERENCES conversations(id),message_id TEXT UNIQUE NOT NULL REFERENCES messages(id),epoch INTEGER NOT NULL,state TEXT NOT NULL,created INTEGER NOT NULL,updated INTEGER NOT NULL,result TEXT,error TEXT,cost_usd REAL NOT NULL DEFAULT 0,billing_month TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS ai_control(conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),epoch INTEGER NOT NULL DEFAULT 0,handoff TEXT NOT NULL DEFAULT '');`);
@@ -42,11 +42,13 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
   }
   function release(conversation){
     if(!enabled())fail(503,'Configure a chave, o piloto, o limite de consumo e a conexão WhatsApp antes de liberar a IA.');
+    if(isDirectionContact(conversation.phone))fail(403,'Contatos internos da direção não podem ser liberados no atendimento automático de clientes.');
     if(!allowed(conversation.phone))fail(403,'Este telefone não está autorizado no piloto da IA.');
     ensure(conversation.id);run("UPDATE ai_control SET epoch=epoch+1,handoff='' WHERE conversation_id=?",conversation.id);
   }
   function incoming(conversation,message,{fresh=false,echo=false,type='text'}={}){
     if(echo){pause(conversation.id);return;}
+    if(isDirectionContact(conversation.phone)){pause(conversation.id,'Contato interno da direção: atendimento automático a clientes desativado.');return;}
     if(!enabled()||!allowed(conversation.phone))return;
     const c=context.view(conversation.id);
     if(fresh&&!conversation.owner_id){run("UPDATE conversation_context SET mode='assisted',version=version+1 WHERE conversation_id=?",conversation.id);}
@@ -63,7 +65,7 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
   }
   const valid=job=>{
     const c=get('SELECT *,rowid AS chat_row FROM conversations WHERE id=?',job.conversation_id),control=ensure(job.conversation_id),ctx=context.view(job.conversation_id);
-    return !stopped&&enabled()&&allowed(c.phone)&&c.status==='open'&&ctx.mode==='assisted'&&control.epoch===job.epoch&&(job.contextVersion===undefined||ctx.version===job.contextVersion)&&c.last_received===get('SELECT rowid AS n FROM messages WHERE id=?',job.message_id)?.n&&Date.now()-c.last_inbound<24*3600000;
+    return !stopped&&enabled()&&allowed(c.phone)&&!isDirectionContact(c.phone)&&c.status==='open'&&ctx.mode==='assisted'&&control.epoch===job.epoch&&(job.contextVersion===undefined||ctx.version===job.contextVersion)&&c.last_received===get('SELECT rowid AS n FROM messages WHERE id=?',job.message_id)?.n&&Date.now()-c.last_inbound<24*3600000;
   };
   function resultView(id){const row=get('SELECT state,result,error,updated FROM ai_jobs WHERE conversation_id=? ORDER BY created DESC,rowid DESC LIMIT 1',id);return row?{...row,result:row.result?JSON.parse(row.result):null,handoff:ensure(id).handoff}:null;}
   function validated(result){
