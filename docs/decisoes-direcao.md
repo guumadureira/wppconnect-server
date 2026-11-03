@@ -10,6 +10,12 @@ A Central agora dispõe de uma fila **interna** para decisões que exigem autori
 - O reconhecimento do número em `DIRECTION_CONTACT_PHONES` (PR #38) é **somente roteamento**, não autenticação da direção. A senha/sessão autenticada da Central é requisito para aprovar decisões.
 - O banco SQLite precisa ser persistente e ter backup antes de implantação. As duas novas tabelas são aditivas.
 
+## Painel administrativo (entrega seguinte)
+
+Acesse `/direcao` no domínio da Central, com a sessão previamente autenticada na conta administrativa cujo email corresponde à variável privada. A página HTML é protegida pelo mesmo controle de autorização da API. A interface mostra pendências por categoria, pergunta, justificativa e vínculos existentes, permite responder ou cancelar com confirmação expressa e atualiza a lista após salvar. Não inclui os dados pessoais de clientes em listas de outras pessoas nem possui botão de envio ao WhatsApp.
+
+A tela não cria credenciais, não concede acesso ao Microsoft 365, não permite consultar documentos restritos e não permite aprovar em nome de terceiros. A autenticação por número de WhatsApp e notificações automáticas são etapas diferentes. Para acesso negado ou fila desativada, a Central deve ser configurada primeiro pelo administrador do servidor.
+
 ## API autenticada disponível apenas para a direção
 
 - `GET /api/direction/decisions?status=pending` lista até cem pendências; filtros: `pending`, `answered`, `cancelled`, `all`.
