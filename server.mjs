@@ -15,6 +15,7 @@ import {createHistoryImport} from './history-import.mjs';
 import {createOperatorChat} from './operator-chat.mjs';
 import {createOperatorContext} from './operator-context.mjs';
 import {samePhone,normalizeContactPhone} from './contact-phone.mjs';
+import {createDirectionContactGuard} from './direction-contact.mjs';
 import {createAIQuality} from './ai-quality.mjs';
 
 const derive = promisify(scrypt);
@@ -61,10 +62,11 @@ export function createCentral(config = process.env, transport = fetch, options =
   const live = config.WHATSAPP_MODE === 'live';
   const media = createMediaStore(db,config,transport,live);
   let ai,manualHistory;
-  const customerContext = createNotionContext(db,config,transport,{requestIntervalMs:options.notionRequestIntervalMs,aiEnabled:()=>ai?.status().enabled||false});
+  const directionGuard=createDirectionContactGuard(config);
+  const customerContext = createNotionContext(db,config,transport,{requestIntervalMs:options.notionRequestIntervalMs,aiEnabled:()=>ai?.status().enabled||false,isDirectionContact:directionGuard.isDirectionContact});
   const ready = live && ['WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_ACCESS_TOKEN','META_APP_SECRET','WEBHOOK_VERIFY_TOKEN','META_GRAPH_VERSION'].every(k => config[k]);
   const suppliers=createSupplierRegister(db,config,transport);
-  ai = createAIAttendance(db,config,transport,customerContext,{ready:!!ready,debounceMs:options.aiDebounceMs,media,suppliers,importedHistory:id=>manualHistory?.forAI(id)});
+  ai = createAIAttendance(db,config,transport,customerContext,{ready:!!ready,debounceMs:options.aiDebounceMs,media,suppliers,isDirectionContact:directionGuard.isDirectionContact,importedHistory:id=>manualHistory?.forAI(id)});
   manualHistory=createHistoryImport(db,customerContext,ai);
   const centralMCP=createCentralMCP(db,config,transport,{context:customerContext,ai,media,ready:!!ready});
   const operatorContext=createOperatorContext(db,customerContext);
