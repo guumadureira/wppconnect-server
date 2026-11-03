@@ -6,10 +6,10 @@ import {createDirectionContactGuard} from '../direction-contact.mjs';
 test('numero interno so e identificado por configuracao privada explicita',()=>{
   const disabled=createDirectionContactGuard({});
   assert.equal(disabled.configured,false);
-  assert.equal(disabled.isDirectionContact('554498231095'),false);
-  const enabled=createDirectionContactGuard({DIRECTION_CONTACT_PHONES:'554498231095'});
-  assert.equal(enabled.isDirectionContact('554498231095'),true);
-  assert.equal(enabled.isDirectionContact('+55 (44) 9823-1095'),false);
+  assert.equal(disabled.isDirectionContact('5544000000001'),false);
+  const enabled=createDirectionContactGuard({DIRECTION_CONTACT_PHONES:'5544000000001'});
+  assert.equal(enabled.isDirectionContact('5544000000001'),true);
+  assert.equal(enabled.isDirectionContact('+55 (44) 0000-0001'),false);
   assert.equal(enabled.isDirectionContact('5544999999999'),false);
 });
 
