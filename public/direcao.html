@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Decisões da direção · Domum Engenharia</title>
+<style>
+  :root{color-scheme:light;--ink:#22272b;--orange:#bc612e;--paper:#f7f6f3;--line:#deddd8;--muted:#58616a}
+  *{box-sizing:border-box}
+  body{margin:0;font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--paper);color:var(--ink)}
+  header{background:#24272b;color:white;padding:20px max(20px,calc((100vw - 1040px)/2))}
+  header a{color:#fff;text-decoration:none;font-size:.9rem}
+  header h1{font-size:1.45rem;margin:12px 0 2px}
+  header p{opacity:.83;margin:0}
+  main{max-width:1040px;margin:0 auto;padding:20px}
+  .notice{border-left:4px solid var(--orange);background:white;padding:14px 16px;margin:0 0 18px}
+  .toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+  label{display:block;font-weight:600;font-size:.92rem}
+  select,button,textarea{font:inherit;border-radius:8px}
+  select{padding:8px;border:1px solid var(--line);background:white;margin-left:8px}
+  button{border:1px solid var(--orange);padding:10px 14px;background:var(--orange);color:white;cursor:pointer;font-weight:600}
+  button.secondary{background:white;color:var(--ink);border-color:var(--line)}
+  button:disabled{opacity:.55;cursor:not-allowed}
+  button:focus-visible,select:focus-visible,textarea:focus-visible,a:focus-visible{outline:3px solid #f7ae77;outline-offset:2px}
+  #message{min-height:1.3em;margin:0 0 12px;color:#943f20}
+  .grid{display:grid;gap:14px}
+  article{background:white;border:1px solid var(--line);border-radius:12px;padding:18px}
+  .meta{color:var(--muted);font-size:.82rem;margin:0 0 8px}
+  h2{font-size:1.08rem;line-height:1.35;margin:0 0 10px;overflow-wrap:anywhere}
+  article p{overflow-wrap:anywhere}
+  .context{background:#f4f2ed;padding:12px;border-radius:8px;white-space:pre-wrap}
+  textarea{display:block;width:100%;min-height:100px;padding:10px;border:1px solid #a9a9a5;background:#fff;margin:12px 0;resize:vertical}
+  .buttons{display:flex;gap:8px;flex-wrap:wrap}
+  .answer{white-space:pre-wrap;border-left:3px solid #6e8762;padding:8px 12px}
+  .empty{background:white;border:1px dashed var(--line);padding:24px;border-radius:12px}
+  small{color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <a href="/">Voltar à Central Domum</a>
+  <h1>Decisões da direção</h1>
+  <p>Revisão interna de decisões técnicas, comerciais e administrativas</p>
+</header>
+<main>
+  <div class="notice">Responder aqui registra uma decisão interna auditável. <strong>Nenhuma mensagem é enviada automaticamente ao cliente ou ao WhatsApp.</strong></div>
+  <div class="toolbar">
+    <label for="status">Situação
+      <select id="status">
+        <option value="pending">Pendentes</option>
+        <option value="answered">Respondidas</option>
+        <option value="cancelled">Canceladas</option>
+        <option value="all">Todas</option>
+      </select>
+    </label>
+    <button type="button" class="secondary" id="refresh">Atualizar lista</button>
+  </div>
+  <p id="message" role="status" aria-live="polite"></p>
+  <div id="list" class="grid"></div>
+  <p><small>A fila é restrita à conta administrativa configurada. As respostas não alteram automaticamente projetos ou contratos no Notion.</small></p>
+</main>
+<script>
+(function(){
+  'use strict';
+  const list=document.getElementById('list');
+  const message=document.getElementById('message');
+  const filter=document.getElementById('status');
+  const refreshButton=document.getElementById('refresh');
+  let busy=false;
+  const names={tecnica:'Técnica',comercial:'Comercial',administrativa:'Administrativa'};
+  const states={pending:'Pendente',answered:'Respondida',cancelled:'Cancelada'};
+  const date=value=>Number.isFinite(value)?new Date(value).toLocaleString('pt-BR'):'';
+  const note=text=>{message.textContent=text||'';};
+  async function api(url,options={}){
+    const response=await fetch(url,{credentials:'same-origin',cache:'no-store',
+      headers:{'content-type':'application/json'},...options});
+    const value=await response.json().catch(()=>({}));
+    if(!response.ok)throw new Error(value.error||'Requisição não concluída ('+response.status+').');
+    return value;
+  }
+  function text(tag,value,cls){
+    const element=document.createElement(tag);
+    if(cls)element.className=cls;
+    element.textContent=value==null?'':String(value);
+    return element;
+  }
+  function card(decision){
+    const article=document.createElement('article');
+    article.append(text('p',(names[decision.category]||'Decisão')+' · '+(states[decision.status]||decision.status)+' · '+date(decision.created),'meta'));
+    article.append(text('h2',decision.question));
+    article.append(text('p',decision.basis,'context'));
+    const details=[];
+    if(decision.clientId)details.push('Cliente vinculado');
+    if(decision.workId)details.push('Trabalho vinculado');
+    details.push(decision.origin==='ia'?'Solicitada pela IA':'Registrada manualmente');
+    article.append(text('p',details.join(' · '),'meta'));
+    if(decision.status==='pending'){
+      const label=text('label','Resposta ou motivo do cancelamento');
+      const textarea=document.createElement('textarea');
+      textarea.setAttribute('aria-label','Resposta da direção');
+      textarea.maxLength=1500;
+      label.append(textarea);
+      article.append(label);
+      const buttons=document.createElement('div');buttons.className='buttons';
+      const yes=text('button','Registrar resposta');
+      yes.type='button';
+      const no=text('button','Cancelar pendência','secondary');
+      no.type='button';
+      const submit=async action=>{
+        if(busy)return;
+        const answer=textarea.value.trim();
+        if(!answer){note('Escreva a resposta ou o motivo do cancelamento.');textarea.focus();return;}
+        const label=action==='answer'?'registrar esta decisão':'cancelar esta pendência';
+        if(!window.confirm('Deseja '+label+'? Isso não envia mensagem ao cliente.'))return;
+        const requestId='direction_'+(window.crypto&&crypto.randomUUID?crypto.randomUUID().replaceAll('-',''):String(Date.now())+String(Math.random()).slice(2));
+        busy=true;yes.disabled=no.disabled=true;refreshButton.disabled=true;
+        try{
+          await api('/api/direction/decisions/'+encodeURIComponent(decision.id),{method:'PATCH',
+            body:JSON.stringify({action,answer,version:decision.version,confirmed:true,requestId})});
+          note('Decisão registrada no histórico interno.');
+          await refresh();
+        }catch(e){note('Não foi possível confirmar o registro. Atualize a lista antes de tentar novamente. '+e.message);}
+        finally{busy=false;yes.disabled=no.disabled=false;refreshButton.disabled=false;}
+      };
+      yes.addEventListener('click',()=>submit('answer'));
+      no.addEventListener('click',()=>submit('cancel'));
+      buttons.append(yes,no);
+      article.append(buttons);
+    }else if(decision.answer){
+      article.append(text('p',decision.answer,'answer'));
+    }
+    return article;
+  }
+  async function refresh(){
+    if(busy)return;
+    refreshButton.disabled=true;
+    list.replaceChildren();
+    try{
+      const result=await api('/api/direction/decisions?status='+encodeURIComponent(filter.value));
+      if(!Array.isArray(result.decisions))throw Error('Resposta inválida do servidor.');
+      if(!result.decisions.length)list.append(text('p','Nenhuma decisão neste filtro.','empty'));
+      else for(const decision of result.decisions)list.append(card(decision));
+      if(!message.textContent.startsWith('Decisão registrada'))note('');
+    }catch(e){note('Fila indisponível: '+e.message);}
+    finally{refreshButton.disabled=false;}
+  }
+  refreshButton.addEventListener('click',refresh);
+  filter.addEventListener('change',refresh);
+  refresh();
+})();
+</script>
+</body>
+</html>
