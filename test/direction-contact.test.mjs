@@ -33,6 +33,8 @@ test('contato da direcao nao recebe IA de clientes nem cadastro automatico',asyn
   assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM ai_jobs').get().n,0);
   assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM messages WHERE direction=?').get('out').n,0);
   assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM notion_client_operations').get().n,0);
+  assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM service_events').get().n,0);
+  assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM notion_client_summaries').get().n,0);
   assert.equal(app.customerContext.view(chat.id).mode,'human');
   assert.deepEqual(sent,[]);
   assert.throws(()=>app.ai.release(chat),{status:403});
