@@ -223,7 +223,7 @@ export function createNotionContext(db,config,transport,options={}){
             run("UPDATE context_lookup_jobs SET state='commercial',error=NULL WHERE conversation_id=? AND last_received=?",c.id,job.last_received);continue;
           }
           const result=await resolve(c,guard);
-          if(automaticContacts()&&result.state==='not_found'&&guard()){
+          if(automaticContacts()&&result.state==='not_found'&&!options.isDirectionContact?.(c.phone)&&guard()){
             const name=/[A-Za-zÀ-ÿ]/.test(c.name)?c.name.slice(0,120):'Contato '+canonicalPhone(c.phone);
             await createClient(c,{name,version:context(c.id).version,requestId:'automatic-contact',guard},systemActor);
             result.state='created';
