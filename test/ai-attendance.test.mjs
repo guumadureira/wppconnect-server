@@ -195,13 +195,13 @@ test('assumir enquanto o modelo trabalha cancela a resposta e preserva controle 
 test('resposta pelo aplicativo Business pausa a IA mesmo durante geração',async t=>{
   let started,finish;const began=new Promise(r=>started=r),waiting=new Promise(r=>finish=r);
   const f=fixture(t,{},async url=>{if(url.includes('openai.com')){started();await waiting;}});const c=f.incoming();const work=f.app.ai.process();await began;
-  f.app.intake({metadata:{phone_number_id:'test-phone'},message_echoes:[{id:'human-echo',to:phone,type:'text',text:{body:'Vou cuidar disso.'},timestamp:Math.floor(Date.now()/1000)}]},'smb_message_echoes');finish();await work;
+  f.app.intake({metadata:{phone_number_id:'test-phone'},message_echoes:[{id:'human-echo',from:'5544000000002',to:phone,type:'text',text:{body:'Vou cuidar disso.'},timestamp:Math.floor(Date.now()/1000)}]},'smb_message_echoes');finish();await work;
   assert.equal(f.calls.length,1);assert.equal(f.app.customerContext.view(c.id).mode,'human');
 });
 
 test('eco humano mantém autoria, deduplica e entra no contexto após liberação explícita',async t=>{
   const f=fixture(t),c=f.incoming();
-  const echo={metadata:{phone_number_id:'test-phone'},message_echoes:[{id:'echo-context',to:phone,type:'text',text:{body:'Combinamos conferir o projeto na sexta-feira.'},timestamp:Math.floor(Date.now()/1000)}]};
+  const echo={metadata:{phone_number_id:'test-phone'},message_echoes:[{id:'echo-context',from:'5544000000002',to:phone,type:'text',text:{body:'Combinamos conferir o projeto na sexta-feira.'},timestamp:Math.floor(Date.now()/1000)}]};
   f.app.intake(echo,'smb_message_echoes');f.app.intake(echo,'smb_message_echoes');
   await f.app.ai.process();assert.equal(f.calls.length,0);
   const saved=f.app.db.prepare("SELECT * FROM messages WHERE provider_id='echo-context'").all();
@@ -355,4 +355,27 @@ test('falha de atualização do Notion permite orientação geral sem apresentar
   assert.equal(input.context.notionUnavailable,true);assert.equal(input.context.notion,null);assert.deepEqual(input.context.notionHistory,[]);
   assert.equal(f.app.customerContext.view(c.id).mode,'assisted');assert.equal(f.app.ai.status().handoffs.length,0);
   assert.ok(!req.body.input[0].content.includes('private remote details'));
+});
+
+test('eco antigo entregue depois do cliente nao altera a ordem causal do contexto',async t=>{
+  const f=fixture(t),now=Math.floor(Date.now()/1000);
+  const c=f.incoming('Primeira pergunta',phone,{timestamp:now-20});
+  await f.app.ai.process();
+  f.incoming('Cliente enviou dado mais recente',phone,{timestamp:now-3});
+  f.app.intake({metadata:{phone_number_id:'test-phone',display_phone_number:'5544000000002'},
+    message_echoes:[{id:'human-delayed-echo',from:'5544000000002',to:phone,
+      type:'text',text:{body:'Mensagem anterior escrita no celular'},timestamp:now-12}]},'smb_message_echoes');
+  assert.equal(f.app.customerContext.view(c.id).mode,'human');
+  await f.app.ai.process();
+  assert.equal(f.calls.filter(x=>x.url.includes('openai.com')).length,1);
+  f.app.db.prepare("UPDATE conversation_context SET mode='assisted' WHERE conversation_id=?").run(c.id);
+  f.app.ai.release(c);
+  f.incoming('O que ficou combinado agora?',phone,{timestamp:now});
+  await f.app.ai.process();
+  const input=JSON.parse(f.calls.filter(x=>x.url.includes('openai.com')).at(-1).body.input[0].content);
+  const bodies=input.messages.map(m=>m.text);
+  assert.ok(bodies.indexOf('Mensagem anterior escrita no celular')<bodies.indexOf('Cliente enviou dado mais recente'));
+  assert.equal(bodies.at(-1),'O que ficou combinado agora?');
+  assert.ok(input.turn.unansweredMessageIds.length>=2);
+  assert.equal(f.calls.filter(x=>x.url.includes('openai.com')).length,2);
 });

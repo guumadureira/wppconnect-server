@@ -16,6 +16,7 @@ import {createOperatorChat} from './operator-chat.mjs';
 import {createOperatorContext} from './operator-context.mjs';
 import {samePhone,normalizeContactPhone} from './contact-phone.mjs';
 import {createDirectionContactGuard} from './direction-contact.mjs';
+import {createCoexistenceDiagnostics} from './coexistence-diagnostics.mjs';
 import {createAIQuality} from './ai-quality.mjs';
 
 const derive = promisify(scrypt);
@@ -47,6 +48,7 @@ export function createCentral(config = process.env, transport = fetch, options =
     INSERT OR IGNORE INTO settings(id) VALUES(1);
     CREATE TABLE IF NOT EXISTS alerts(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,kind TEXT NOT NULL,due INTEGER NOT NULL,delivered INTEGER NOT NULL DEFAULT 0,attempted INTEGER);
     CREATE TABLE IF NOT EXISTS incoming_receipts(sequence INTEGER PRIMARY KEY AUTOINCREMENT,message_id TEXT UNIQUE NOT NULL,conversation_id TEXT NOT NULL,received INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS whatsapp_coexistence_observations(field TEXT PRIMARY KEY,deliveries INTEGER NOT NULL DEFAULT 0,last_seen INTEGER NOT NULL);
   `);
   if (!db.prepare('PRAGMA table_info(sessions)').all().some(column => column.name === 'signature_name')) db.exec('ALTER TABLE sessions ADD COLUMN signature_name TEXT');
   const get = (sql, ...args) => db.prepare(sql).get(...args);
@@ -80,6 +82,7 @@ export function createCentral(config = process.env, transport = fetch, options =
   const rejectWebhook = (status, message, reason) => { throw Object.assign(new Error(message), {status,webhookReason:reason}); };
   const attempts = new Map();
   const signup = createWhatsAppSignup(config, db, transport);
+  const coexistenceDiagnostics=createCoexistenceDiagnostics(db,config,transport,{ready:!!ready});
   const tick = () => {
     const minutes = get('SELECT minutes FROM settings WHERE id=1').minutes;
     for (const c of all("SELECT * FROM conversations WHERE status='open'")) {
@@ -107,12 +110,25 @@ export function createCentral(config = process.env, transport = fetch, options =
   function intake(value, field = 'messages') {
     const result = {recordedMessages:0,duplicates:0,ignoredNumberEvents:0,invalidMessages:0,sendFailure:null};
     if (String(value.metadata?.phone_number_id) !== String(config.WHATSAPP_PHONE_NUMBER_ID)) {result.ignoredNumberEvents++;return result;}
-    const incoming = field === 'smb_message_echoes' ? (value.message_echoes || []) : (value.messages || []);
+    // Persist only event-type counts, never raw webhook payloads or customer identities.
+    if(['messages','smb_message_echoes','history','smb_app_state_sync'].includes(field)){
+      run('INSERT INTO whatsapp_coexistence_observations(field,deliveries,last_seen) VALUES(?,1,?) ON CONFLICT(field) DO UPDATE SET deliveries=deliveries+1,last_seen=excluded.last_seen',field,now());
+    }
+    // History and contact-state sync require a separate, user-approved backfill.
+    // Never reinterpret their payload as a new customer message.
+    if(!['messages','smb_message_echoes'].includes(field))return result;
+    const incoming = field === 'smb_message_echoes' ? (Array.isArray(value.message_echoes)?value.message_echoes:[]) : (Array.isArray(value.messages)?value.messages:[]);
     for (const m of incoming) {
-      if (!m.id) {result.invalidMessages++;continue;}
+      if(typeof m?.id!=='string'||!m.id||m.id.length>256) {result.invalidMessages++;continue;}
       if (get('SELECT id FROM messages WHERE provider_id=?', m.id)) {result.duplicates++;continue;}
       const echo = field === 'smb_message_echoes';
-      const phone = clean(echo ? m.to : m.from, 30);
+      if(echo){
+        const from=String(m.from||'').replace(/\D/g,''),display=String(value.metadata?.display_phone_number||'').replace(/\D/g,'');
+        const authorized=String(config.META_COEXISTENCE_PHONE_NUMBER||'').replace(/\D/g,'');
+        if(!from||(display&&display!==from)||(authorized&&authorized!==from)){result.invalidMessages++;continue;}
+      }
+      const rawPhone=clean(echo?m.to:m.from,30);
+      const phone=/^[+()0-9\s-]{5,30}$/.test(rawPhone)?rawPhone.replace(/\D/g,''):'';
       if (!/^\d{5,20}$/.test(phone)) {result.invalidMessages++;continue;}
       const timestamp = Number(m.timestamp) * 1000;
       const at = Number.isFinite(timestamp) && timestamp > 0 ? Math.min(timestamp, now()) : now();
@@ -132,6 +148,7 @@ export function createCentral(config = process.env, transport = fetch, options =
       result.recordedMessages++;
       if (echo) {
         run('UPDATE conversations SET pending_since=CASE WHEN last_inbound<? THEN NULL ELSE pending_since END,updated=MAX(updated,?) WHERE id=?', at, at, c.id);
+        customerContext.receivedBusinessEcho(c.id,messageId,body);
       } else {
         run('INSERT INTO incoming_receipts(message_id,conversation_id,received) VALUES(?,?,?)',messageId,c.id,now());
         customerContext.receivedMessage(c.id,messageId,body);
@@ -143,6 +160,8 @@ export function createCentral(config = process.env, transport = fetch, options =
       }
       ai.incoming(get('SELECT * FROM conversations WHERE id=?',c.id),get('SELECT * FROM messages WHERE id=?',messageId),{fresh,echo,type:m.type});
       if(!echo)customerContext.queueLookup(get('SELECT * FROM conversations WHERE id=?',c.id));
+      else if(!get('SELECT client_id FROM conversation_context WHERE conversation_id=?',c.id)?.client_id)
+        customerContext.queueLookup(get('SELECT * FROM conversations WHERE id=?',c.id),{lookupOnly:true});
     }
     for (const s of value.statuses || []) {
       if (!['sent','delivered','read','failed'].includes(s.status)) continue;
@@ -410,11 +429,17 @@ export function createCentral(config = process.env, transport = fetch, options =
         if (url.pathname === '/api/whatsapp/signup/complete' && req.method === 'POST') return reply(200,await signup.complete(hash(token),origin,body));
         fail(405,'Método não permitido.');
       }
+      if(url.pathname==='/api/coexistence/verify'&&req.method==='POST'){
+        if(user.role!=='admin')fail(403,'Somente administradores podem conferir a coexistência.');
+        return reply(200,await coexistenceDiagnostics.inspect());
+      }
       if(url.pathname==='/api/connection-status' && req.method==='GET'){
         if(user.role!=='admin')fail(403,'Somente administradores podem consultar a configuração.');
         const required=['WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_ACCESS_TOKEN','META_APP_SECRET','WEBHOOK_VERIFY_TOKEN','META_GRAPH_VERSION'];
         const businessAppEchoes=get("SELECT COUNT(*) AS recorded,MAX(created) AS lastMessageAt FROM messages WHERE direction='out' AND agent_name='Aplicativo Business (atendente não identificado)'");
-        return reply(200,{mode:live?'live':'demo',credentialsConfigured:!!ready,connectionVerified:false,missing:required.filter(name=>!config[name]),webhookPath:'/webhooks/whatsapp',publicHttps:origin.startsWith('https://'),webhook,businessAppEchoes,lastSendFailure});
+        const businessAppNotionEvents=all("SELECT sync_state,COUNT(*) AS count FROM service_events WHERE event_key LIKE 'business-app:%' GROUP BY sync_state ORDER BY sync_state");
+        const coexistenceObservations=all('SELECT field,deliveries,last_seen AS lastSeenAt FROM whatsapp_coexistence_observations ORDER BY field');
+        return reply(200,{mode:live?'live':'demo',credentialsConfigured:!!ready,connectionVerified:false,missing:required.filter(name=>!config[name]),webhookPath:'/webhooks/whatsapp',publicHttps:origin.startsWith('https://'),webhook,businessAppEchoes,businessAppNotionEvents,coexistenceObservations,historyBackfillImplemented:false,contactSyncImplemented:false,lastSendFailure});
       }
       if (url.pathname==='/api/logout' && req.method==='POST') {
         if(token)run('DELETE FROM sessions WHERE token=?',hash(token));
