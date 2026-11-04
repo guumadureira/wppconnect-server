@@ -14,10 +14,15 @@ const intakeSchema={type:'object',additionalProperties:false,required:['ready','
 const schema={type:'object',additionalProperties:false,required:['reply','summary','missing','nextStep','kind','handoff','reason','intake'],properties:{reply:{type:'string',maxLength:700},summary:{type:'string'},missing:{type:'string'},nextStep:{type:'string'},kind:{type:'string',enum:kinds},handoff:{type:'boolean'},reason:{type:'string'},intake:intakeSchema}};
 const supplierSchema={type:'object',additionalProperties:false,required:['name','description','category','sourceMessageId','complete'],properties:{name:{type:'string',maxLength:120},description:{type:'string',maxLength:240},category:{type:'string',enum:supplierCategories},sourceMessageId:{type:'string',maxLength:120},complete:{type:'boolean'}}};
 schema.required.push('supplier');schema.properties.supplier={anyOf:[supplierSchema,{type:'null'}]};
+const directorDecisionSchema={type:'object',additionalProperties:false,required:['required','category','question','basis'],properties:{
+  required:{type:'boolean'},category:{type:'string',enum:['tecnica','comercial','administrativa','nenhuma']},
+  question:{type:'string',maxLength:500},basis:{type:'string',maxLength:1000}
+}};
+schema.required.push('directorDecision');schema.properties.directorDecision=directorDecisionSchema;
 const fail=(status,message)=>{throw Object.assign(new Error(message),{status});};
 const month=()=>new Date().toISOString().slice(0,7);
 
-export function createAIAttendance(db,config,transport,context,{ready=false,debounceMs=2500,media,suppliers,importedHistory}={}){
+export function createAIAttendance(db,config,transport,context,{ready=false,debounceMs=2500,media,suppliers,isDirectionContact=()=>false,directionDecisions,globalContext,importedHistory}={}){
   const get=(sql,...a)=>db.prepare(sql).get(...a),all=(sql,...a)=>db.prepare(sql).all(...a),run=(sql,...a)=>db.prepare(sql).run(...a);
   db.exec(`CREATE TABLE IF NOT EXISTS ai_jobs(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL REFERENCES conversations(id),message_id TEXT UNIQUE NOT NULL REFERENCES messages(id),epoch INTEGER NOT NULL,state TEXT NOT NULL,created INTEGER NOT NULL,updated INTEGER NOT NULL,result TEXT,error TEXT,cost_usd REAL NOT NULL DEFAULT 0,billing_month TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS ai_control(conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),epoch INTEGER NOT NULL DEFAULT 0,handoff TEXT NOT NULL DEFAULT '');`);
@@ -42,11 +47,13 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
   }
   function release(conversation){
     if(!enabled())fail(503,'Configure a chave, o piloto, o limite de consumo e a conexão WhatsApp antes de liberar a IA.');
+    if(isDirectionContact(conversation.phone))fail(403,'Contatos internos da direção não podem ser liberados no atendimento automático de clientes.');
     if(!allowed(conversation.phone))fail(403,'Este telefone não está autorizado no piloto da IA.');
     ensure(conversation.id);run("UPDATE ai_control SET epoch=epoch+1,handoff='' WHERE conversation_id=?",conversation.id);
   }
   function incoming(conversation,message,{fresh=false,echo=false,type='text'}={}){
     if(echo){pause(conversation.id);return;}
+    if(isDirectionContact(conversation.phone)){pause(conversation.id,'Contato interno da direção: atendimento automático a clientes desativado.');return;}
     if(!enabled()||!allowed(conversation.phone))return;
     const c=context.view(conversation.id);
     if(fresh&&!conversation.owner_id){run("UPDATE conversation_context SET mode='assisted',version=version+1 WHERE conversation_id=?",conversation.id);}
@@ -63,7 +70,7 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
   }
   const valid=job=>{
     const c=get('SELECT *,rowid AS chat_row FROM conversations WHERE id=?',job.conversation_id),control=ensure(job.conversation_id),ctx=context.view(job.conversation_id);
-    return !stopped&&enabled()&&allowed(c.phone)&&c.status==='open'&&ctx.mode==='assisted'&&control.epoch===job.epoch&&(job.contextVersion===undefined||ctx.version===job.contextVersion)&&c.last_received===get('SELECT rowid AS n FROM messages WHERE id=?',job.message_id)?.n&&Date.now()-c.last_inbound<24*3600000;
+    return !stopped&&enabled()&&allowed(c.phone)&&!isDirectionContact(c.phone)&&c.status==='open'&&ctx.mode==='assisted'&&control.epoch===job.epoch&&(job.contextVersion===undefined||ctx.version===job.contextVersion)&&c.last_received===get('SELECT rowid AS n FROM messages WHERE id=?',job.message_id)?.n&&Date.now()-c.last_inbound<24*3600000;
   };
   function resultView(id){const row=get('SELECT state,result,error,updated FROM ai_jobs WHERE conversation_id=? ORDER BY created DESC,rowid DESC LIMIT 1',id);return row?{...row,result:row.result?JSON.parse(row.result):null,handoff:ensure(id).handoff}:null;}
   function validated(result){
@@ -73,6 +80,15 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
     for(const [k,max]of Object.entries({reply:700,summary:1800,missing:1000,nextStep:1000,reason:500}))if(typeof result[k]!=='string'||result[k].length>max||/\0/.test(result[k]))throw Error('Invalid output');
     if(/https?:\/\/|www\.|sk-proj-|Bearer /i.test(result.reply))throw Error('Unsafe output');
     if(/R\$|\b(?:custa|custará|garantimos)\b|\b(?:prazo|entrega).{0,35}\d/i.test(result.reply))throw Error('Unapproved commitment');
+    const decision=result.directorDecision;
+    if(decision!==undefined){
+      if(!decision||typeof decision.required!=='boolean'||!['tecnica','comercial','administrativa','nenhuma'].includes(decision.category)
+        ||typeof decision.question!=='string'||typeof decision.basis!=='string'
+        ||decision.question.length>500||decision.basis.length>1000)throw Error('Invalid director decision');
+      if(decision.required&&(!result.handoff||result.kind==='comercial'||decision.category==='nenhuma'
+        ||!decision.question.trim()||!decision.basis.trim()))throw Error('Unauthorized director decision');
+      if(!decision.required&&(decision.category!=='nenhuma'||decision.question||decision.basis))throw Error('Unexpected director decision');
+    }
     if(!result.reply.trim()&&!result.handoff)throw Error('Empty output');return result;
   }
   function supplierEvidence(result,history){
@@ -117,14 +133,22 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
       if(ctx.client_id){try{await context.refresh(conversation);}catch{/* General attendance can continue without presenting stale operational status as current. */}ctx=context.view(conversation.id);}
       job.contextVersion=ctx.version;
       if(!valid(job)){run("UPDATE ai_jobs SET state='cancelled' WHERE id=?",job.id);return;}
-      // Meta timestamps have second precision; replies have milliseconds. Use the
-      // persisted arrival order (also used by last_received) to preserve turn order.
+      // Arrival order is authoritative for normal traffic: provider timestamps are
+      // rounded to seconds and should not reorder a fast client/team exchange.
       const history=all("SELECT rowid AS arrival,id,direction,body,agent_name,created FROM messages WHERE conversation_id=? AND (direction='in' OR status IN ('sent','delivered','read')) ORDER BY rowid DESC LIMIT 24",conversation.id).reverse();
       const lastReply=get("SELECT rowid AS arrival,id,direction,body,agent_name,created FROM messages WHERE conversation_id=? AND direction='out' AND status IN ('sent','delivered','read') ORDER BY rowid DESC LIMIT 1",conversation.id);
-      // A burst of customer messages must not remove the team's last question
-      // from context or make an established conversation look like a new one.
       if(lastReply&&!history.some(m=>m.id===lastReply.id))history.unshift(lastReply);
-      const turn=attendanceTurn(history,lastReply);
+      // Only relocate a provably delayed Business-app echo (>2s older). Never
+      // infer order from timestamp alone for ordinary incoming/API messages.
+      for(let index=0;index<history.length;index++){
+        const echo=history[index];
+        if(echo.direction!=='out'||echo.agent_name!=='Aplicativo Business (atendente não identificado)')continue;
+        const olderIndex=history.findIndex((other,i)=>i<index&&other.created>echo.created+2000);
+        if(olderIndex!==-1){history.splice(index,1);history.splice(olderIndex,0,echo);}
+      }
+      const orderedHistory=history.map((m,index)=>({...m,arrival:index+1}));
+      const orderedLastReply=orderedHistory.filter(m=>m.direction==='out').at(-1)||null;
+      const turn=attendanceTurn(orderedHistory,orderedLastReply);
       const transcripts=new Map();
       if(String(config.AI_AUDIO_ENABLED)==='true')for(const message of history){
         if(message.direction!=='in'||!get("SELECT 1 FROM message_media mm JOIN media m ON m.id=mm.media_id WHERE mm.message_id=? AND m.kind='audio'",message.id))continue;
@@ -138,7 +162,9 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
       const attachments=all('SELECT m.kind,m.name,m.state,mm.message_id FROM message_media mm JOIN media m ON m.id=mm.media_id JOIN messages x ON x.id=mm.message_id WHERE x.conversation_id=? ORDER BY x.rowid DESC LIMIT 5',conversation.id);
       // Only the allowlisted operational subset from the Notion adapter, never a raw page.
       const snapshot=ctx.snapshot&&!ctx.last_error?{attendance:ctx.snapshot.attendance,client:{name:ctx.snapshot.client?.name,stage:ctx.snapshot.client?.stage,registration:ctx.snapshot.client?.registration,attendanceSummary:ctx.snapshot.client?.attendanceSummary,attendanceMissing:ctx.snapshot.client?.attendanceMissing,attendanceNext:ctx.snapshot.client?.attendanceNext,attendanceAt:ctx.snapshot.client?.attendanceAt},sections:Object.fromEntries(Object.entries(ctx.snapshot.sections||{}).map(([k,v])=>[k,{configured:v.configured,complete:v.complete,error:!!v.error,rows:(v.rows||[]).slice(0,8).map(r=>({title:r.title,status:r.status,due:r.due,next:r.next,contract:r.contract}))}]))}:null;
-      const input=JSON.stringify({currentDate:new Date().toISOString(),turn,clientLookup,referenceGuide:knowledgeFor(history.slice(-8).filter(m=>m.direction==='in').map(m=>transcripts.get(m.id)||m.body).join(' '),Date.now(),ctx.summary+' '+(snapshot?.client?.attendanceSummary||'')),serviceGuides:serviceGuidesFor({latest:transcripts.get(job.message_id)||history.at(-1)?.body||'',recent:history.slice(-8).map(m=>transcripts.get(m.id)||m.body).join(' '),summary:ctx.summary}),importedHistory:importedHistory?.(conversation.id),registrationAvailable:String(config.AI_AUTO_REGISTER)==='true'&&context.status().enabled,attachments,context:{notionUnavailable:!!ctx.last_error,clientLinked:!!ctx.client_id,summary:ctx.summary,missing:ctx.missing,nextStep:ctx.next_step,notion:snapshot,history:ctx.history.slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next_step,source:e.source,qualification:e.qualification,at:e.created})),notionHistory:(!ctx.last_error&&ctx.snapshot?.history?.rows||[]).slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next,source:e.source,qualification:e.qualification,at:e.at}))},messages:history.map(m=>({id:m.id,from:m.direction==='in'?'contato':m.agent_name||'equipe',text:(transcripts.get(m.id)||m.body).slice(0,transcripts.has(m.id)?8000:2000),...(transcripts.has(m.id)?{source:'transcricao_automatica',original:'audio'}:{})}))});
+      const generalServiceReference=globalContext?.get?await globalContext.get():{available:false};
+      if(!valid(job))return;
+      const input=JSON.stringify({generalServiceReference,currentDate:new Date().toISOString(),turn,clientLookup,referenceGuide:knowledgeFor(history.slice(-8).filter(m=>m.direction==='in').map(m=>transcripts.get(m.id)||m.body).join(' '),Date.now(),ctx.summary+' '+(snapshot?.client?.attendanceSummary||'')),serviceGuides:serviceGuidesFor({latest:transcripts.get(job.message_id)||history.at(-1)?.body||'',recent:history.slice(-8).map(m=>transcripts.get(m.id)||m.body).join(' '),summary:ctx.summary}),importedHistory:importedHistory?.(conversation.id),registrationAvailable:String(config.AI_AUTO_REGISTER)==='true'&&context.status().enabled,attachments,context:{notionUnavailable:!!ctx.last_error,clientLinked:!!ctx.client_id,summary:ctx.summary,missing:ctx.missing,nextStep:ctx.next_step,notion:snapshot,history:ctx.history.slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next_step,source:e.source,qualification:e.qualification,at:e.created})),notionHistory:(!ctx.last_error&&ctx.snapshot?.history?.rows||[]).slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next,source:e.source,qualification:e.qualification,at:e.at}))},messages:history.map(m=>({id:m.id,from:m.direction==='in'?'contato':m.agent_name||'equipe',text:(transcripts.get(m.id)||m.body).slice(0,transcripts.has(m.id)?8000:2000),...(transcripts.has(m.id)?{source:'transcricao_automatica',original:'audio'}:{})}))});
       if(Buffer.byteLength(input)>36000)throw Error('Context too large');
       const body={model:MODEL,store:false,instructions,input:[{role:'user',content:input}],reasoning:{effort:'none'},max_output_tokens:MAX_OUTPUT,text:{format:{type:'json_schema',name:'domum_attendance',strict:true,schema}}};
       // Reserve by UTF-8 bytes (a conservative upper bound for input tokens), including schema/overhead.
@@ -182,6 +208,9 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
       const stillCurrent=valid(job);
       context.aiRecord(conversation.id,job.id,result,result.handoff&&stillCurrent,{expectedVersion:job.contextVersion,updateCurrent:stillCurrent,clientId:ctx.client_id});
       if(stillCurrent)job.contextVersion=context.view(conversation.id).version;
+      if(stillCurrent&&result.handoff&&result.directorDecision?.required&&result.kind!=='comercial'){
+        directionDecisions?.fromAI(conversation.id,job.id,result.directorDecision);
+      }
       if(result.kind==='comercial'&&result.supplier?.complete&&!result.handoff&&result.reply.trim()&&valid(job)){
         const closed=run("UPDATE conversations SET status='closed',pending_since=NULL WHERE id=? AND last_received=? AND status='open'",conversation.id,conversation.last_received);
         if(closed.changes)pause(conversation.id);

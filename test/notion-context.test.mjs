@@ -329,3 +329,148 @@ test('busca em fila reconhece cliente mesmo com atendimento por IA desligado',as
  assert.equal(f.remote.clientCreates,0);
  assert.equal(f.app.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE direction='out'").get().n,0);
 });
+
+test('eco do Business vira evento confiavel no Notion uma unica vez e preserva autoria desconhecida',async t=>{
+  const f=await fixture(t);
+  await f.bind();
+  await f.app.customerContext.processQueue(true);
+  const initial=f.remote.historyCreates;
+  const sentAt=Math.floor((Date.now()-12000)/1000);
+  const echo={metadata:{phone_number_id:'test-phone',display_phone_number:'5544000000002'},message_echoes:[
+    {id:'wamid.echo-dedup-1',from:'5544000000002',to:f.chat.phone,
+      type:'text',text:{body:'A proposta segue em análise; conferirei amanhã.'},timestamp:sentAt}
+  ]};
+  f.app.intake(echo,'smb_message_echoes');
+  f.app.intake(echo,'smb_message_echoes');
+  let events=(await f.view()).history.filter(e=>e.kind==='mensagem enviada');
+  assert.equal(events.length,1);
+  assert.equal(events[0].source,'Atendente');
+  assert.match(events[0].actor,/autor individual não identificado/);
+  assert.equal(events[0].qualification,'Confirmado');
+  assert.equal(events[0].sync_state,'pending');
+  assert.equal(f.app.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE provider_id='wamid.echo-dedup-1'").get().n,1);
+  await f.app.customerContext.processQueue(true);
+  events=(await f.view()).history.filter(e=>e.kind==='mensagem enviada');
+  assert.equal(events[0].sync_state,'synced');
+  assert.equal(f.remote.historyCreates,initial+1);
+  const page=f.remote.rows[ids.history].find(p=>p.properties['ID do evento'].rich_text[0].text.content===events[0].id);
+  assert.ok(page);
+  assert.equal(page.properties.Origem.select.name,'Atendente');
+  assert.equal(page.properties.Qualificação.select.name,'Confirmado');
+  assert.match(page.properties.Resumo.rich_text[0].text.content,/proposta segue em análise/);
+  assert.equal(Date.parse(page.properties['Data do acontecimento'].date.start),sentAt*1000);
+  const status=await f.request('/api/connection-status','GET',undefined,f.cookie);
+  assert.equal(status.status,200);
+  assert.equal(status.body.businessAppEchoes.recorded,1);
+  assert.equal(status.body.coexistenceObservations.find(x=>x.field==='smb_message_echoes').deliveries,2);
+  assert.equal(status.body.businessAppNotionEvents.find(x=>x.sync_state==='synced').count,1);
+  assert.equal(status.body.connectionVerified,false);
+});
+
+test('eco para contato sem cadastro nao cria cliente automaticamente; espera vinculo confirmado',async t=>{
+  const f=await fixture(t,{config:{NOTION_AUTO_REGISTER_CONTACTS:'true'}});
+  const phone='5544000000099';
+  f.app.intake({metadata:{phone_number_id:'test-phone',display_phone_number:'5544000000002'},
+    message_echoes:[{id:'wamid.new-echo-1',from:'5544000000002',to:phone,
+      timestamp:Math.floor(Date.now()/1000),type:'text',text:{body:'Conferimos os documentos.'}}]},'smb_message_echoes');
+  const newChat=f.app.db.prepare('SELECT * FROM conversations WHERE phone=?').get(phone);
+  assert.ok(newChat);
+  const event=f.app.customerContext.view(newChat.id).history.find(e=>e.kind==='mensagem enviada');
+  assert.ok(event);
+  assert.equal(event.sync_state,'waiting_link');
+  const job=f.app.db.prepare('SELECT lookup_only FROM context_lookup_jobs WHERE conversation_id=?').get(newChat.id);
+  assert.equal(job.lookup_only,1);
+  await f.app.customerContext.processLookups();
+  await f.app.customerContext.processQueue(true);
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM notion_client_operations WHERE conversation_id=?').get(newChat.id).n,0);
+  assert.equal(f.app.customerContext.view(newChat.id).history.find(e=>e.kind==='mensagem enviada').sync_state,'waiting_link');
+});
+
+test('eco enviado a contato interno nao grava evento como cliente',async t=>{
+  const director='5544000000098';
+  const f=await fixture(t,{config:{DIRECTION_CONTACT_PHONES:director,NOTION_AUTO_REGISTER_CONTACTS:'true'}});
+  f.app.intake({metadata:{phone_number_id:'test-phone',display_phone_number:'5544000000002'},
+    message_echoes:[{id:'wamid.director-echo-1',from:'5544000000002',to:director,
+      timestamp:Math.floor(Date.now()/1000),type:'text',text:{body:'Mensagem administrativa interna.'}}]},'smb_message_echoes');
+  const c=f.app.db.prepare('SELECT id FROM conversations WHERE phone=?').get(director);
+  assert.ok(c);
+  assert.equal(f.app.customerContext.view(c.id).history.length,0);
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM messages WHERE conversation_id=? AND direction=?').get(c.id,'out').n,1);
+});
+
+test('diagnostico registra tipos historicos sem importar mensagens ou contatos indevidamente',async t=>{
+  const f=await fixture(t);
+  const initial=f.app.db.prepare('SELECT COUNT(*) AS n FROM messages').get().n;
+  f.app.intake({metadata:{phone_number_id:'test-phone'},
+    history:[{metadata:{phase:'recent',progress:50},threads:[{id:f.chat.phone,messages:[
+      {id:'history-not-imported',from:f.chat.phone,type:'text',text:{body:'Histórico antigo'}}]}]}]},'history');
+  f.app.intake({metadata:{phone_number_id:'test-phone'},state_sync:[{type:'contact',
+    contact:{full_name:'Cliente fictício',phone_number:f.chat.phone}}]},'smb_app_state_sync');
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM messages').get().n,initial);
+  const status=(await f.request('/api/connection-status','GET',undefined,f.cookie)).body;
+  assert.equal(status.historyBackfillImplemented,false);
+  assert.equal(status.contactSyncImplemented,false);
+  assert.equal(status.coexistenceObservations.find(x=>x.field==='history').deliveries,1);
+  assert.equal(status.coexistenceObservations.find(x=>x.field==='smb_app_state_sync').deliveries,1);
+});
+
+test('destinatario Business com +55 e separadores reutiliza a conversa; origem divergente e descartada',async t=>{
+  const f=await fixture(t,{config:{META_COEXISTENCE_PHONE_NUMBER:'5544000000002'}});
+  const count=f.app.db.prepare('SELECT COUNT(*) AS n FROM conversations').get().n;
+  const envelope={metadata:{phone_number_id:'test-phone',display_phone_number:'+55 (44) 00000-0002'},
+    message_echoes:[{id:'wamid.formatted-out',from:'5544000000002',to:'+55 (44) 99999-1234',
+      type:'text',text:{body:'Resposta via aplicativo'},timestamp:Math.floor(Date.now()/1000)}]};
+  // Exact match to the configured business sender; do not use a formatted number
+  // that drops a digit from the sender identity.
+  envelope.metadata.display_phone_number='5544000000002';
+  f.app.intake(envelope,'smb_message_echoes');
+  const saved=f.app.db.prepare("SELECT conversation_id FROM messages WHERE provider_id='wamid.formatted-out'").get();
+  assert.equal(saved.conversation_id,f.chat.id);
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM conversations').get().n,count);
+  f.app.intake({...envelope,message_echoes:[{...envelope.message_echoes[0],id:'wamid.forged-sender',from:'5544000000003'}]},'smb_message_echoes');
+  assert.equal(f.app.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE provider_id='wamid.forged-sender'").get().n,0);
+});
+
+test('eco isolado localiza cliente existente sem cadastro novo e sincroniza seu historico',async t=>{
+  const f=await fixture(t,{config:{NOTION_AUTO_REGISTER_CONTACTS:'true'}});
+  f.app.db.prepare('DELETE FROM context_lookup_jobs').run();
+  const initial=f.remote.clientCreates,phone=f.chat.phone;
+  const echo={metadata:{phone_number_id:'test-phone',display_phone_number:'5544000000002'},message_echoes:[
+    {id:'wamid.lookup-only-echo',from:'5544000000002',to:phone,
+      type:'text',text:{body:'Confirmei por mensagem que verificaremos a documentação.'},
+      timestamp:Math.floor(Date.now()/1000)}
+  ]};
+  f.app.intake(echo,'smb_message_echoes');
+  const before=f.app.db.prepare('SELECT lookup_only FROM context_lookup_jobs WHERE conversation_id=?').get(f.chat.id);
+  assert.equal(before.lookup_only,1);
+  await f.app.customerContext.processLookups();
+  await f.app.customerContext.processQueue(true);
+  const current=f.app.customerContext.view(f.chat.id);
+  assert.equal(current.client_id,ids.client);
+  assert.equal(f.remote.clientCreates,initial);
+  const event=current.history.find(e=>e.kind==='mensagem enviada');
+  assert.equal(event.sync_state,'synced');
+});
+
+test('recebimento posterior remove restricao de lookupOnly sem perder mensagem anterior',async t=>{
+  const f=await fixture(t,{config:{NOTION_AUTO_REGISTER_CONTACTS:'true'}});
+  f.app.db.prepare('DELETE FROM context_lookup_jobs').run();
+  const phone='5544000000088';
+  f.remote.rows[ids.clients]=[];
+  f.app.intake({metadata:{phone_number_id:'test-phone',display_phone_number:'5544000000002'},
+    message_echoes:[{id:'wamid.only-first',from:'5544000000002',to:phone,
+      type:'text',text:{body:'Olá, posso ajudar?'},timestamp:Math.floor(Date.now()/1000)}]},'smb_message_echoes');
+  let chat=f.app.db.prepare('SELECT * FROM conversations WHERE phone=?').get(phone);
+  let lookup=f.app.db.prepare('SELECT lookup_only FROM context_lookup_jobs WHERE conversation_id=?').get(chat.id);
+  assert.equal(lookup.lookup_only,1);
+  f.app.intake({metadata:{phone_number_id:'test-phone'},messages:[
+    {id:'wamid.client-responds',from:phone,type:'text',text:{body:'Quero saber sobre regularização.'},
+      timestamp:Math.floor(Date.now()/1000)}]});
+  chat=f.app.db.prepare('SELECT * FROM conversations WHERE phone=?').get(phone);
+  lookup=f.app.db.prepare('SELECT lookup_only FROM context_lookup_jobs WHERE conversation_id=?').get(chat.id);
+  assert.equal(lookup.lookup_only,0);
+  await f.app.customerContext.processLookups();
+  await f.app.customerContext.processQueue(true);
+  assert.equal(f.remote.clientCreates,1);
+  assert.ok(f.app.customerContext.view(chat.id).history.some(e=>e.kind==='mensagem enviada'));
+});

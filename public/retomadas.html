@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Retomadas · Central Domum</title>
+<style>
+:root{--orange:#bd612b;--ink:#24282c;--muted:#56616c;--line:#dddcd7;--paper:#f8f7f4}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+header{background:#25282b;color:#fff;padding:20px max(20px,calc((100vw - 920px)/2))}
+header a{color:white;text-decoration:none;font-size:.9rem}
+h1{font-size:1.55rem;margin:10px 0 0}
+main{max-width:920px;padding:20px;margin:auto}
+section{background:#fff;border:1px solid var(--line);border-radius:12px;padding:18px;margin:14px 0}
+h2{font-size:1.13rem;margin:0 0 10px}
+p{margin:8px 0;overflow-wrap:anywhere}
+small{color:var(--muted)}
+.info{padding:12px 14px;background:#fff4eb;border-left:4px solid var(--orange)}
+.field{display:block;font-weight:600;margin:12px 0}
+input:not([type=checkbox]),select,textarea{display:block;width:100%;padding:10px;margin-top:5px;border:1px solid #bbb9b4;border-radius:8px;background:white;color:var(--ink);font:inherit}
+textarea{min-height:80px;resize:vertical}
+.check{display:flex;align-items:flex-start;gap:10px;margin:12px 0}
+.check input{margin-top:5px}
+button{padding:10px 13px;border:1px solid var(--orange);background:var(--orange);color:white;font:inherit;font-weight:600;border-radius:8px;cursor:pointer;margin:3px 4px 3px 0}
+button.secondary{background:white;color:var(--ink);border-color:var(--line)}
+button:disabled{opacity:.5;cursor:not-allowed}
+#status{min-height:24px;color:#984119}
+#consents,#history{white-space:pre-wrap;overflow-wrap:anywhere;border-radius:8px;background:#f2f1ee;padding:12px;margin-top:12px}
+details{margin-top:10px}
+</style>
+</head>
+<body>
+<header>
+  <a href="/">Voltar à Central</a>
+  <h1>Retomada de atendimento</h1>
+  <p>Modelos oficiais do WhatsApp · confirmação administrativa</p>
+</header>
+<main>
+  <p class="info">O envio livre continua limitado à janela oficial de 24 horas. Esta tela usa somente um modelo já aprovado pela Meta, com consentimento documentado e confirmação humana. O modelo pode gerar cobrança. Nenhum disparo é automático.</p>
+  <p id="status" role="status" aria-live="polite"></p>
+  <section>
+    <h2>1. Configuração e destinatário</h2>
+    <p id="config">Conferindo configuração…</p>
+    <label class="field" for="conversation">Conversa
+      <select id="conversation"><option value="">Selecione uma conversa</option></select>
+    </label>
+    <p id="lastInbound"></p>
+    <button type="button" id="reload" class="secondary">Atualizar</button>
+  </section>
+  <section>
+    <h2>2. Consentimento registrado</h2>
+    <p><small>Registre apenas autorização que esteja realmente documentada, com uma referência verificável. A marcação nesta tela não cria consentimento do cliente.</small></p>
+    <label class="field" for="category">Categoria
+      <select id="category"><option value="UTILITY">Utilidade</option><option value="MARKETING">Marketing</option></select>
+    </label>
+    <label class="field" for="source">Origem da autorização
+      <select id="source"><option value="whatsapp">Conversa no WhatsApp</option><option value="formulario">Formulário</option><option value="contrato">Contrato</option><option value="outro">Outra fonte verificável</option></select>
+    </label>
+    <label class="field" for="evidence">Referência da evidência (sem copiar dados sensíveis)
+      <textarea id="evidence" maxlength="240" placeholder="Ex.: autorização registrada em conversa em data conhecida"></textarea>
+    </label>
+    <button type="button" id="grant">Registrar autorização existente</button>
+    <button type="button" id="revoke" class="secondary">Registrar revogação</button>
+    <div id="consents">Selecione uma conversa.</div>
+  </section>
+  <section>
+    <h2>3. Preparar retomada</h2>
+    <p>Antes de enviar, confira na Meta o modelo, categoria e idioma; confira o destinatário e a cobrança aplicável. Não há campo para alterar o conteúdo aprovado.</p>
+    <label class="check"><input id="template-confirmed" type="checkbox"><span>Conferi que o modelo está aprovado no WhatsApp Manager.</span></label>
+    <label class="check"><input id="send-confirmed" type="checkbox"><span>Confirmei destinatário, autorização documentada e eventual custo.</span></label>
+    <button type="button" id="send">Enviar modelo aprovado</button>
+    <details><summary>Histórico de retomadas</summary><div id="history">Selecione uma conversa.</div></details>
+  </section>
+</main>
+<script>
+(function(){
+  'use strict';
+  const $=id=>document.getElementById(id),message=t=>$('status').textContent=t||'';
+  let configuration=null,conversations=[],working=false;
+  const requestId=()=> 'r_'+(window.crypto?.randomUUID?.().replaceAll('-','')||String(Date.now())+Math.random().toString(36).slice(2));
+  const date=value=>value?new Date(value).toLocaleString('pt-BR'):'não consta';
+  const current=()=>conversations.find(c=>c.id===$('conversation').value);
+  async function api(path,method='GET',body){
+    const response=await fetch(path,{method,credentials:'same-origin',cache:'no-store',
+      headers:{'content-type':'application/json'},body:body?JSON.stringify(body):undefined});
+    const json=await response.json().catch(()=>({}));
+    if(!response.ok)throw Error(json.error||'Operação não concluída ('+response.status+').');
+    return json;
+  }
+  function busy(value){
+    working=value;
+    for(const id of ['reload','grant','revoke','send'])$(id).disabled=value;
+  }
+  async function reload(){
+    if(working)return;
+    busy(true);
+    try{
+      const [settings,state]=await Promise.all([api('/api/template-resumption/status'),api('/api/state')]);
+      configuration=settings;conversations=Array.isArray(state.conversations)?state.conversations:[];
+      $('config').textContent=settings.enabled
+        ?'Modelo configurado: '+settings.name+' · idioma '+settings.language+'. O envio ainda depende de aprovação atual e consentimento.'
+        :'Envio desativado ou incompleto no servidor. É necessário configurar o modelo aprovado e a conta Meta.';
+      const selected=$('conversation').value;
+      $('conversation').replaceChildren();
+      const empty=document.createElement('option');empty.value='';empty.textContent='Selecione uma conversa';
+      $('conversation').append(empty);
+      for(const c of conversations){
+        const option=document.createElement('option');option.value=c.id;
+        option.textContent=(c.name||'Contato')+' · '+c.phone;
+        $('conversation').append(option);
+      }
+      $('conversation').value=conversations.some(c=>c.id===selected)?selected:'';
+      await showConversation();
+      message('');
+    }catch(e){message(e.message);}
+    finally{busy(false);}
+  }
+  async function showConversation(){
+    const c=current();
+    $('lastInbound').textContent=c?'Última mensagem recebida: '+date(c.last_inbound):'';
+    if(!c){$('consents').textContent='Selecione uma conversa.';$('history').textContent='Selecione uma conversa.';return;}
+    try{
+      const [consents,history]=await Promise.all([
+        api('/api/conversations/'+encodeURIComponent(c.id)+'/template-consent'),
+        api('/api/conversations/'+encodeURIComponent(c.id)+'/template-resumptions')]);
+      $('consents').textContent=consents.consents.length
+        ?consents.consents.map(x=>x.category+': '+(x.granted?'autorização registrada':'revogada')+' · '+x.source+' · '+date(x.updated)).join('\n')
+        :'Nenhuma autorização documentada nesta Central.';
+      $('history').textContent=history.resumptions.length
+        ?history.resumptions.map(x=>date(x.created)+' · '+x.category+' · '+x.name+' · '+x.state).join('\n')
+        :'Nenhum modelo enviado pela Central para esta conversa.';
+    }catch(e){message(e.message);}
+  }
+  async function consent(action){
+    if(working)return;
+    const c=current();
+    const evidence=$('evidence').value.trim();
+    if(!c||!evidence){message('Selecione uma conversa e informe a referência verificável da autorização ou revogação.');return;}
+    if(!window.confirm('Confirma o registro desta '+(action==='grant'?'autorização existente':'revogação')+'?'))return;
+    busy(true);
+    try{
+      await api('/api/conversations/'+encodeURIComponent(c.id)+'/template-consent','POST',
+        {requestId:requestId(),category:$('category').value,source:$('source').value,evidence,action});
+      message('Registro auditado na Central. Não houve envio de mensagem.');
+      await showConversation();
+    }catch(e){message(e.message);}
+    finally{busy(false);}
+  }
+  async function send(){
+    if(working)return;
+    const c=current();
+    if(!c){message('Selecione uma conversa.');return;}
+    if(!configuration?.enabled){message('Modelo de retomada desativado ou incompleto no servidor.');return;}
+    if(!$('template-confirmed').checked||!$('send-confirmed').checked){
+      message('Confirme o modelo aprovado, o destinatário, a autorização e o custo antes de enviar.');return;
+    }
+    if(!window.confirm('Enviar agora um modelo aprovado ao contato selecionado? Pode haver cobrança pela Meta.'))return;
+    busy(true);
+    try{
+      const result=await api('/api/conversations/'+encodeURIComponent(c.id)+'/template-resumptions','POST',
+        {requestId:requestId(),confirmed:true,approvedTemplateConfirmed:true});
+      message('Solicitação registrada: '+result.resumption.state+'. Confirme a entrega no histórico.');
+      await showConversation();
+    }catch(e){message('Envio não confirmado: '+e.message+' Não repita sem conferir o histórico e a Meta.');await showConversation();}
+    finally{busy(false);}
+  }
+  $('conversation').addEventListener('change',showConversation);
+  $('reload').addEventListener('click',reload);
+  $('grant').addEventListener('click',()=>consent('grant'));
+  $('revoke').addEventListener('click',()=>consent('revoke'));
+  $('send').addEventListener('click',send);
+  reload();
+})();
+</script>
+</body>
+</html>

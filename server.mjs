@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { createWhatsAppSignup } from './whatsapp-signup.mjs';
 import { createMediaStore } from './media.mjs';
 import { createNotionContext } from './notion-context.mjs';
+import {createNotionGlobalContext} from './notion-global-context.mjs';
 import { createAIAttendance, simulateAttendance } from './ai-attendance.mjs';
 import { createCentralMCP } from './central-mcp.mjs';
 import {createSupplierRegister} from './supplier-register.mjs';
@@ -15,7 +16,11 @@ import {createHistoryImport} from './history-import.mjs';
 import {createOperatorChat} from './operator-chat.mjs';
 import {createOperatorContext} from './operator-context.mjs';
 import {samePhone,normalizeContactPhone} from './contact-phone.mjs';
+import {createDirectionContactGuard} from './direction-contact.mjs';
+import {createCoexistenceDiagnostics} from './coexistence-diagnostics.mjs';
+import {createDirectionDecisions} from './direction-decisions.mjs';
 import {createAIQuality} from './ai-quality.mjs';
+import {createTemplateResumption} from './template-retomada.mjs';
 
 const derive = promisify(scrypt);
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -46,6 +51,7 @@ export function createCentral(config = process.env, transport = fetch, options =
     INSERT OR IGNORE INTO settings(id) VALUES(1);
     CREATE TABLE IF NOT EXISTS alerts(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,kind TEXT NOT NULL,due INTEGER NOT NULL,delivered INTEGER NOT NULL DEFAULT 0,attempted INTEGER);
     CREATE TABLE IF NOT EXISTS incoming_receipts(sequence INTEGER PRIMARY KEY AUTOINCREMENT,message_id TEXT UNIQUE NOT NULL,conversation_id TEXT NOT NULL,received INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS whatsapp_coexistence_observations(field TEXT PRIMARY KEY,deliveries INTEGER NOT NULL DEFAULT 0,last_seen INTEGER NOT NULL);
   `);
   if (!db.prepare('PRAGMA table_info(sessions)').all().some(column => column.name === 'signature_name')) db.exec('ALTER TABLE sessions ADD COLUMN signature_name TEXT');
   const get = (sql, ...args) => db.prepare(sql).get(...args);
@@ -61,10 +67,14 @@ export function createCentral(config = process.env, transport = fetch, options =
   const live = config.WHATSAPP_MODE === 'live';
   const media = createMediaStore(db,config,transport,live);
   let ai,manualHistory;
-  const customerContext = createNotionContext(db,config,transport,{requestIntervalMs:options.notionRequestIntervalMs,aiEnabled:()=>ai?.status().enabled||false});
+  const directionGuard=createDirectionContactGuard(config);
+  const customerContext = createNotionContext(db,config,transport,{requestIntervalMs:options.notionRequestIntervalMs,aiEnabled:()=>ai?.status().enabled||false,isDirectionContact:directionGuard.isDirectionContact});
+  const globalContext=createNotionGlobalContext(config,transport);
   const ready = live && ['WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_ACCESS_TOKEN','META_APP_SECRET','WEBHOOK_VERIFY_TOKEN','META_GRAPH_VERSION'].every(k => config[k]);
   const suppliers=createSupplierRegister(db,config,transport);
-  ai = createAIAttendance(db,config,transport,customerContext,{ready:!!ready,debounceMs:options.aiDebounceMs,media,suppliers,importedHistory:id=>manualHistory?.forAI(id)});
+  const directionDecisions=createDirectionDecisions(db,config);
+  const templateResumption=createTemplateResumption(db,config,transport,{ready:!!ready});
+  ai = createAIAttendance(db,config,transport,customerContext,{ready:!!ready,debounceMs:options.aiDebounceMs,media,suppliers,isDirectionContact:directionGuard.isDirectionContact,directionDecisions,globalContext,importedHistory:id=>manualHistory?.forAI(id)});
   manualHistory=createHistoryImport(db,customerContext,ai);
   const centralMCP=createCentralMCP(db,config,transport,{context:customerContext,ai,media,ready:!!ready});
   const operatorContext=createOperatorContext(db,customerContext);
@@ -78,6 +88,7 @@ export function createCentral(config = process.env, transport = fetch, options =
   const rejectWebhook = (status, message, reason) => { throw Object.assign(new Error(message), {status,webhookReason:reason}); };
   const attempts = new Map();
   const signup = createWhatsAppSignup(config, db, transport);
+  const coexistenceDiagnostics=createCoexistenceDiagnostics(db,config,transport,{ready:!!ready});
   const tick = () => {
     const minutes = get('SELECT minutes FROM settings WHERE id=1').minutes;
     for (const c of all("SELECT * FROM conversations WHERE status='open'")) {
@@ -105,12 +116,25 @@ export function createCentral(config = process.env, transport = fetch, options =
   function intake(value, field = 'messages') {
     const result = {recordedMessages:0,duplicates:0,ignoredNumberEvents:0,invalidMessages:0,sendFailure:null};
     if (String(value.metadata?.phone_number_id) !== String(config.WHATSAPP_PHONE_NUMBER_ID)) {result.ignoredNumberEvents++;return result;}
-    const incoming = field === 'smb_message_echoes' ? (value.message_echoes || []) : (value.messages || []);
+    // Persist only event-type counts, never raw webhook payloads or customer identities.
+    if(['messages','smb_message_echoes','history','smb_app_state_sync'].includes(field)){
+      run('INSERT INTO whatsapp_coexistence_observations(field,deliveries,last_seen) VALUES(?,1,?) ON CONFLICT(field) DO UPDATE SET deliveries=deliveries+1,last_seen=excluded.last_seen',field,now());
+    }
+    // History and contact-state sync require a separate, user-approved backfill.
+    // Never reinterpret their payload as a new customer message.
+    if(!['messages','smb_message_echoes'].includes(field))return result;
+    const incoming = field === 'smb_message_echoes' ? (Array.isArray(value.message_echoes)?value.message_echoes:[]) : (Array.isArray(value.messages)?value.messages:[]);
     for (const m of incoming) {
-      if (!m.id) {result.invalidMessages++;continue;}
+      if(typeof m?.id!=='string'||!m.id||m.id.length>256) {result.invalidMessages++;continue;}
       if (get('SELECT id FROM messages WHERE provider_id=?', m.id)) {result.duplicates++;continue;}
       const echo = field === 'smb_message_echoes';
-      const phone = clean(echo ? m.to : m.from, 30);
+      if(echo){
+        const from=String(m.from||'').replace(/\D/g,''),display=String(value.metadata?.display_phone_number||'').replace(/\D/g,'');
+        const authorized=String(config.META_COEXISTENCE_PHONE_NUMBER||'').replace(/\D/g,'');
+        if(!from||(display&&display!==from)||(authorized&&authorized!==from)){result.invalidMessages++;continue;}
+      }
+      const rawPhone=clean(echo?m.to:m.from,30);
+      const phone=/^[+()0-9\s-]{5,30}$/.test(rawPhone)?rawPhone.replace(/\D/g,''):'';
       if (!/^\d{5,20}$/.test(phone)) {result.invalidMessages++;continue;}
       const timestamp = Number(m.timestamp) * 1000;
       const at = Number.isFinite(timestamp) && timestamp > 0 ? Math.min(timestamp, now()) : now();
@@ -130,6 +154,7 @@ export function createCentral(config = process.env, transport = fetch, options =
       result.recordedMessages++;
       if (echo) {
         run('UPDATE conversations SET pending_since=CASE WHEN last_inbound<? THEN NULL ELSE pending_since END,updated=MAX(updated,?) WHERE id=?', at, at, c.id);
+        customerContext.receivedBusinessEcho(c.id,messageId,body);
       } else {
         run('INSERT INTO incoming_receipts(message_id,conversation_id,received) VALUES(?,?,?)',messageId,c.id,now());
         customerContext.receivedMessage(c.id,messageId,body);
@@ -141,6 +166,8 @@ export function createCentral(config = process.env, transport = fetch, options =
       }
       ai.incoming(get('SELECT * FROM conversations WHERE id=?',c.id),get('SELECT * FROM messages WHERE id=?',messageId),{fresh,echo,type:m.type});
       if(!echo)customerContext.queueLookup(get('SELECT * FROM conversations WHERE id=?',c.id));
+      else if(!get('SELECT client_id FROM conversation_context WHERE conversation_id=?',c.id)?.client_id)
+        customerContext.queueLookup(get('SELECT * FROM conversations WHERE id=?',c.id),{lookupOnly:true});
     }
     for (const s of value.statuses || []) {
       if (!['sent','delivered','read','failed'].includes(s.status)) continue;
@@ -148,6 +175,7 @@ export function createCentral(config = process.env, transport = fetch, options =
       if (!m) continue;
       const rank = {sending:0,unknown:0,sent:1,delivered:2,read:3,failed:4};
       if (s.status === 'failed' || rank[s.status] > rank[m.status]) run('UPDATE messages SET status=? WHERE id=?',s.status,m.id);
+      templateResumption.reconcileProvider(s.id,s.status);
       if (s.status === 'failed') {
         result.sendFailure={at:now(),source:'delivery',code:metaCode(s.errors?.[0]?.code)};
         const c = get('SELECT * FROM conversations WHERE id=?',m.conversation_id);
@@ -236,7 +264,9 @@ export function createCentral(config = process.env, transport = fetch, options =
         return res.end(readFileSync(new URL('./public/index.html',import.meta.url)));
       }
       const signupPage = ['/connect/whatsapp','/assets/whatsapp-signup.mjs'].includes(url.pathname);
-      if (!url.pathname.startsWith('/api/') && !signupPage) fail(404,'Página não encontrada.');
+      const directionPage=url.pathname==='/direcao';
+      const resumptionPage=url.pathname==='/retomadas';
+      if (!url.pathname.startsWith('/api/') && !signupPage && !directionPage && !resumptionPage) fail(404,'Página não encontrada.');
       if (!['GET','HEAD'].includes(req.method) && req.headers.origin !== origin) fail(403,'Origem não autorizada.');
       let body = {};
       if (['POST','PATCH'].includes(req.method) && !(url.pathname==='/api/media'&&req.method==='POST')) {const raw=await readBody();try{body=JSON.parse(raw.toString() || '{}');}catch{fail(400,'Dados inválidos.');}if(!body||typeof body!=='object'||Array.isArray(body))fail(400,'Dados inválidos.');}
@@ -272,6 +302,44 @@ export function createCentral(config = process.env, transport = fetch, options =
         return reply(200,{ok:true});
       }
       if (!user) fail(401,'Entre com seu usuário para continuar.');
+      if(directionPage&&req.method==='GET'){
+        directionDecisions.list(user,'pending');
+        res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store'});
+        return res.end(readFileSync(new URL('./public/direcao.html',import.meta.url)));
+      }
+      if(url.pathname==='/api/direction/decisions'){
+        if(req.method==='GET')return reply(200,{decisions:directionDecisions.list(user,url.searchParams.get('status')||'pending')});
+        if(req.method==='POST')return reply(201,{decision:directionDecisions.create(body,user)});
+        fail(405,'Método não permitido.');
+      }
+      const decisionMatch=url.pathname.match(/^\/api\/direction\/decisions\/([a-f0-9-]{36})$/i);
+      if(decisionMatch){
+        if(req.method==='GET')return reply(200,{decision:directionDecisions.detail(decisionMatch[1],user)});
+        if(req.method==='PATCH')return reply(200,{decision:directionDecisions.act(decisionMatch[1],body,user)});
+        fail(405,'Método não permitido.');
+      }
+      if(resumptionPage&&req.method==='GET'){
+        if(user.role!=='admin')fail(403,'Somente administradores podem consultar retomadas.');
+        res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store'});
+        return res.end(readFileSync(new URL('./public/retomadas.html',import.meta.url)));
+      }
+      if(url.pathname==='/api/template-resumption/status'&&req.method==='GET'){
+        if(user.role!=='admin')fail(403,'Somente administradores podem consultar modelos de retomada.');
+        return reply(200,templateResumption.status());
+      }
+      const templateMatch=url.pathname.match(/^\/api\/conversations\/([^/]+)\/(template-consent|template-resumptions)$/);
+      if(templateMatch){
+        const [,id,action]=templateMatch;
+        if(action==='template-consent'){
+          if(req.method==='GET')return reply(200,{consents:templateResumption.consents(id,user)});
+          if(req.method==='POST')return reply(200,{consents:templateResumption.consent(id,body,user)});
+        }
+        if(action==='template-resumptions'){
+          if(req.method==='GET')return reply(200,{resumptions:templateResumption.list(id,user)});
+          if(req.method==='POST')return reply(201,{resumption:await templateResumption.send(id,body,user)});
+        }
+        fail(405,'Método não permitido.');
+      }
       if(url.pathname==='/api/incoming-events'&&req.method==='GET'){
         const latest=get('SELECT COALESCE(MAX(sequence),0) AS n FROM incoming_receipts').n;
         if(!url.searchParams.has('after'))return reply(200,{cursor:latest,events:[]});
@@ -328,6 +396,16 @@ export function createCentral(config = process.env, transport = fetch, options =
       if(url.pathname==='/api/ai/simulate'&&req.method==='POST'){
         if(user.role!=='admin')fail(403,'Somente administradores podem abrir o teste.');
         return reply(200,simulateAttendance(body.message));
+      }
+      if(url.pathname==='/api/notion/global-context/status'&&req.method==='GET'){
+        if(user.role!=='admin')fail(403,'Somente administradores podem consultar o contexto geral.');
+        return reply(200,globalContext.status());
+      }
+      if(url.pathname==='/api/notion/global-context/refresh'&&req.method==='POST'){
+        if(user.role!=='admin')fail(403,'Somente administradores podem atualizar o contexto geral.');
+        const state=await globalContext.refresh(true);
+        return reply(200,{available:state.available,checkedAt:state.checkedAt||null,
+          source:state.source,diagnostic:globalContext.status()});
       }
       if(url.pathname==='/api/notion/status'&&req.method==='GET')return reply(200,customerContext.status());
       if(url.pathname==='/api/notion/verify'&&req.method==='POST'){
@@ -408,18 +486,24 @@ export function createCentral(config = process.env, transport = fetch, options =
         if (url.pathname === '/api/whatsapp/signup/complete' && req.method === 'POST') return reply(200,await signup.complete(hash(token),origin,body));
         fail(405,'Método não permitido.');
       }
+      if(url.pathname==='/api/coexistence/verify'&&req.method==='POST'){
+        if(user.role!=='admin')fail(403,'Somente administradores podem conferir a coexistência.');
+        return reply(200,await coexistenceDiagnostics.inspect());
+      }
       if(url.pathname==='/api/connection-status' && req.method==='GET'){
         if(user.role!=='admin')fail(403,'Somente administradores podem consultar a configuração.');
         const required=['WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_ACCESS_TOKEN','META_APP_SECRET','WEBHOOK_VERIFY_TOKEN','META_GRAPH_VERSION'];
         const businessAppEchoes=get("SELECT COUNT(*) AS recorded,MAX(created) AS lastMessageAt FROM messages WHERE direction='out' AND agent_name='Aplicativo Business (atendente não identificado)'");
-        return reply(200,{mode:live?'live':'demo',credentialsConfigured:!!ready,connectionVerified:false,missing:required.filter(name=>!config[name]),webhookPath:'/webhooks/whatsapp',publicHttps:origin.startsWith('https://'),webhook,businessAppEchoes,lastSendFailure});
+        const businessAppNotionEvents=all("SELECT sync_state,COUNT(*) AS count FROM service_events WHERE event_key LIKE 'business-app:%' GROUP BY sync_state ORDER BY sync_state");
+        const coexistenceObservations=all('SELECT field,deliveries,last_seen AS lastSeenAt FROM whatsapp_coexistence_observations ORDER BY field');
+        return reply(200,{mode:live?'live':'demo',credentialsConfigured:!!ready,connectionVerified:false,missing:required.filter(name=>!config[name]),webhookPath:'/webhooks/whatsapp',publicHttps:origin.startsWith('https://'),webhook,businessAppEchoes,businessAppNotionEvents,coexistenceObservations,historyBackfillImplemented:false,contactSyncImplemented:false,lastSendFailure});
       }
       if (url.pathname==='/api/logout' && req.method==='POST') {
         if(token)run('DELETE FROM sessions WHERE token=?',hash(token));
         res.setHeader('set-cookie','central_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');return reply(200,{ok:true});
       }
       if (url.pathname==='/api/state' && req.method==='GET') {
-        tick();return reply(200,{incomingCursor:get('SELECT COALESCE(MAX(sequence),0) AS n FROM incoming_receipts').n,user,mode:live?'live':'demo',connected:!!ready,externalAlerts:!!config.ALERT_WEBHOOK_URL,agents:all('SELECT id,name,email,role,active FROM agents'),contacts:all('SELECT * FROM contacts ORDER BY name COLLATE NOCASE'),conversations:all('SELECT * FROM conversations ORDER BY updated DESC').map(c=>{const matches=matchingPhones('contacts',c.phone);return {...c,contact_id:matches.length===1?matches[0].id:null};}),messages:[...media.messages(all('SELECT * FROM messages ORDER BY created')),...manualHistory.messages()].sort((a,b)=>a.created-b.created),suppliers:suppliers.status(),mediaStorage:media.stats(),contexts:all('SELECT conversation_id,client_name,kind,mode,version FROM conversation_context'),notion:customerContext.status(),ai:ai.status(),settings:get('SELECT minutes FROM settings WHERE id=1')});
+        tick();return reply(200,{incomingCursor:get('SELECT COALESCE(MAX(sequence),0) AS n FROM incoming_receipts').n,user,mode:live?'live':'demo',connected:!!ready,externalAlerts:!!config.ALERT_WEBHOOK_URL,agents:all('SELECT id,name,email,role,active FROM agents'),contacts:all('SELECT * FROM contacts ORDER BY name COLLATE NOCASE'),conversations:all('SELECT * FROM conversations ORDER BY updated DESC').map(c=>{const matches=matchingPhones('contacts',c.phone);return {...c,contact_id:matches.length===1?matches[0].id:null};}),messages:[...media.messages(all('SELECT * FROM messages ORDER BY created')),...manualHistory.messages()].sort((a,b)=>a.created-b.created),suppliers:suppliers.status(),mediaStorage:media.stats(),contexts:all('SELECT conversation_id,client_name,kind,mode,version FROM conversation_context'),notion:customerContext.status(),ai:ai.status(),internalTools:user.role==='admin'?{directionDecisions:directionDecisions.canReview(user),templates:templateResumption.status(),globalContext:globalContext.status()}:null,settings:get('SELECT minutes FROM settings WHERE id=1')});
       }
       if (url.pathname === '/api/contacts' && req.method === 'GET') return reply(200,{contacts:all('SELECT * FROM contacts ORDER BY name COLLATE NOCASE')});
       const contactMatch=url.pathname.match(/^\/api\/contacts\/([^/]+)$/);
@@ -559,7 +643,7 @@ export function createCentral(config = process.env, transport = fetch, options =
     try{await deliverAlerts();await media.processPending();await customerContext.processLookups();await customerContext.processQueue();await suppliers.process();}catch{console.error('Falha ao verificar lembretes, anexos ou integração.');}finally{delivering=false;}
   },60000);
   timer.unref();
-  return {server,db,intake,tick,deliverAlerts,media,customerContext,ai,suppliers,manualHistory,operatorChat,close:()=>{
+  return {server,db,intake,tick,deliverAlerts,media,customerContext,globalContext,ai,suppliers,directionDecisions,templateResumption,manualHistory,operatorChat,close:()=>{
     clearInterval(timer);
     clearInterval(aiTimer);
     return new Promise((resolve,reject)=>server.close(async error=>{

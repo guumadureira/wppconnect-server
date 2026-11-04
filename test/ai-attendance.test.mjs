@@ -27,6 +27,42 @@ test('simulação gratuita não usa modelo nem grava atendimento',()=>{
   assert.equal(simulateAttendance('Ofereço parceria comercial').kind,'comercial');assert.throws(()=>simulateAttendance(''),/mensagem de teste/);
 });
 
+test('consulta geral, eco Business e direcao coexistem sem retomar IA ou chamar modelo apos intervencao',async t=>{
+  const internal='5544000000008';
+  const f=fixture(t,{AI_ALLOW_ALL_CONTACTS:'true',DIRECTION_CONTACT_PHONES:internal,
+    DIRECTION_ESCALATION_ENABLED:'true',DIRECTION_APPROVER_EMAIL:'director@example.invalid'});
+  let intervened=false;
+  f.app.globalContext.get=async()=>{
+    if(!intervened){
+      intervened=true;
+      f.app.intake({metadata:{phone_number_id:'test-phone'},message_echoes:[{
+        id:'integrated-echo',from:'5544000000002',to:phone,type:'text',
+        text:{body:'Equipe conferira o documento enviado'},timestamp:Math.floor(Date.now()/1000)}]},'smb_message_echoes');
+    }
+    return {available:true,text:'Referencia geral conferida',checkedAt:new Date().toISOString()};
+  };
+  const c=f.incoming();await f.app.ai.process();
+  assert.equal(f.app.customerContext.view(c.id).mode,'human');
+  assert.equal(f.calls.length,0);
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM direction_decisions').get().n,0);
+  f.app.customerContext.control(c,{mode:'assisted',requestId:randomUUID(),version:f.app.customerContext.view(c.id).version},
+    {id:'test-operator',signatureName:'Equipe'});
+  f.app.ai.release(c);
+  f.incoming('Podemos continuar a verificacao?');await f.app.ai.process();
+  const calls=f.calls.filter(x=>x.url.includes('openai.com'));
+  assert.equal(calls.length,1);
+  const input=JSON.parse(calls[0].body.input[0].content);
+  assert.equal(input.generalServiceReference.text,'Referencia geral conferida');
+  assert.ok(input.messages.some(m=>m.text==='Equipe conferira o documento enviado'));
+  assert.equal(f.app.db.prepare("SELECT COUNT(*) AS n FROM service_events WHERE event_key LIKE 'business-app:%'").get().n,1);
+  const count=f.calls.length;
+  const internalChat=f.incoming('Diretor solicitando informacao interna',internal);
+  await f.app.ai.process();await f.app.customerContext.processLookups();
+  assert.equal(f.calls.length,count);
+  assert.equal(f.app.customerContext.view(internalChat.id).mode,'human');
+  assert.throws(()=>f.app.ai.release(internalChat),{status:403});
+});
+
 test('liberação geral atende novos números, preserva controle humano e teto total',async t=>{
   const f=fixture(t,{AI_ALLOW_ALL_CONTACTS:'true',AI_ALLOWED_PHONES:'',AI_TOTAL_BUDGET_USD:'0.05'});
   const c=f.incoming('Preciso de um projeto','5544000000009');await f.app.ai.process();
@@ -195,13 +231,13 @@ test('assumir enquanto o modelo trabalha cancela a resposta e preserva controle 
 test('resposta pelo aplicativo Business pausa a IA mesmo durante geração',async t=>{
   let started,finish;const began=new Promise(r=>started=r),waiting=new Promise(r=>finish=r);
   const f=fixture(t,{},async url=>{if(url.includes('openai.com')){started();await waiting;}});const c=f.incoming();const work=f.app.ai.process();await began;
-  f.app.intake({metadata:{phone_number_id:'test-phone'},message_echoes:[{id:'human-echo',to:phone,type:'text',text:{body:'Vou cuidar disso.'},timestamp:Math.floor(Date.now()/1000)}]},'smb_message_echoes');finish();await work;
+  f.app.intake({metadata:{phone_number_id:'test-phone'},message_echoes:[{id:'human-echo',from:'5544000000002',to:phone,type:'text',text:{body:'Vou cuidar disso.'},timestamp:Math.floor(Date.now()/1000)}]},'smb_message_echoes');finish();await work;
   assert.equal(f.calls.length,1);assert.equal(f.app.customerContext.view(c.id).mode,'human');
 });
 
 test('eco humano mantém autoria, deduplica e entra no contexto após liberação explícita',async t=>{
   const f=fixture(t),c=f.incoming();
-  const echo={metadata:{phone_number_id:'test-phone'},message_echoes:[{id:'echo-context',to:phone,type:'text',text:{body:'Combinamos conferir o projeto na sexta-feira.'},timestamp:Math.floor(Date.now()/1000)}]};
+  const echo={metadata:{phone_number_id:'test-phone'},message_echoes:[{id:'echo-context',from:'5544000000002',to:phone,type:'text',text:{body:'Combinamos conferir o projeto na sexta-feira.'},timestamp:Math.floor(Date.now()/1000)}]};
   f.app.intake(echo,'smb_message_echoes');f.app.intake(echo,'smb_message_echoes');
   await f.app.ai.process();assert.equal(f.calls.length,0);
   const saved=f.app.db.prepare("SELECT * FROM messages WHERE provider_id='echo-context'").all();
@@ -355,4 +391,59 @@ test('falha de atualização do Notion permite orientação geral sem apresentar
   assert.equal(input.context.notionUnavailable,true);assert.equal(input.context.notion,null);assert.deepEqual(input.context.notionHistory,[]);
   assert.equal(f.app.customerContext.view(c.id).mode,'assisted');assert.equal(f.app.ai.status().handoffs.length,0);
   assert.ok(!req.body.input[0].content.includes('private remote details'));
+});
+
+test('eco antigo entregue depois do cliente nao altera a ordem causal do contexto',async t=>{
+  const f=fixture(t),now=Math.floor(Date.now()/1000);
+  const c=f.incoming('Primeira pergunta',phone,{timestamp:now-20});
+  await f.app.ai.process();
+  f.incoming('Cliente enviou dado mais recente',phone,{timestamp:now-3});
+  f.app.intake({metadata:{phone_number_id:'test-phone',display_phone_number:'5544000000002'},
+    message_echoes:[{id:'human-delayed-echo',from:'5544000000002',to:phone,
+      type:'text',text:{body:'Mensagem anterior escrita no celular'},timestamp:now-12}]},'smb_message_echoes');
+  assert.equal(f.app.customerContext.view(c.id).mode,'human');
+  await f.app.ai.process();
+  assert.equal(f.calls.filter(x=>x.url.includes('openai.com')).length,1);
+  f.app.db.prepare("UPDATE conversation_context SET mode='assisted' WHERE conversation_id=?").run(c.id);
+  f.app.ai.release(c);
+  f.incoming('O que ficou combinado agora?',phone,{timestamp:now});
+  await f.app.ai.process();
+  const input=JSON.parse(f.calls.filter(x=>x.url.includes('openai.com')).at(-1).body.input[0].content);
+  const bodies=input.messages.map(m=>m.text);
+  assert.ok(bodies.indexOf('Mensagem anterior escrita no celular')<bodies.indexOf('Cliente enviou dado mais recente'));
+  assert.equal(bodies.at(-1),'O que ficou combinado agora?');
+  assert.ok(input.turn.unansweredMessageIds.length>=2);
+  assert.equal(f.calls.filter(x=>x.url.includes('openai.com')).length,2);
+});
+
+test('contexto geral do Notion integra a resposta seguinte sem expor trechos de fora da secao',async t=>{
+  const pageId='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  let service='Projeto residencial e regularizacao';
+  const f=fixture(t,{NOTION_ENABLED:'true',NOTION_TOKEN:'test-private-notion',
+    NOTION_GLOBAL_CONTEXT_PAGE_ID:pageId},async url=>{
+    if(url==='https://api.notion.com/v1/pages/'+pageId)
+      return Response.json({id:pageId,archived:false,in_trash:false});
+    if(url.includes('/blocks/'+pageId+'/children'))
+      return Response.json({results:[
+        {type:'heading_2',heading_2:{rich_text:[{plain_text:'Serviços identificados nos documentos'}]}},
+        {type:'bulleted_list_item',bulleted_list_item:{rich_text:[{plain_text:service}]}},
+        {type:'heading_2',heading_2:{rich_text:[{plain_text:'Segredos internos'}]}},
+        {type:'paragraph',paragraph:{rich_text:[{plain_text:'NAO_REVELAR'}]}}
+      ],has_more:false});
+    return null;
+  });
+  f.incoming('Que tipo de serviço a Domum faz?');
+  await f.app.ai.process();
+  const input1=JSON.parse(f.calls.find(c=>c.url.includes('api.openai.com')).body.input[0].content);
+  assert.equal(input1.generalServiceReference.available,true);
+  assert.match(input1.generalServiceReference.text,/Projeto residencial/);
+  assert.doesNotMatch(JSON.stringify(input1.generalServiceReference),/NAO_REVELAR|test-private-notion/);
+  service='Regularizacao e Habite-se sob analise';
+  const checked=await f.app.globalContext.refresh(true);
+  assert.equal(checked.available,true);
+  f.incoming('E Habite-se?');
+  await f.app.ai.process();
+  const input2=JSON.parse(f.calls.filter(c=>c.url.includes('api.openai.com')).at(-1).body.input[0].content);
+  assert.match(input2.generalServiceReference.text,/Habite-se sob analise/);
+  assert.doesNotMatch(input2.generalServiceReference.text,/Projeto residencial/);
 });
