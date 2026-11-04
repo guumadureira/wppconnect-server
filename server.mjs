@@ -239,7 +239,8 @@ export function createCentral(config = process.env, transport = fetch, options =
         return res.end(readFileSync(new URL('./public/index.html',import.meta.url)));
       }
       const signupPage = ['/connect/whatsapp','/assets/whatsapp-signup.mjs'].includes(url.pathname);
-      if (!url.pathname.startsWith('/api/') && !signupPage) fail(404,'Página não encontrada.');
+      const resumptionPage=url.pathname==='/retomadas';
+      if (!url.pathname.startsWith('/api/') && !signupPage && !resumptionPage) fail(404,'Página não encontrada.');
       if (!['GET','HEAD'].includes(req.method) && req.headers.origin !== origin) fail(403,'Origem não autorizada.');
       let body = {};
       if (['POST','PATCH'].includes(req.method) && !(url.pathname==='/api/media'&&req.method==='POST')) {const raw=await readBody();try{body=JSON.parse(raw.toString() || '{}');}catch{fail(400,'Dados inválidos.');}if(!body||typeof body!=='object'||Array.isArray(body))fail(400,'Dados inválidos.');}
@@ -275,6 +276,11 @@ export function createCentral(config = process.env, transport = fetch, options =
         return reply(200,{ok:true});
       }
       if (!user) fail(401,'Entre com seu usuário para continuar.');
+      if(resumptionPage&&req.method==='GET'){
+        if(user.role!=='admin')fail(403,'Somente administradores podem consultar retomadas.');
+        res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store'});
+        return res.end(readFileSync(new URL('./public/retomadas.html',import.meta.url)));
+      }
       if(url.pathname==='/api/template-resumption/status'&&req.method==='GET'){
         if(user.role!=='admin')fail(403,'Somente administradores podem consultar modelos de retomada.');
         return reply(200,templateResumption.status());
