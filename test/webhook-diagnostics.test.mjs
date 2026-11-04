@@ -55,7 +55,7 @@ test('diagnóstico distingue falha de assinatura, outro número, mensagem e reen
 test('diagnóstico de ecos mostra só quantidade e data, sem confundir configuração com sincronização completa',async t=>{
   const f=await fixture(t);
   assert.deepEqual((await f.diagnostic()).businessAppEchoes,{recorded:0,lastMessageAt:null});
-  const payload={object:'whatsapp_business_account',entry:[{changes:[{field:'smb_message_echoes',value:{metadata:{phone_number_id:'555550001'},message_echoes:[{id:'private-echo',to:'550000000000',type:'text',text:{body:'Texto privado do atendente'},timestamp:Math.floor(Date.now()/1000)}]}}]}]};
+  const payload={object:'whatsapp_business_account',entry:[{changes:[{field:'smb_message_echoes',value:{metadata:{phone_number_id:'555550001'},message_echoes:[{id:'private-echo',from:'555550001',to:'550000000000',type:'text',text:{body:'Texto privado do atendente'},timestamp:Math.floor(Date.now()/1000)}]}}]}]};
   await f.delivery(payload);await f.delivery(payload);
   const state=await f.diagnostic();assert.equal(state.businessAppEchoes.recorded,1);assert.ok(state.businessAppEchoes.lastMessageAt>0);
   assert.equal(state.connectionVerified,false);assert.ok(!JSON.stringify(state).includes('Texto privado'));assert.ok(!JSON.stringify(state).includes('550000000000'));
