@@ -16,6 +16,7 @@ import {createOperatorChat} from './operator-chat.mjs';
 import {createOperatorContext} from './operator-context.mjs';
 import {samePhone,normalizeContactPhone} from './contact-phone.mjs';
 import {createDirectionContactGuard} from './direction-contact.mjs';
+import {createCoexistenceDiagnostics} from './coexistence-diagnostics.mjs';
 import {createAIQuality} from './ai-quality.mjs';
 
 const derive = promisify(scrypt);
@@ -81,6 +82,7 @@ export function createCentral(config = process.env, transport = fetch, options =
   const rejectWebhook = (status, message, reason) => { throw Object.assign(new Error(message), {status,webhookReason:reason}); };
   const attempts = new Map();
   const signup = createWhatsAppSignup(config, db, transport);
+  const coexistenceDiagnostics=createCoexistenceDiagnostics(db,config,transport,{ready:!!ready});
   const tick = () => {
     const minutes = get('SELECT minutes FROM settings WHERE id=1').minutes;
     for (const c of all("SELECT * FROM conversations WHERE status='open'")) {
@@ -424,6 +426,10 @@ export function createCentral(config = process.env, transport = fetch, options =
         if (url.pathname === '/api/whatsapp/signup/start' && req.method === 'POST') return reply(201,signup.start(hash(token),origin));
         if (url.pathname === '/api/whatsapp/signup/complete' && req.method === 'POST') return reply(200,await signup.complete(hash(token),origin,body));
         fail(405,'Método não permitido.');
+      }
+      if(url.pathname==='/api/coexistence/verify'&&req.method==='POST'){
+        if(user.role!=='admin')fail(403,'Somente administradores podem conferir a coexistência.');
+        return reply(200,await coexistenceDiagnostics.inspect());
       }
       if(url.pathname==='/api/connection-status' && req.method==='GET'){
         if(user.role!=='admin')fail(403,'Somente administradores podem consultar a configuração.');
