@@ -541,6 +541,18 @@ function connectionDiagnostic(status){
     lines.push('Respostas do aplicativo Business no histórico: '+echoes.recorded+'.'+(echoes.lastMessageAt?' Última: '+formatDate(echoes.lastMessageAt)+'.':' Ainda não há eco registrado; confira coexistência e a assinatura smb_message_echoes na Meta.'));
     lines.push('Este total persiste no banco. Não comprova que todos os aparelhos ou mensagens antigas foram sincronizados.');
   }
+  if(Array.isArray(status.businessAppNotionEvents)&&status.businessAppNotionEvents.length){
+    const counts=Object.fromEntries(status.businessAppNotionEvents.map(e=>[e.sync_state,e.count]));
+    lines.push('Ecos associados ao histórico do Notion: '+(counts.synced||0)+' sincronizados; '+((counts.pending||0)+(counts.error||0)+(counts.uncertain||0))+' a conferir; '+(counts.waiting_link||0)+' aguardando vínculo com cliente.');
+  }
+  if(Array.isArray(status.coexistenceObservations)&&status.coexistenceObservations.length){
+    const observed=Object.fromEntries(status.coexistenceObservations.map(e=>[e.field,e]));
+    for(const [field,label] of [['smb_message_echoes','respostas pelo aplicativo Business'],['messages','mensagens da API'],['history','histórico inicial'],['smb_app_state_sync','sincronização de contatos']]){
+      const event=observed[field];
+      if(event)lines.push('Evento Meta observado — '+label+': '+event.deliveries+' entrega(s); última em '+formatDate(event.lastSeenAt)+'.');
+    }
+    if(observed.history||observed.smb_app_state_sync)lines.push('A entrega de eventos de histórico ou contatos foi identificada, mas a importação automática desses dados ainda não foi habilitada. Não confunda recebimento do aviso com histórico recuperado.');
+  }
   if(w){
     lines.push('Observações desde o início desta execução: '+formatDate(w.startedAt)+'. Os contadores reiniciam com o servidor.');
     lines.push(w.postRequests?'Última requisição recebida: '+formatDate(w.lastRequestAt)+'.':'Nenhum evento chegou ao servidor nesta execução.');
