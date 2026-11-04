@@ -378,7 +378,8 @@ test('eco para contato sem cadastro nao cria cliente automaticamente; espera vin
   const event=f.app.customerContext.view(newChat.id).history.find(e=>e.kind==='mensagem enviada');
   assert.ok(event);
   assert.equal(event.sync_state,'waiting_link');
-  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM context_lookup_jobs WHERE conversation_id=?').get(newChat.id).n,0);
+  const job=f.app.db.prepare('SELECT lookup_only FROM context_lookup_jobs WHERE conversation_id=?').get(newChat.id);
+  assert.equal(job.lookup_only,1);
   await f.app.customerContext.processLookups();
   await f.app.customerContext.processQueue(true);
   assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM notion_client_operations WHERE conversation_id=?').get(newChat.id).n,0);
@@ -428,4 +429,48 @@ test('destinatario Business com +55 e separadores reutiliza a conversa; origem d
   assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM conversations').get().n,count);
   f.app.intake({...envelope,message_echoes:[{...envelope.message_echoes[0],id:'wamid.forged-sender',from:'5544000000003'}]},'smb_message_echoes');
   assert.equal(f.app.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE provider_id='wamid.forged-sender'").get().n,0);
+});
+
+test('eco isolado localiza cliente existente sem cadastro novo e sincroniza seu historico',async t=>{
+  const f=await fixture(t,{config:{NOTION_AUTO_REGISTER_CONTACTS:'true'}});
+  f.app.db.prepare('DELETE FROM context_lookup_jobs').run();
+  const initial=f.remote.clientCreates,phone=f.chat.phone;
+  const echo={metadata:{phone_number_id:'test-phone',display_phone_number:'5544000000002'},message_echoes:[
+    {id:'wamid.lookup-only-echo',from:'5544000000002',to:phone,
+      type:'text',text:{body:'Confirmei por mensagem que verificaremos a documentação.'},
+      timestamp:Math.floor(Date.now()/1000)}
+  ]};
+  f.app.intake(echo,'smb_message_echoes');
+  const before=f.app.db.prepare('SELECT lookup_only FROM context_lookup_jobs WHERE conversation_id=?').get(f.chat.id);
+  assert.equal(before.lookup_only,1);
+  await f.app.customerContext.processLookups();
+  await f.app.customerContext.processQueue(true);
+  const current=f.app.customerContext.view(f.chat.id);
+  assert.equal(current.client_id,ids.client);
+  assert.equal(f.remote.clientCreates,initial);
+  const event=current.history.find(e=>e.kind==='mensagem enviada');
+  assert.equal(event.sync_state,'synced');
+});
+
+test('recebimento posterior remove restricao de lookupOnly sem perder mensagem anterior',async t=>{
+  const f=await fixture(t,{config:{NOTION_AUTO_REGISTER_CONTACTS:'true'}});
+  f.app.db.prepare('DELETE FROM context_lookup_jobs').run();
+  const phone='5544000000088';
+  f.remote.rows[ids.clients]=[];
+  f.app.intake({metadata:{phone_number_id:'test-phone',display_phone_number:'5544000000002'},
+    message_echoes:[{id:'wamid.only-first',from:'5544000000002',to:phone,
+      type:'text',text:{body:'Olá, posso ajudar?'},timestamp:Math.floor(Date.now()/1000)}]},'smb_message_echoes');
+  let chat=f.app.db.prepare('SELECT * FROM conversations WHERE phone=?').get(phone);
+  let lookup=f.app.db.prepare('SELECT lookup_only FROM context_lookup_jobs WHERE conversation_id=?').get(chat.id);
+  assert.equal(lookup.lookup_only,1);
+  f.app.intake({metadata:{phone_number_id:'test-phone'},messages:[
+    {id:'wamid.client-responds',from:phone,type:'text',text:{body:'Quero saber sobre regularização.'},
+      timestamp:Math.floor(Date.now()/1000)}]});
+  chat=f.app.db.prepare('SELECT * FROM conversations WHERE phone=?').get(phone);
+  lookup=f.app.db.prepare('SELECT lookup_only FROM context_lookup_jobs WHERE conversation_id=?').get(chat.id);
+  assert.equal(lookup.lookup_only,0);
+  await f.app.customerContext.processLookups();
+  await f.app.customerContext.processQueue(true);
+  assert.equal(f.remote.clientCreates,1);
+  assert.ok(f.app.customerContext.view(chat.id).history.some(e=>e.kind==='mensagem enviada'));
 });
