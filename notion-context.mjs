@@ -12,7 +12,7 @@ const rt=value=>({rich_text:[{text:{content:String(value||'').slice(0,2000)}}]})
 const kinds=['atendimento','orcamento','andamento','documentos','alteracao','comercial','administrativo','outro'];
 const states=['Em atendimento','Aguardando contato','Aguardando equipe','Resolvida'];
 const qualifications=['Informado','Extraído','Interpretado','Confirmado','Corrigido'];
-const eventTypes={comercial:'Oferta comercial recebida',contexto:'Contexto atualizado',solicitacao:'Solicitação registrada',situacao:'Situação da solicitação atualizada',cliente:'Cliente vinculado',humano:'Atendimento assumido',assistencia:'Assistência liberada',arquivo:'Arquivo recebido'};
+const eventTypes={comercial:'Oferta comercial recebida',contexto:'Contexto atualizado',solicitacao:'Solicitação registrada',situacao:'Situação da solicitação atualizada',cliente:'Cliente vinculado',humano:'Atendimento assumido',assistencia:'Assistência liberada',arquivo:'Arquivo recebido','mensagem enviada':'Mensagem enviada pelo WhatsApp Business'};
 
 export function createNotionContext(db,config,transport,options={}){
   const aiActor=Object.freeze({id:'domum-ai-registration',signatureName:'Domum · IA',role:'internal_ai'});
@@ -49,7 +49,7 @@ export function createNotionContext(db,config,transport,options={}){
     const old=get('SELECT id FROM service_events WHERE event_key=?',data.key);if(old)return old.id;
     const c=context(id),eventId=randomUUID();
     const clientId=data.clientId===undefined?c.client_id:data.clientId,workId=data.workId===undefined?c.work_id:data.workId;
-    run('INSERT INTO service_events(id,event_key,conversation_id,request_id,client_id,work_id,kind,summary,missing,next_step,status,qualification,actor,source,message_id,created,sync_state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',eventId,data.key,id,data.requestId||null,clientId,workId,data.kind,data.summary,data.missing??c.missing,data.nextStep??c.next_step,data.status||'Em atendimento',data.qualification||'Informado',data.actor||'Sistema',data.source||'Sistema',data.messageId||null,Date.now(),data.kind==='comercial'?'separate':clientId?'pending':'waiting_link');
+    run('INSERT INTO service_events(id,event_key,conversation_id,request_id,client_id,work_id,kind,summary,missing,next_step,status,qualification,actor,source,message_id,created,sync_state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',eventId,data.key,id,data.requestId||null,clientId,workId,data.kind,data.summary,data.missing??c.missing,data.nextStep??c.next_step,data.status||'Em atendimento',data.qualification||'Informado',data.actor||'Sistema',data.source||'Sistema',data.messageId||null,Number.isFinite(data.occurredAt)&&data.occurredAt>0&&data.occurredAt<=Date.now()?data.occurredAt:Date.now(),data.kind==='comercial'?'separate':clientId?'pending':'waiting_link');
     if(data.kind==='contexto'&&data.currentSummary)queueSummary(id);
     return eventId;
   }
@@ -302,6 +302,22 @@ export function createNotionContext(db,config,transport,options={}){
     const commercial=context(conversationId).kind==='comercial';
     addEvent(conversationId,{key:'incoming:'+messageId,kind:commercial?'comercial':'mensagem recebida',summary:'Mensagem recebida: '+text(body,1800),missing:'',nextStep:'',source:'Cliente',actor:'Contato do WhatsApp',messageId,...(commercial?{clientId:null,workId:null}:{})});
   }
+  function receivedBusinessEcho(conversationId,messageId,body){
+    const message=get('SELECT id,direction,created FROM messages WHERE id=? AND conversation_id=?',messageId,conversationId);
+    if(!message||message.direction!=='out')return;
+    const phone=get('SELECT phone FROM conversations WHERE id=?',conversationId)?.phone;
+    if(options.isDirectionContact?.(phone))return;
+    const c=context(conversationId),commercial=c.kind==='comercial';
+    addEvent(conversationId,{
+      key:'business-app:'+messageId,
+      kind:commercial?'comercial':'mensagem enviada',
+      summary:'Resposta enviada pelo aplicativo WhatsApp Business: '+text(body,1700),
+      missing:'',nextStep:'',source:'Atendente',
+      actor:'WhatsApp Business (autor individual não identificado)',
+      qualification:'Confirmado',messageId,occurredAt:message.created,
+      ...(commercial?{clientId:null,workId:null}:{})
+    });
+  }
   function aiRecord(id,jobId,result,handoff=false,{updateCurrent=false,expectedVersion,clientId}={}){
     const eventKey='ai:'+jobId;if(get('SELECT id FROM service_events WHERE event_key=?',eventKey))return;
     const record=()=>{
@@ -353,7 +369,8 @@ export function createNotionContext(db,config,transport,options={}){
     if(!attachment)return [];
     const origin=config.PUBLIC_ORIGIN||config.RENDER_EXTERNAL_URL||'';if(!/^https:\/\//.test(origin))return [];
     const privateLink=new URL('/api/media/'+attachment.id+'/content',origin);privateLink.searchParams.set('download','1');
-    return [{object:'block',type:'paragraph',paragraph:{rich_text:[{type:'text',text:{content:'Arquivo recebido: '+attachment.name+'. Acesso restrito à equipe autenticada na central; disponibilidade depende da conclusão do download. Conteúdo ainda não validado. ' }},{type:'text',text:{content:'Abrir arquivo na central',link:{url:privateLink.href}}}]}}];
+    const sent=get('SELECT direction FROM messages WHERE id=?',e.message_id)?.direction==='out';
+    return [{object:'block',type:'paragraph',paragraph:{rich_text:[{type:'text',text:{content:(sent?'Arquivo enviado pelo aplicativo Business: ':'Arquivo recebido: ')+attachment.name+'. Acesso restrito à equipe autenticada na central; disponibilidade depende da conclusão do download. Conteúdo ainda não validado. ' }},{type:'text',text:{content:'Abrir arquivo na central',link:{url:privateLink.href}}}]}}];
   }
   function eventProperties(e){
     const assignee=e.request_id?get('SELECT a.name FROM service_requests r LEFT JOIN agents a ON a.id=r.owner_id WHERE r.id=?',e.request_id):get('SELECT a.name FROM conversations c LEFT JOIN agents a ON a.id=c.owner_id WHERE c.id=?',e.conversation_id);
@@ -401,7 +418,7 @@ export function createNotionContext(db,config,transport,options={}){
     if(!descriptions[state])return;
     addEvent(conversationId,{key:'mcp:'+draftId,kind:'contexto',summary:descriptions[state],missing:'',nextStep:state==='sent'?'Conferir entrega na central.':'Conferir resultado com a equipe.',actor:'Notion · integração',source:'Sistema',qualification:'Confirmado',messageId});
   }
-  return{status,view:localView,lookup,link,refresh,resolveBeforeReply:resolve,queueLookup,processLookups,save,request,updateRequest,control,receivedFile,receivedMessage,aiRecord,createClient,registerFromAI,processQueue,verify,integrationRecord,
+  return{status,view:localView,lookup,link,refresh,resolveBeforeReply:resolve,queueLookup,processLookups,save,request,updateRequest,control,receivedFile,receivedMessage,receivedBusinessEcho,aiRecord,createClient,registerFromAI,processQueue,verify,integrationRecord,
     close:async()=>{stopped=true;await Promise.allSettled([worker,lookupWorker,...refreshing.values(),...resolving.values(),...creating.values(),serial].filter(Boolean));},
   };
 }
