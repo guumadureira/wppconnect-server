@@ -160,6 +160,8 @@ export function createCentral(config = process.env, transport = fetch, options =
       }
       ai.incoming(get('SELECT * FROM conversations WHERE id=?',c.id),get('SELECT * FROM messages WHERE id=?',messageId),{fresh,echo,type:m.type});
       if(!echo)customerContext.queueLookup(get('SELECT * FROM conversations WHERE id=?',c.id));
+      else if(!get('SELECT client_id FROM conversation_context WHERE conversation_id=?',c.id)?.client_id)
+        customerContext.queueLookup(get('SELECT * FROM conversations WHERE id=?',c.id),{lookupOnly:true});
     }
     for (const s of value.statuses || []) {
       if (!['sent','delivered','read','failed'].includes(s.status)) continue;
