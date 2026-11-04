@@ -6,6 +6,7 @@ import {serviceGuidesFor} from './attendance-catalog.mjs';
 import {supplierCategories} from './supplier-register.mjs';
 import {attendanceTurn,removeRepeatedGreeting} from './attendance-turn.mjs';
 import {samePhone} from './contact-phone.mjs';
+import {operatorAICost} from './operator-ai.mjs';
 
 // Fixed model and standard text rates verified on 2026-10-26. No model tools.
 const MODEL='gpt-5.4-mini-2026-03-17',INPUT_USD=0.75/1e6,OUTPUT_USD=4.5/1e6,MAX_OUTPUT=1800;
@@ -37,8 +38,8 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
   const enabled=()=>String(config.AI_ENABLED).trim()==='true'&&!!String(config.OPENAI_API_KEY||'').trim()&&(allContacts||phones.length>0)&&budget>0&&budget<=100&&(config.AI_TOTAL_BUDGET_USD===undefined||(totalBudget>0&&totalBudget<=100))&&ready;
   const ensure=id=>{run('INSERT OR IGNORE INTO ai_control(conversation_id) VALUES(?)',id);return get('SELECT * FROM ai_control WHERE conversation_id=?',id);};
   const transcriber=createAudioTranscription(db,config,transport,media,cost=>spent()+cost<=budget&&(!totalBudget||totalSpent()+cost<=totalBudget));
-  const spent=()=>get('SELECT COALESCE(SUM(cost_usd),0) AS n FROM ai_jobs WHERE billing_month=?',month()).n+transcriber.cost(month());
-  const totalSpent=()=>get('SELECT COALESCE(SUM(cost_usd),0) AS n FROM ai_jobs').n+transcriber.cost();
+  const spent=()=>get('SELECT COALESCE(SUM(cost_usd),0) AS n FROM ai_jobs WHERE billing_month=?',month()).n+transcriber.cost(month())+operatorAICost(db,month());
+  const totalSpent=()=>get('SELECT COALESCE(SUM(cost_usd),0) AS n FROM ai_jobs').n+transcriber.cost()+operatorAICost(db);
   function status(){return{enabled:enabled(),model:MODEL,credentialPresent:!!String(config.OPENAI_API_KEY||'').trim(),activationPending:String(config.AI_ENABLED).trim()!=='true',pilotConfigured:phones.length>0,allContacts,scopeConfigured:allContacts||phones.length>0,budgetUsd:budget>0&&budget<=100?budget:0,usedUsd:spent(),totalBudgetUsd:totalBudget,usedTotalUsd:totalSpent(),audioEnabled:String(config.AI_AUDIO_ENABLED)==='true',autoRegistration:String(config.AI_AUTO_REGISTER)==='true',whatsappReady:ready,pending:get("SELECT COUNT(*) AS n FROM ai_jobs WHERE state IN ('pending','running')").n,handoffs:all("SELECT a.conversation_id,c.name,a.handoff FROM ai_control a JOIN conversations c ON c.id=a.conversation_id WHERE a.handoff<>'' ORDER BY c.updated DESC LIMIT 30")};}
   function pause(id,reason=''){
     ensure(id);run('UPDATE ai_control SET epoch=epoch+1,handoff=? WHERE conversation_id=?',reason,id);

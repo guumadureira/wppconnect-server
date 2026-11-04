@@ -15,6 +15,7 @@ import {createSupplierRegister} from './supplier-register.mjs';
 import {createHistoryImport} from './history-import.mjs';
 import {createOperatorChat} from './operator-chat.mjs';
 import {createOperatorContext} from './operator-context.mjs';
+import {createOperatorAI} from './operator-ai.mjs';
 import {samePhone,normalizeContactPhone} from './contact-phone.mjs';
 import {createDirectionContactGuard} from './direction-contact.mjs';
 import {createCoexistenceDiagnostics} from './coexistence-diagnostics.mjs';
@@ -78,7 +79,8 @@ export function createCentral(config = process.env, transport = fetch, options =
   manualHistory=createHistoryImport(db,customerContext,ai);
   const centralMCP=createCentralMCP(db,config,transport,{context:customerContext,ai,media,ready:!!ready});
   const operatorContext=createOperatorContext(db,customerContext);
-  const operatorChat=createOperatorChat(db,config,transport,{conversationContext:operatorContext});
+  const centralAssistant=createOperatorAI(db,config,transport,{usage:()=>ai.status(),validContext:ctx=>!!get('SELECT id FROM conversations WHERE id=?',ctx.conversation.id)&&customerContext.view(ctx.conversation.id).client_id===(ctx.client?.id||null)});
+  const operatorChat=createOperatorChat(db,config,transport,{conversationContext:operatorContext,centralAssistant});
   const quality=createAIQuality(db);
   // Only operational counts and timestamps; no payload, phone or credentials.
   // These observations start again with each server process.
