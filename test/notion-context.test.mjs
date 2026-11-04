@@ -412,3 +412,20 @@ test('diagnostico registra tipos historicos sem importar mensagens ou contatos i
   assert.equal(status.coexistenceObservations.find(x=>x.field==='history').deliveries,1);
   assert.equal(status.coexistenceObservations.find(x=>x.field==='smb_app_state_sync').deliveries,1);
 });
+
+test('destinatario Business com +55 e separadores reutiliza a conversa; origem divergente e descartada',async t=>{
+  const f=await fixture(t,{config:{META_COEXISTENCE_PHONE_NUMBER:'5544000000002'}});
+  const count=f.app.db.prepare('SELECT COUNT(*) AS n FROM conversations').get().n;
+  const envelope={metadata:{phone_number_id:'test-phone',display_phone_number:'+55 (44) 00000-0002'},
+    message_echoes:[{id:'wamid.formatted-out',from:'5544000000002',to:'+55 (44) 99999-1234',
+      type:'text',text:{body:'Resposta via aplicativo'},timestamp:Math.floor(Date.now()/1000)}]};
+  // Exact match to the configured business sender; do not use a formatted number
+  // that drops a digit from the sender identity.
+  envelope.metadata.display_phone_number='5544000000002';
+  f.app.intake(envelope,'smb_message_echoes');
+  const saved=f.app.db.prepare("SELECT conversation_id FROM messages WHERE provider_id='wamid.formatted-out'").get();
+  assert.equal(saved.conversation_id,f.chat.id);
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM conversations').get().n,count);
+  f.app.intake({...envelope,message_echoes:[{...envelope.message_echoes[0],id:'wamid.forged-sender',from:'5544000000003'}]},'smb_message_echoes');
+  assert.equal(f.app.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE provider_id='wamid.forged-sender'").get().n,0);
+});
