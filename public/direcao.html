@@ -54,7 +54,10 @@
       </select>
     </label>
     <button type="button" class="secondary" id="refresh">Atualizar lista</button>
+    <button type="button" class="secondary" id="enable-alerts">Ativar avisos neste navegador</button>
   </div>
+  <p id="pending-status" role="status" aria-live="polite">Carregando pendências…</p>
+  <p><small>Os avisos são verificados a cada 30 segundos enquanto esta página estiver aberta. Notificações em segundo plano dependem do navegador e de suas permissões.</small></p>
   <p id="message" role="status" aria-live="polite"></p>
   <div id="list" class="grid"></div>
   <p><small>A fila é restrita à conta administrativa configurada. As respostas não alteram automaticamente projetos ou contratos no Notion.</small></p>
@@ -66,7 +69,9 @@
   const message=document.getElementById('message');
   const filter=document.getElementById('status');
   const refreshButton=document.getElementById('refresh');
-  let busy=false;
+  const alertsButton=document.getElementById('enable-alerts');
+  const pendingStatus=document.getElementById('pending-status');
+  let busy=false,observed=null,polling=false;
   const names={tecnica:'Técnica',comercial:'Comercial',administrativa:'Administrativa'};
   const states={pending:'Pendente',answered:'Respondida',cancelled:'Cancelada'};
   const date=value=>Number.isFinite(value)?new Date(value).toLocaleString('pt-BR'):'';
@@ -143,9 +148,43 @@
     }catch(e){note('Fila indisponível: '+e.message);}
     finally{refreshButton.disabled=false;}
   }
-  refreshButton.addEventListener('click',refresh);
+  async function checkPending(){
+    if(polling)return;
+    polling=true;
+    try{
+      const result=await api('/api/direction/decisions?status=pending');
+      if(!Array.isArray(result.decisions))throw Error('Resposta inválida.');
+      const pending=new Set(result.decisions.map(d=>d.id));
+      const newlyArrived=observed===null?[]:result.decisions.filter(d=>!observed.has(d.id));
+      observed=pending;
+      pendingStatus.textContent=(result.decisions.length===100?'Ao menos ':'')+result.decisions.length+' decisão(ões) pendente(s) para análise.';
+      if(newlyArrived.length && 'Notification' in window && Notification.permission==='granted'){
+        try{
+          const n=new Notification('Central Domum — nova decisão', {
+            body:'Há uma decisão interna para sua avaliação. Abra o painel para conferir.',
+            tag:'domum-direction-decision',silent:false
+          });
+          n.onclick=()=>{window.focus();n.close();refresh();};
+        }catch{ /* Avisos são opcionais. O indicador do painel permanece disponível. */ }
+      }
+    }catch{
+      pendingStatus.textContent='Não foi possível atualizar a contagem de pendências.';
+    }finally{polling=false;}
+  }
+  alertsButton.addEventListener('click',async()=>{
+    if(!('Notification' in window)){note('Este navegador não oferece notificações para a página. A lista continua disponível.');return;}
+    try{
+      const permission=await Notification.requestPermission();
+      note(permission==='granted'
+        ?'Avisos habilitados enquanto o navegador permitir a página em execução.'
+        :'A permissão não foi concedida. A lista de pendências continua disponível.');
+    }catch{note('Não foi possível solicitar permissão de notificação neste navegador.');}
+  });
+  refreshButton.addEventListener('click',async()=>{await refresh();await checkPending();});
   filter.addEventListener('change',refresh);
   refresh();
+  checkPending();
+  setInterval(checkPending,30000);
 })();
 </script>
 </body>
