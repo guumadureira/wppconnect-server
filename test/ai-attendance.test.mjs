@@ -27,6 +27,42 @@ test('simulação gratuita não usa modelo nem grava atendimento',()=>{
   assert.equal(simulateAttendance('Ofereço parceria comercial').kind,'comercial');assert.throws(()=>simulateAttendance(''),/mensagem de teste/);
 });
 
+test('consulta geral, eco Business e direcao coexistem sem retomar IA ou chamar modelo apos intervencao',async t=>{
+  const internal='5544000000008';
+  const f=fixture(t,{AI_ALLOW_ALL_CONTACTS:'true',DIRECTION_CONTACT_PHONES:internal,
+    DIRECTION_ESCALATION_ENABLED:'true',DIRECTION_APPROVER_EMAIL:'director@example.invalid'});
+  let intervened=false;
+  f.app.globalContext.get=async()=>{
+    if(!intervened){
+      intervened=true;
+      f.app.intake({metadata:{phone_number_id:'test-phone'},message_echoes:[{
+        id:'integrated-echo',from:'5544000000002',to:phone,type:'text',
+        text:{body:'Equipe conferira o documento enviado'},timestamp:Math.floor(Date.now()/1000)}]},'smb_message_echoes');
+    }
+    return {available:true,text:'Referencia geral conferida',checkedAt:new Date().toISOString()};
+  };
+  const c=f.incoming();await f.app.ai.process();
+  assert.equal(f.app.customerContext.view(c.id).mode,'human');
+  assert.equal(f.calls.length,0);
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM direction_decisions').get().n,0);
+  f.app.customerContext.control(c,{mode:'assisted',requestId:randomUUID(),version:f.app.customerContext.view(c.id).version},
+    {id:'test-operator',signatureName:'Equipe'});
+  f.app.ai.release(c);
+  f.incoming('Podemos continuar a verificacao?');await f.app.ai.process();
+  const calls=f.calls.filter(x=>x.url.includes('openai.com'));
+  assert.equal(calls.length,1);
+  const input=JSON.parse(calls[0].body.input[0].content);
+  assert.equal(input.generalServiceReference.text,'Referencia geral conferida');
+  assert.ok(input.messages.some(m=>m.text==='Equipe conferira o documento enviado'));
+  assert.equal(f.app.db.prepare("SELECT COUNT(*) AS n FROM service_events WHERE event_key LIKE 'business-app:%'").get().n,1);
+  const count=f.calls.length;
+  const internalChat=f.incoming('Diretor solicitando informacao interna',internal);
+  await f.app.ai.process();await f.app.customerContext.processLookups();
+  assert.equal(f.calls.length,count);
+  assert.equal(f.app.customerContext.view(internalChat.id).mode,'human');
+  assert.throws(()=>f.app.ai.release(internalChat),{status:403});
+});
+
 test('liberação geral atende novos números, preserva controle humano e teto total',async t=>{
   const f=fixture(t,{AI_ALLOW_ALL_CONTACTS:'true',AI_ALLOWED_PHONES:'',AI_TOTAL_BUDGET_USD:'0.05'});
   const c=f.incoming('Preciso de um projeto','5544000000009');await f.app.ai.process();

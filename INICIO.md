@@ -1,5 +1,7 @@
 # Central de atendimento WhatsApp
 
+**Produção e retomada em 04/11/2026:** o serviço existente usa Starter e disco persistente; o blueprint Free e os exemplos temporários abaixo descrevem a avaliação inicial. A versão integrada preparada e a rotina de backup estão em [docs/retomada-integrada-2026-11-04.md](docs/retomada-integrada-2026-11-04.md). Não reaplicar a configuração de demonstração sobre o banco real.
+
 Central para evitar clientes sem resposta, identificar cada atendente e organizar retornos. O projeto recupera a demonstração da conversa “Criar integração WhatsApp para CRM”. O final do servidor e da interface foi reconstituído porque os registros disponíveis estavam truncados.
 
 ## Desenvolvimento local

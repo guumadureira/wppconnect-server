@@ -24,7 +24,7 @@ Esta alteração é **parcial e opt-in**. Não habilita comandos administrativos
 
 Número recebido por webhook legítimo não é autenticação suficiente para consultar contratos, dados financeiros, documentos pessoais ou enviar arquivos da empresa. Para autorizar operações administrativas, implementar uma sessão interna autenticada, níveis de permissão por ação, confirmação adicional para documentos sensíveis, auditoria, limitação de escopo e revogação.
 
-A fila de **perguntas da IA para Gustavo** ainda precisa ser implementada com controle de acesso, cliente/trabalho, fontes, estado pendente/resolvido, notificações e revalidação de contexto; não enviar automaticamente decisões ao cliente.
+A fila de **perguntas da IA para Gustavo** e o painel `/direcao` estão implementados nesta branch, desligados por padrão e restritos à conta administrativa configurada. Há avisos com a página aberta; não há notificação remota contínua nem retorno automático ao cliente. Consulte [a retomada integrada](retomada-integrada-2026-11-04.md) antes de ativar ou publicar.
 
 A retomada fora das 24 horas deve usar **modelos aprovados pela Meta** quando couber. Este commit não altera o bloqueio de mensagens livres pela Cloud API.
 

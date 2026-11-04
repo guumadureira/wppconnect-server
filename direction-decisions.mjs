@@ -38,9 +38,10 @@ export function createDirectionDecisions(db,config={}){
   const approver=String(config.DIRECTION_APPROVER_EMAIL||'').trim().toLowerCase();
   const enabled=()=>String(config.DIRECTION_ESCALATION_ENABLED||'').trim()==='true'
     && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(approver);
+  const canReview=user=>enabled()&&user?.role==='admin'&&String(user.email||'').toLowerCase()===approver;
   const requireApprover=user=>{
     if(!enabled())fail(503,'A fila de decisões internas ainda não foi habilitada para uma conta administrativa.');
-    if(!user||user.role!=='admin'||String(user.email||'').toLowerCase()!==approver)
+    if(!canReview(user))
       fail(403,'Somente a conta administrativa autorizada pode consultar ou decidir.');
   };
   const transaction=fn=>{
@@ -134,5 +135,5 @@ export function createDirectionDecisions(db,config={}){
       return view(find(id));
     });
   }
-  return {enabled,create,fromAI,list,detail,act};
+  return {enabled,canReview,create,fromAI,list,detail,act};
 }

@@ -35,6 +35,10 @@ export function createTemplateResumption(db,config={},transport=fetch,{ready=fal
   );
   CREATE INDEX IF NOT EXISTS template_resumption_by_conversation
     ON template_resumptions(conversation_id,created);`);
+  // A restart cannot prove whether Meta accepted an in-flight request.
+  run("UPDATE messages SET status='unknown' WHERE status='sending' AND id IN (SELECT message_id FROM template_resumptions WHERE state='sending')");
+  run("UPDATE template_resumptions SET state='unknown',error=?,updated=? WHERE state='sending'",
+    'Envio interrompido; conferir na Meta antes de qualquer nova tentativa.',Date.now());
   const name=String(config.WHATSAPP_REENGAGEMENT_TEMPLATE_NAME||'').trim();
   const language=String(config.WHATSAPP_REENGAGEMENT_TEMPLATE_LANGUAGE||'pt_BR').trim();
   const waba=String(config.WHATSAPP_BUSINESS_ACCOUNT_ID||'').trim();
@@ -96,13 +100,13 @@ export function createTemplateResumption(db,config={},transport=fetch,{ready=fal
         redirect:'error',signal:AbortSignal.timeout(15000)});
       json=await res.json();
     }catch{fail(502,'Não foi possível conferir a aprovação do modelo na Meta.');}
-    if(!res.ok||!Array.isArray(json.data))fail(502,'A Meta não confirmou a aprovação do modelo.');
+    if(!res.ok||!Array.isArray(json.data)||json.paging?.next)fail(502,'A Meta não confirmou integralmente a aprovação do modelo.');
     const found=json.data.filter(x=>x.name===name&&x.language===language&&x.status==='APPROVED'
       &&types.has(x.category));
     if(found.length!==1)fail(409,'Não existe um único modelo aprovado com esse nome e idioma.');
     const template=found[0];
     if(!Array.isArray(template.components)||!template.components.length
-      ||template.components.some(c=>/\{\{\s*\d+\s*\}\}/.test(JSON.stringify(c))
+      ||template.components.some(c=>/\{\{|\}\}/.test(JSON.stringify(c))
         ||(c.type==='HEADER'&&c.format&&c.format!=='TEXT')))
       fail(409,'Este modelo contém variáveis ou mídia e precisa de uma implementação específica.');
     return {name,language,category:template.category};
@@ -136,18 +140,24 @@ export function createTemplateResumption(db,config={},transport=fetch,{ready=fal
     const registered=get('SELECT granted FROM template_consents WHERE conversation_id=? AND category=?',id,meta.category);
     if(registered?.granted!==1)fail(403,'Não há consentimento comprovado para a categoria do modelo aprovado.');
     const recent=get(`SELECT id FROM template_resumptions WHERE conversation_id=?
-      AND state IN ('sending','sent','unknown') AND created>? LIMIT 1`,id,current()-elapsed);
+      AND (state IN ('sending','unknown') OR (state IN ('sent','delivered','read') AND created>?)) LIMIT 1`,id,current()-elapsed);
     if(recent)fail(409,'Já existe uma retomada recente; confira antes de novo envio.');
     // Reserve the idempotency key before the network call; never auto-retry an uncertain request.
     const at=current(),messageId=randomUUID(),dispatchId=randomUUID();
     db.exec('BEGIN IMMEDIATE');
     try{
       const duplicate=get('SELECT * FROM template_resumptions WHERE request_id=?',requestId);
-      if(duplicate){db.exec('ROLLBACK');return dispatchView(duplicate);}
+      if(duplicate){
+        if(duplicate.conversation_id!==id||duplicate.actor_id!==user.id)fail(409,'Identificador de envio já utilizado.');
+        db.exec('ROLLBACK');return dispatchView(duplicate);
+      }
+      const freshConversation=conversation(id);
+      if(freshConversation.last_inbound&&current()-freshConversation.last_inbound<elapsed)
+        fail(409,'O contato respondeu durante a conferência; use a conversa normal.');
       const freshConsent=get('SELECT granted FROM template_consents WHERE conversation_id=? AND category=?',id,meta.category);
       if(freshConsent?.granted!==1)fail(403,'Consentimento revogado antes do envio.');
       const freshRecent=get(`SELECT id FROM template_resumptions WHERE conversation_id=? AND
-        state IN ('sending','sent','unknown') AND created>? LIMIT 1`,id,current()-elapsed);
+        (state IN ('sending','unknown') OR (state IN ('sent','delivered','read') AND created>?)) LIMIT 1`,id,current()-elapsed);
       if(freshRecent)fail(409,'Outra retomada está sendo processada para este contato.');
       run("INSERT INTO messages(id,conversation_id,request_id,direction,body,agent_id,agent_name,status,created) VALUES(?,?,?,?,?,?,?,?,?)",
         messageId,id,'template:'+requestId,'out','[Modelo de retomada: '+meta.name+']',user.id,user.signatureName||user.name,'sending',at);
@@ -164,15 +174,17 @@ export function createTemplateResumption(db,config={},transport=fetch,{ready=fal
           'content-type':'application/json'},body:JSON.stringify(payload),redirect:'error',
           signal:AbortSignal.timeout(15000)});
       const response=await res.json();
-      if(!res.ok||!response?.messages?.[0]?.id){
+      if(!res.ok){
         run("UPDATE messages SET status='failed' WHERE id=?",messageId);
         run("UPDATE template_resumptions SET state='failed',updated=?,error=? WHERE id=?",
           current(),'Meta recusou o modelo; conferir antes de outro envio.',dispatchId);
         fail(502,'A Meta recusou a retomada. Verifique o status e o motivo antes de tentar novamente.');
       }
-      const providerId=response.messages[0].id;
+      const providerId=response?.messages?.[0]?.id;
+      if(typeof providerId!=='string'||!providerId.trim()||providerId.length>200)
+        throw Error('Provider did not confirm the message identifier');
       const duplicateMessage=get('SELECT id FROM messages WHERE provider_id=?',providerId);
-      if(duplicateMessage&&duplicateMessage.id!==messageId)run('DELETE FROM messages WHERE id=?',duplicateMessage.id);
+      if(duplicateMessage&&duplicateMessage.id!==messageId)throw Error('Provider identifier already recorded');
       run("UPDATE messages SET provider_id=?,status=CASE WHEN status IN ('delivered','read') THEN status ELSE 'sent' END WHERE id=?",
         providerId,messageId);
       run("UPDATE template_resumptions SET provider_id=?,state='sent',updated=?,error=NULL WHERE id=?",

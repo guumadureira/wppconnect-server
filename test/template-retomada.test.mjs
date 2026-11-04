@@ -1,6 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createCentral} from '../server.mjs';
+import {createTemplateResumption} from '../template-retomada.mjs';
 
 const phone='5544000000001';
 const template={name:'retomar_atendimento',language:'pt_BR',status:'APPROVED',
@@ -11,10 +12,11 @@ function setup(t,overrides={}){
     META_GRAPH_VERSION:'v25.0',WHATSAPP_BUSINESS_ACCOUNT_ID:'123456789',
     WHATSAPP_REENGAGEMENT_ENABLED:'true',WHATSAPP_REENGAGEMENT_TEMPLATE_NAME:'retomar_atendimento',
     WHATSAPP_REENGAGEMENT_TEMPLATE_LANGUAGE:'pt_BR',...overrides};
-  const calls=[],responses={approved:true,throwSend:false,failSend:false};
+  const calls=[],responses={approved:true,throwSend:false,failSend:false,onVerify:null};
   const transport=async(url,options)=>{
     calls.push({url,options});
     if(url.includes('/message_templates?')){
+      await responses.onVerify?.();
       return Response.json({data:responses.approved?[template]:[{...template,status:'PENDING'}]});
     }
     if(url.endsWith('/messages')){
@@ -82,11 +84,43 @@ test('consentimento e envio de template exigem admin, evidencia, aprovacao Meta 
   assert.equal(applyStatuses(f.app,result.body.resumption.providerId),true);
   const saved=(await request(path,'GET',null,cookie)).body.resumptions[0];
   assert.equal(saved.state,'delivered');
+  assert.equal((await request(path,'POST',{...send,requestId:'resume_after_delivery'},cookie)).status,409);
+  assert.equal(sendCount(),1);
   assert.equal((await request(consent,'POST',{requestId:'optout_request_0001',action:'revoke',
     category:'UTILITY',source:'whatsapp',evidence:'Cliente solicitou encerrar mensagens'},cookie)).status,200);
   assert.equal((await request(consent,'GET',null,cookie)).body.consents[0].granted,false);
   assert.equal((await request(path,'POST',{...send,requestId:'resume_request_0003'},cookie)).status,403);
   assert.equal(sendCount(),1);
+});
+
+test('resposta recebida durante consulta do template impede retomada paga desnecessaria',async t=>{
+  const f=setup(t),{request,cookie,chat}=await f.start();
+  await request('/api/conversations/'+chat.id+'/template-consent','POST',{
+    requestId:'concurrent_optin',action:'grant',category:'UTILITY',source:'whatsapp',
+    evidence:'Autorizacao de retorno registrada'},cookie);
+  f.responses.onVerify=()=>f.app.intake({metadata:{phone_number_id:'test-phone'},messages:[{
+    id:'concurrent-reply',from:phone,type:'text',timestamp:Math.floor(Date.now()/1000),
+    text:{body:'Podemos continuar agora'}}]});
+  const result=await request('/api/conversations/'+chat.id+'/template-resumptions','POST',{
+    requestId:'concurrent_resume',confirmed:true,approvedTemplateConfirmed:true},cookie);
+  assert.equal(result.status,409);
+  assert.equal(f.calls.filter(c=>c.url.endsWith('/messages')).length,0);
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM template_resumptions').get().n,0);
+});
+
+test('modelo com variavel nomeada ou consulta incompleta nao e enviado como estatico',async t=>{
+  const f=setup(t),{request,cookie,chat}=await f.start();
+  await request('/api/conversations/'+chat.id+'/template-consent','POST',{
+    requestId:'static_only_optin',action:'grant',category:'UTILITY',source:'whatsapp',
+    evidence:'Autorizacao de retorno registrada'},cookie);
+  const old=template.components;
+  try{
+    template.components=[{type:'BODY',text:'Ola {{nome}}'}];
+    const result=await request('/api/conversations/'+chat.id+'/template-resumptions','POST',{
+      requestId:'static_only_resume',confirmed:true,approvedTemplateConfirmed:true},cookie);
+    assert.equal(result.status,409);
+    assert.equal(f.calls.filter(c=>c.url.endsWith('/messages')).length,0);
+  }finally{template.components=old;}
 });
 
 function applyStatuses(app,id){
@@ -113,6 +147,23 @@ test('resultado de envio desconhecido nao dispara nova tentativa e limita acesso
   assert.equal((await request(path,'POST',send,cookie)).body.resumption.state,'unknown');
   assert.equal((await request(path,'POST',{...send,requestId:'resume_request_0006'},cookie)).status,409);
   assert.equal(f.calls.filter(c=>c.url.endsWith('/messages')).length,1);
+  f.app.db.prepare('UPDATE template_resumptions SET created=?').run(Date.now()-48*3600000);
+  assert.equal((await request(path,'POST',{...send,requestId:'resume_after_48h_unknown'},cookie)).status,409);
+  assert.equal(f.calls.filter(c=>c.url.endsWith('/messages')).length,1);
+});
+
+test('identificador Meta repetido preserva mensagem original e deixa novo envio sob conferencia',async t=>{
+  const f=setup(t),{request,cookie,chat}=await f.start();
+  const old=f.app.db.prepare("SELECT id,body FROM messages WHERE direction='in'").get();
+  f.app.db.prepare('UPDATE messages SET provider_id=? WHERE id=?').run('provider-sent-1',old.id);
+  await request('/api/conversations/'+chat.id+'/template-consent','POST',{
+    requestId:'collision_optin',action:'grant',category:'UTILITY',source:'whatsapp',
+    evidence:'Autorizacao de retorno registrada'},cookie);
+  const result=await request('/api/conversations/'+chat.id+'/template-resumptions','POST',{
+    requestId:'collision_resume',confirmed:true,approvedTemplateConfirmed:true},cookie);
+  assert.equal(result.status,502);
+  assert.equal(f.app.db.prepare('SELECT body FROM messages WHERE id=?').get(old.id).body,old.body);
+  assert.equal(f.app.db.prepare('SELECT state FROM template_resumptions').get().state,'unknown');
 });
 
 test('janela de 24h continua bloqueando template de retomada desnecessario',async t=>{
@@ -124,6 +175,21 @@ test('janela de 24h continua bloqueando template de retomada desnecessario',asyn
   f.app.db.prepare('UPDATE conversations SET last_inbound=? WHERE id=?').run(Date.now()-1000,chat.id);
   assert.equal((await request(path,'POST',{requestId:'resume_request_0007',confirmed:true,approvedTemplateConfirmed:true},cookie)).status,409);
   assert.equal(f.calls.filter(c=>c.url.endsWith('/messages')).length,0);
+});
+
+test('reinicio preserva envio interrompido como incerto sem repetir transporte',async t=>{
+  const f=setup(t),{request,cookie,chat}=await f.start();
+  const messageId='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  f.app.db.prepare("INSERT INTO messages(id,conversation_id,direction,body,status,created) VALUES(?,?,'out','[Modelo]','sending',?)")
+    .run(messageId,chat.id,Date.now());
+  f.app.db.prepare(`INSERT INTO template_resumptions(id,request_id,conversation_id,message_id,name,language,category,state,created,updated,actor_id)
+    VALUES('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb','interrupted_request',?,?,'retomar_atendimento','pt_BR','UTILITY','sending',?,?,'test-admin')`)
+    .run(chat.id,messageId,Date.now(),Date.now());
+  createTemplateResumption(f.app.db,f.config,async()=>{throw Error('No network on recovery');},{ready:true});
+  assert.equal(f.app.db.prepare('SELECT status FROM messages WHERE id=?').get(messageId).status,'unknown');
+  const saved=(await request('/api/conversations/'+chat.id+'/template-resumptions','GET',null,cookie)).body.resumptions[0];
+  assert.equal(saved.state,'unknown');
+  assert.equal(f.calls.length,0);
 });
 
 test('painel de retomadas exige login administrativo e envio segue desligado por padrao',async t=>{

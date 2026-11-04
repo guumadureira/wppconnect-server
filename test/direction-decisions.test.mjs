@@ -24,6 +24,10 @@ test('fila exige sessao do administrador autorizado, guarda decisao e nao envia 
   const other={name:'Atendente',email:'operator@example.invalid',password:'test-password-654321'};
   assert.equal((await request('/api/agents','POST',other,cookie)).status,201);
   const otherCookie=(await request('/api/login','POST',other)).cookie;
+  const adminState=(await request('/api/state','GET',null,cookie)).body;
+  assert.equal(adminState.internalTools.directionDecisions,true);
+  assert.equal(adminState.internalTools.templates.enabled,false);
+  assert.equal((await request('/api/state','GET',null,otherCookie)).body.internalTools,null);
   app.intake({metadata:{phone_number_id:'test-phone'},messages:[{id:'fake-in-1',from:phone,
     type:'text',text:{body:'Preciso de aprovacao de alteracao'},timestamp:Math.floor(Date.now()/1000)}]});
   const conversation=app.db.prepare('SELECT id FROM conversations WHERE phone=?').get(phone);

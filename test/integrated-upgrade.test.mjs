@@ -1,0 +1,40 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {DatabaseSync} from 'node:sqlite';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {randomUUID} from 'node:crypto';
+import {createCentral} from '../server.mjs';
+
+test('atualizacao do banco legado preserva contas, mensagens, vinculos e consumo',async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'central-upgrade-test-'));
+  const path=join(directory,'central.sqlite');let app;
+  t.after(async()=>{if(app)await app.close();await rm(directory,{recursive:true,force:true});});
+  const blocked=async()=>{throw Error('Upgrade must not contact an external service');};
+  const config={DATABASE_PATH:path,WHATSAPP_MODE:'demo'};
+  app=createCentral(config,blocked);
+  const cid=randomUUID(),mid=randomUUID(),aid=randomUUID(),job=randomUUID();
+  app.db.prepare("INSERT INTO agents(id,name,email,password,role) VALUES(?,'Operador','fixture@example.invalid','fake-hash','admin')").run(aid);
+  app.db.prepare("INSERT INTO conversations(id,name,phone,last_received,updated) VALUES(?,'Fixture','5544000000001',1,?)").run(cid,Date.now());
+  app.db.prepare("INSERT INTO messages(id,conversation_id,direction,body,status,created) VALUES(?,?,'in','historico preservado','received',?)").run(mid,cid,Date.now());
+  app.customerContext.view(cid);
+  app.db.prepare("UPDATE conversation_context SET client_id=?,summary='Contexto anterior' WHERE conversation_id=?").run(randomUUID(),cid);
+  app.db.prepare(`INSERT INTO ai_jobs(id,conversation_id,message_id,epoch,state,created,updated,cost_usd,billing_month)
+    VALUES(?,?,?,0,'done',?,?,1.75,'2026-11')`).run(job,cid,mid,Date.now(),Date.now());
+  await app.close();app=null;
+  const legacy=new DatabaseSync(path);
+  legacy.exec('ALTER TABLE context_lookup_jobs DROP COLUMN lookup_only');
+  legacy.prepare("INSERT INTO context_lookup_jobs(conversation_id,last_received,state) VALUES(?,1,'pending')").run(cid);
+  const prior=legacy.prepare('SELECT * FROM messages WHERE id=?').get(mid);
+  legacy.close();
+  app=createCentral(config,blocked);
+  assert.deepEqual(app.db.prepare('SELECT * FROM messages WHERE id=?').get(mid),prior);
+  assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM agents').get().n,1);
+  assert.equal(app.db.prepare('SELECT SUM(cost_usd) AS cost FROM ai_jobs').get().cost,1.75);
+  assert.equal(app.customerContext.view(cid).summary,'Contexto anterior');
+  assert.equal(app.db.prepare('SELECT lookup_only FROM context_lookup_jobs WHERE conversation_id=?').get(cid).lookup_only,0);
+  assert.equal(app.directionDecisions.enabled(),false);
+  assert.equal(app.templateResumption.status().enabled,false);
+  assert.equal(app.globalContext.enabled(),false);
+});
