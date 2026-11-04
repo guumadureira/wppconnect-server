@@ -125,7 +125,8 @@ export function createCentral(config = process.env, transport = fetch, options =
         const authorized=String(config.META_COEXISTENCE_PHONE_NUMBER||'').replace(/\D/g,'');
         if(!from||(display&&display!==from)||(authorized&&authorized!==from)){result.invalidMessages++;continue;}
       }
-      const phone = clean(echo ? m.to : m.from, 30);
+      const rawPhone=clean(echo?m.to:m.from,30);
+      const phone=/^[+()0-9\s-]{5,30}$/.test(rawPhone)?rawPhone.replace(/\D/g,''):'';
       if (!/^\d{5,20}$/.test(phone)) {result.invalidMessages++;continue;}
       const timestamp = Number(m.timestamp) * 1000;
       const at = Number.isFinite(timestamp) && timestamp > 0 ? Math.min(timestamp, now()) : now();
