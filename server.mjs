@@ -16,6 +16,7 @@ import {createOperatorChat} from './operator-chat.mjs';
 import {createOperatorContext} from './operator-context.mjs';
 import {samePhone,normalizeContactPhone} from './contact-phone.mjs';
 import {createAIQuality} from './ai-quality.mjs';
+import {createTemplateResumption} from './template-retomada.mjs';
 
 const derive = promisify(scrypt);
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -64,6 +65,7 @@ export function createCentral(config = process.env, transport = fetch, options =
   const customerContext = createNotionContext(db,config,transport,{requestIntervalMs:options.notionRequestIntervalMs,aiEnabled:()=>ai?.status().enabled||false});
   const ready = live && ['WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_ACCESS_TOKEN','META_APP_SECRET','WEBHOOK_VERIFY_TOKEN','META_GRAPH_VERSION'].every(k => config[k]);
   const suppliers=createSupplierRegister(db,config,transport);
+  const templateResumption=createTemplateResumption(db,config,transport,{ready:!!ready});
   ai = createAIAttendance(db,config,transport,customerContext,{ready:!!ready,debounceMs:options.aiDebounceMs,media,suppliers,importedHistory:id=>manualHistory?.forAI(id)});
   manualHistory=createHistoryImport(db,customerContext,ai);
   const centralMCP=createCentralMCP(db,config,transport,{context:customerContext,ai,media,ready:!!ready});
@@ -148,6 +150,7 @@ export function createCentral(config = process.env, transport = fetch, options =
       if (!m) continue;
       const rank = {sending:0,unknown:0,sent:1,delivered:2,read:3,failed:4};
       if (s.status === 'failed' || rank[s.status] > rank[m.status]) run('UPDATE messages SET status=? WHERE id=?',s.status,m.id);
+      templateResumption.reconcileProvider(s.id,s.status);
       if (s.status === 'failed') {
         result.sendFailure={at:now(),source:'delivery',code:metaCode(s.errors?.[0]?.code)};
         const c = get('SELECT * FROM conversations WHERE id=?',m.conversation_id);
@@ -272,6 +275,23 @@ export function createCentral(config = process.env, transport = fetch, options =
         return reply(200,{ok:true});
       }
       if (!user) fail(401,'Entre com seu usuário para continuar.');
+      if(url.pathname==='/api/template-resumption/status'&&req.method==='GET'){
+        if(user.role!=='admin')fail(403,'Somente administradores podem consultar modelos de retomada.');
+        return reply(200,templateResumption.status());
+      }
+      const templateMatch=url.pathname.match(/^\/api\/conversations\/([^/]+)\/(template-consent|template-resumptions)$/);
+      if(templateMatch){
+        const [,id,action]=templateMatch;
+        if(action==='template-consent'){
+          if(req.method==='GET')return reply(200,{consents:templateResumption.consents(id,user)});
+          if(req.method==='POST')return reply(200,{consents:templateResumption.consent(id,body,user)});
+        }
+        if(action==='template-resumptions'){
+          if(req.method==='GET')return reply(200,{resumptions:templateResumption.list(id,user)});
+          if(req.method==='POST')return reply(201,{resumption:await templateResumption.send(id,body,user)});
+        }
+        fail(405,'Método não permitido.');
+      }
       if(url.pathname==='/api/incoming-events'&&req.method==='GET'){
         const latest=get('SELECT COALESCE(MAX(sequence),0) AS n FROM incoming_receipts').n;
         if(!url.searchParams.has('after'))return reply(200,{cursor:latest,events:[]});
@@ -559,7 +579,7 @@ export function createCentral(config = process.env, transport = fetch, options =
     try{await deliverAlerts();await media.processPending();await customerContext.processLookups();await customerContext.processQueue();await suppliers.process();}catch{console.error('Falha ao verificar lembretes, anexos ou integração.');}finally{delivering=false;}
   },60000);
   timer.unref();
-  return {server,db,intake,tick,deliverAlerts,media,customerContext,ai,suppliers,manualHistory,operatorChat,close:()=>{
+  return {server,db,intake,tick,deliverAlerts,media,customerContext,ai,suppliers,templateResumption,manualHistory,operatorChat,close:()=>{
     clearInterval(timer);
     clearInterval(aiTimer);
     return new Promise((resolve,reject)=>server.close(async error=>{
