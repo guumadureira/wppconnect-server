@@ -43,7 +43,7 @@ function setup(t,overrides={}){
       text:{body:'Me avise sobre meu projeto'},}]});
     const chat=app.db.prepare('SELECT * FROM conversations WHERE phone=?').get(phone);
     assert.ok(chat);
-    return {request,cookie,chat};
+    return {request,cookie,chat,origin};
   };
   return {app,config,calls,responses,start};
 }
@@ -123,5 +123,25 @@ test('janela de 24h continua bloqueando template de retomada desnecessario',asyn
     source:'whatsapp',evidence:'Permissao para retorno registrada'},cookie)).status,200);
   f.app.db.prepare('UPDATE conversations SET last_inbound=? WHERE id=?').run(Date.now()-1000,chat.id);
   assert.equal((await request(path,'POST',{requestId:'resume_request_0007',confirmed:true,approvedTemplateConfirmed:true},cookie)).status,409);
+  assert.equal(f.calls.filter(c=>c.url.endsWith('/messages')).length,0);
+});
+
+test('painel de retomadas exige login administrativo e envio segue desligado por padrao',async t=>{
+  const f=setup(t,{WHATSAPP_REENGAGEMENT_ENABLED:'false'}),{request,cookie,origin,chat}=await f.start();
+  assert.equal((await fetch(origin+'/retomadas')).status,401);
+  const other={name:'Operador',email:'operator@example.invalid',password:'test-only-secret-password-5'};
+  assert.equal((await request('/api/agents','POST',other,cookie)).status,201);
+  const otherCookie=(await request('/api/login','POST',other)).cookie;
+  assert.equal((await fetch(origin+'/retomadas',{headers:{cookie:otherCookie}})).status,403);
+  const allowed=await fetch(origin+'/retomadas',{headers:{cookie}});
+  assert.equal(allowed.status,200);
+  const html=await allowed.text();
+  assert.match(html,/Retomada de atendimento/);
+  assert.match(html,/\/api\/conversations\//);
+  const metaStatus=(await request('/api/template-resumption/status','GET',null,cookie)).body;
+  assert.equal(metaStatus.enabled,false);
+  const id=chat.id;
+  assert.equal((await request('/api/conversations/'+id+'/template-resumptions','POST',{
+    requestId:'resume_request_0099',confirmed:true,approvedTemplateConfirmed:true},cookie)).status,503);
   assert.equal(f.calls.filter(c=>c.url.endsWith('/messages')).length,0);
 });
