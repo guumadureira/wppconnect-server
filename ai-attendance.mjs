@@ -119,16 +119,21 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
       if(ctx.client_id){try{await context.refresh(conversation);}catch{/* General attendance can continue without presenting stale operational status as current. */}ctx=context.view(conversation.id);}
       job.contextVersion=ctx.version;
       if(!valid(job)){run("UPDATE ai_jobs SET state='cancelled' WHERE id=?",job.id);return;}
-      // An app echo may be delivered after a newer inbound message. Place the
-      // mirrored reply by its provider second, using rowid only to order same-second
-      // events. Keep rowid/last_received untouched for live job concurrency checks.
-      const order="CAST(created/1000 AS INTEGER) DESC,rowid DESC";
-      const history=all("SELECT rowid AS arrival,id,direction,body,agent_name,created FROM messages WHERE conversation_id=? AND (direction='in' OR status IN ('sent','delivered','read')) ORDER BY "+order+" LIMIT 24",conversation.id).reverse();
-      const lastReply=get("SELECT rowid AS arrival,id,direction,body,agent_name,created FROM messages WHERE conversation_id=? AND direction='out' AND status IN ('sent','delivered','read') ORDER BY "+order+" LIMIT 1",conversation.id);
-      // A burst of customer messages must not remove the team's last question.
+      // Arrival order is authoritative for normal traffic: provider timestamps are
+      // rounded to seconds and should not reorder a fast client/team exchange.
+      const history=all("SELECT rowid AS arrival,id,direction,body,agent_name,created FROM messages WHERE conversation_id=? AND (direction='in' OR status IN ('sent','delivered','read')) ORDER BY rowid DESC LIMIT 24",conversation.id).reverse();
+      const lastReply=get("SELECT rowid AS arrival,id,direction,body,agent_name,created FROM messages WHERE conversation_id=? AND direction='out' AND status IN ('sent','delivered','read') ORDER BY rowid DESC LIMIT 1",conversation.id);
       if(lastReply&&!history.some(m=>m.id===lastReply.id))history.unshift(lastReply);
+      // Only relocate a provably delayed Business-app echo (>2s older). Never
+      // infer order from timestamp alone for ordinary incoming/API messages.
+      for(let index=0;index<history.length;index++){
+        const echo=history[index];
+        if(echo.direction!=='out'||echo.agent_name!=='Aplicativo Business (atendente não identificado)')continue;
+        const olderIndex=history.findIndex((other,i)=>i<index&&other.created>echo.created+2000);
+        if(olderIndex!==-1){history.splice(index,1);history.splice(olderIndex,0,echo);}
+      }
       const orderedHistory=history.map((m,index)=>({...m,arrival:index+1}));
-      const orderedLastReply=lastReply?{...lastReply,arrival:orderedHistory.findIndex(m=>m.id===lastReply.id)+1}:null;
+      const orderedLastReply=orderedHistory.filter(m=>m.direction==='out').at(-1)||null;
       const turn=attendanceTurn(orderedHistory,orderedLastReply);
       const transcripts=new Map();
       if(String(config.AI_AUDIO_ENABLED)==='true')for(const message of history){
