@@ -2,6 +2,8 @@
 
 **Produção e retomada em 04/11/2026:** o serviço existente usa Starter e disco persistente; o blueprint Free e os exemplos temporários abaixo descrevem a avaliação inicial. A versão integrada preparada e a rotina de backup estão em [docs/retomada-integrada-2026-11-04.md](docs/retomada-integrada-2026-11-04.md). Não reaplicar a configuração de demonstração sobre o banco real.
 
+**Próximo lote, ainda separado da produção:** [telefones e arquivos recebidos pelo MCP](docs/mcp-contatos-anexos.md). Aceita variantes do mesmo contato autorizado, preserva o destino original e permite recuperar anexos antigos por recursos MCP autenticados. Não amplia a lista de contatos permitidos nem configura automaticamente um conector no ChatGPT ou Notion.
+
 Central para evitar clientes sem resposta, identificar cada atendente e organizar retornos. O projeto recupera a demonstração da conversa “Criar integração WhatsApp para CRM”. O final do servidor e da interface foi reconstituído porque os registros disponíveis estavam truncados.
 
 ## Desenvolvimento local

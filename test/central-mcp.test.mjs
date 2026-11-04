@@ -27,10 +27,135 @@ test('MCP exige credencial própria, origem válida e não aceita cookie como au
   assert.equal((await f.post(rpc,{},'GET')).status,405);
   const init=await(await f.post(rpc)).json();assert.equal(init.result.protocolVersion,'2025-06-18');
   assert.equal((await f.post({jsonrpc:'2.0',method:'notifications/initialized'})).status,202);
-  const list=await(await f.post({jsonrpc:'2.0',id:2,method:'tools/list'})).json();assert.equal(list.result.tools.length,11);
+  const list=await(await f.post({jsonrpc:'2.0',id:2,method:'tools/list'})).json();assert.equal(list.result.tools.length,12);
+  assert.deepEqual(init.result.capabilities.resources,{});
   assert.ok(list.result.tools.find(x=>x.name==='confirmar_envio').annotations.destructiveHint);
   assert.equal((await fetch(f.base+'/api/state',{headers:{authorization:'Bearer '+key}})).status,401);
   assert.ok(!JSON.stringify(init).includes(key));assert.equal(f.calls.length,0);
+});
+
+test('MCP aceita variantes brasileiras e mantém destino original, aprovação e idempotência',async t=>{
+  const original='554487654321',configured='+55 (44) 98765-4321';
+  const f=await fixture(t,{CENTRAL_MCP_ALLOWED_PHONES:configured});const c=f.incoming('Contato fictício',original);
+  const requestId=randomUUID();let preview;
+  for(const telefone of [original,'5544987654321','+55 (44) 98765-4321','44 98765-4321','(44) 8765-4321']){
+    const read=await f.tool('consultar_conversa',{telefone});assert.equal(read.structuredContent?.conversaId,c.id);
+    const d=(await f.tool('preparar_envio',{telefone,texto:'Retorno aprovado',requestId})).structuredContent;
+    assert.equal(d.telefone,original);if(preview)assert.equal(d.envioId,preview.envioId);preview=d;
+  }
+  assert.equal(f.calls.length,0);await f.send(preview);await f.send(preview);
+  assert.equal(f.calls.length,1);assert.equal(JSON.parse(f.calls[0].options.body).to,original);
+  assert.equal(f.app.db.prepare('SELECT phone FROM conversations WHERE id=?').get(c.id).phone,original);
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM conversations').get().n,1);
+});
+
+test('MCP não amplia autorização para outros países, fixos, sufixos ou telefones malformados',async t=>{
+  const f=await fixture(t,{CENTRAL_MCP_ALLOWED_PHONES:'5544987654321'});f.incoming('Permitido','554487654321');
+  for(const telefone of ['+44 987654321','987654321','5544987654322','x5544987654321','5544987654321x','+55+44987654321']){
+    assert.equal((await f.tool('consultar_conversa',{telefone})).isError,true,telefone);
+  }
+  const fixed=await fixture(t,{CENTRAL_MCP_ALLOWED_PHONES:'554432345678'});fixed.incoming('Fixo','554432345678');
+  assert.equal((await fixed.tool('consultar_conversa',{telefone:'5544932345678'})).isError,true);
+  // A local Brazilian query must not expose a stored international number with the same digits.
+  const foreign=await fixture(t,{CENTRAL_MCP_ALLOWED_PHONES:'5544987654321'});foreign.incoming('Privado exterior','44987654321');
+  const result=await foreign.tool('consultar_conversa',{telefone:'44 98765-4321'});
+  assert.equal(result.isError,true);assert.ok(!JSON.stringify(result).includes('Privado exterior'));
+  assert.equal(f.calls.length+fixed.calls.length+foreign.calls.length,0);
+});
+
+test('cadastros equivalentes ambíguos bloqueiam inclusive confirmação de prévia anterior',async t=>{
+  const original='554487654321',alias='5544987654321',f=await fixture(t,{CENTRAL_MCP_ALLOWED_PHONES:alias});
+  f.incoming('Contato',original);
+  const d=(await f.tool('preparar_envio',{telefone:original,texto:'Teste',requestId:randomUUID()})).structuredContent;
+  f.app.db.prepare('INSERT INTO conversations(id,name,phone,updated) VALUES(?,?,?,?)').run(randomUUID(),'Duplicado legado',alias,Date.now());
+  for(const telefone of [original,alias])assert.equal((await f.tool('consultar_conversa',{telefone})).isError,true);
+  assert.equal((await f.send(d)).isError,true);assert.equal(f.calls.length,0);
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM conversations').get().n,2);
+});
+
+function attachReceived(f,c,body='documento fictício'){
+  const id=randomUUID(),bytes=Buffer.from('%PDF-1.4\n'+body),file=f.app.media.store('document','application/pdf','arquivo.pdf',bytes);
+  f.app.db.prepare("INSERT INTO messages(id,conversation_id,direction,body,status,created) VALUES(?,?,'in','[Documento]','received',?)").run(id,c.id,Date.now()-10*86400000);
+  f.app.media.link(id,file.id);return{id,file,bytes};
+}
+const readResource=async(f,uri,headers)=>{const r=await f.post({jsonrpc:'2.0',id:1,method:'resources/read',params:{uri}},headers);return{status:r.status,body:await r.json()};};
+
+test('catálogo recupera originais antigos paginados sem limite das últimas mensagens ou status',async t=>{
+  const f=await fixture(t),c=f.incoming(),saved=[];
+  for(let i=0;i<32;i++)saved.push(attachReceived(f,c,'fictício '+i));
+  for(let i=0;i<35;i++)f.incoming('Mensagem recente '+i);
+  f.app.db.prepare("UPDATE conversations SET status='closed' WHERE id=?").run(c.id);
+  const first=await f.tool('listar_arquivos_recebidos',{telefone:phone});
+  assert.equal(first.structuredContent.arquivos.length,30);assert.equal(first.content.filter(b=>b.type==='resource_link').length,30);
+  const second=(await f.tool('listar_arquivos_recebidos',{telefone:phone,antesDe:first.structuredContent.proximaPagina})).structuredContent;
+  assert.equal(second.arquivos.length,2);assert.equal(second.proximaPagina,null);
+  const allFiles=[...first.structuredContent.arquivos,...second.arquivos];assert.equal(new Set(allFiles.map(a=>a.mensagemId)).size,32);
+  const oldest=allFiles.at(-1),read=await readResource(f,oldest.uri);
+  assert.equal(read.status,200);assert.equal(read.body.result.contents[0].mimeType,'application/pdf');
+  assert.deepEqual(Buffer.from(read.body.result.contents[0].blob,'base64'),saved[0].bytes);
+  assert.equal(oldest.remetente,phone);assert.equal(oldest.origem,'whatsapp_recebido');
+  assert.ok(!JSON.stringify(first).includes('Bearer'));assert.equal(f.calls.length,0);
+  assert.equal(f.app.db.prepare('SELECT status FROM conversations WHERE id=?').get(c.id).status,'closed');
+});
+
+test('recursos exigem autenticação, telefone autorizado e vínculo exato do anexo recebido',async t=>{
+  const other='5544000000002',f=await fixture(t),c=f.incoming(),foreign=f.incoming('Privado',other);
+  const own=attachReceived(f,c),alien=attachReceived(f,foreign,'privado alheio');
+  const list=(await f.tool('listar_arquivos_recebidos',{telefone:phone})).structuredContent,uri=list.arquivos[0].uri;
+  assert.equal((await readResource(f,uri,{authorization:'',cookie:'central_session=fake'})).status,401);
+  const forged=[uri.replace(c.id,foreign.id).replace(own.id,alien.id).replace(own.file.id,alien.file.id),uri.replace(own.file.id,alien.file.id),uri.replace(own.id,alien.id),'file:///etc/passwd',uri+'?token=anything',uri+'/../'];
+  for(const target of forged){const r=await readResource(f,target);assert.ok(r.body.error);assert.ok(!JSON.stringify(r).includes('privado alheio'));}
+  assert.equal((await f.tool('listar_arquivos_recebidos',{telefone:other})).isError,true);
+  assert.equal((await f.tool('listar_arquivos_recebidos',{telefone:phone,antesDe:alien.id})).isError,true);
+  f.app.db.prepare("UPDATE messages SET direction='out' WHERE id=?").run(own.id);
+  assert.ok((await readResource(f,uri)).body.error);
+  assert.equal((await f.tool('listar_arquivos_recebidos',{telefone:phone})).structuredContent.arquivos.length,0);
+  assert.equal(f.calls.length,0);
+});
+
+test('arquivo pendente não vira download e recurso revalida permissão e integridade a cada leitura',async t=>{
+  const f=await fixture(t),c=f.incoming(),a=attachReceived(f,c);
+  const uri=(await f.tool('listar_arquivos_recebidos',{telefone:phone})).structuredContent.arquivos[0].uri;
+  f.app.db.prepare("UPDATE media SET state='pending' WHERE id=?").run(a.file.id);
+  const pending=(await f.tool('listar_arquivos_recebidos',{telefone:phone})).structuredContent.arquivos[0];
+  assert.equal(pending.estado,'pending');assert.equal(pending.uri,undefined);assert.ok((await readResource(f,uri)).body.error);
+  f.app.db.prepare("UPDATE media SET state='ready',byte_size=20000001 WHERE id=?").run(a.file.id);
+  assert.ok((await readResource(f,uri)).body.error);
+  f.app.db.prepare('UPDATE media SET byte_size=? WHERE id=?').run(a.bytes.length+1,a.file.id);
+  assert.ok((await readResource(f,uri)).body.error);
+  f.app.db.prepare('UPDATE media SET byte_size=? WHERE id=?').run(a.bytes.length,a.file.id);
+  f.app.db.prepare('UPDATE conversations SET phone=? WHERE id=?').run('5544000000002',c.id);
+  assert.ok((await readResource(f,uri)).body.error);assert.equal(f.calls.length,0);
+});
+
+test('identificador Meta vazio ou já registrado conserva histórico e resultado incerto sem repetir envio',async t=>{
+  for(const returnedId of ['', '   ', 'x'.repeat(513), 'in-1']){
+    const f=await fixture(t,{},async()=>Response.json({messages:[{id:returnedId}]}));
+    const c=f.incoming('Mensagem original preservada'),original=f.app.db.prepare("SELECT * FROM messages WHERE provider_id='in-1'").get();
+    const d=await f.prepare(),first=(await f.send(d)).structuredContent;
+    assert.equal(first.estado,'unknown');assert.equal(first.aceitoPelaMeta,false);assert.equal(first.entregaConfirmada,false);
+    assert.deepEqual(f.app.db.prepare('SELECT * FROM messages WHERE id=?').get(original.id),original);
+    assert.equal((await f.send(d)).structuredContent.estado,'unknown');assert.equal(f.calls.length,1);
+    assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM messages WHERE conversation_id=?').get(c.id).n,2);
+  }
+});
+
+test('janela ou prévia que expira durante upload impede despacho da mensagem MCP',async t=>{
+  const realNow=Date.now;let clock=realNow();t.mock.method(Date,'now',()=>clock);
+  for(const expiration of ['window','preview']){
+    clock=realNow();
+    let f;f=await fixture(t,{},async(url)=>{
+      assert.ok(url.endsWith('/media'));
+      clock+=expiration==='window'?120000:31*60000;
+      return Response.json({id:'fake-upload'});
+    });
+    const c=f.incoming(),file=attachReceived(f,c);
+    if(expiration==='window')f.app.db.prepare('UPDATE conversations SET last_inbound=?').run(clock-86400000+60000);
+    const d=(await f.tool('preparar_envio',{telefone:phone,texto:'Arquivo revisado',anexoId:file.file.id,requestId:randomUUID()})).structuredContent;
+    const sent=(await f.send(d)).structuredContent;
+    assert.equal(sent.estado,'failed');assert.equal(sent.aceitoPelaMeta,false);
+    assert.equal(f.calls.filter(call=>call.url.endsWith('/messages')).length,0);
+  }
 });
 test('conexão desativada, token curto ou lista vazia não concede acesso',async t=>{
   for(const extra of [{CENTRAL_MCP_ENABLED:'false'},{CENTRAL_MCP_TOKEN:'short'},{CENTRAL_MCP_ALLOWED_PHONES:''}]){
