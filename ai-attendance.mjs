@@ -14,10 +14,15 @@ const intakeSchema={type:'object',additionalProperties:false,required:['ready','
 const schema={type:'object',additionalProperties:false,required:['reply','summary','missing','nextStep','kind','handoff','reason','intake'],properties:{reply:{type:'string',maxLength:700},summary:{type:'string'},missing:{type:'string'},nextStep:{type:'string'},kind:{type:'string',enum:kinds},handoff:{type:'boolean'},reason:{type:'string'},intake:intakeSchema}};
 const supplierSchema={type:'object',additionalProperties:false,required:['name','description','category','sourceMessageId','complete'],properties:{name:{type:'string',maxLength:120},description:{type:'string',maxLength:240},category:{type:'string',enum:supplierCategories},sourceMessageId:{type:'string',maxLength:120},complete:{type:'boolean'}}};
 schema.required.push('supplier');schema.properties.supplier={anyOf:[supplierSchema,{type:'null'}]};
+const directorDecisionSchema={type:'object',additionalProperties:false,required:['required','category','question','basis'],properties:{
+  required:{type:'boolean'},category:{type:'string',enum:['tecnica','comercial','administrativa','nenhuma']},
+  question:{type:'string',maxLength:500},basis:{type:'string',maxLength:1000}
+}};
+schema.required.push('directorDecision');schema.properties.directorDecision=directorDecisionSchema;
 const fail=(status,message)=>{throw Object.assign(new Error(message),{status});};
 const month=()=>new Date().toISOString().slice(0,7);
 
-export function createAIAttendance(db,config,transport,context,{ready=false,debounceMs=2500,media,suppliers,isDirectionContact=()=>false,importedHistory}={}){
+export function createAIAttendance(db,config,transport,context,{ready=false,debounceMs=2500,media,suppliers,isDirectionContact=()=>false,directionDecisions,importedHistory}={}){
   const get=(sql,...a)=>db.prepare(sql).get(...a),all=(sql,...a)=>db.prepare(sql).all(...a),run=(sql,...a)=>db.prepare(sql).run(...a);
   db.exec(`CREATE TABLE IF NOT EXISTS ai_jobs(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL REFERENCES conversations(id),message_id TEXT UNIQUE NOT NULL REFERENCES messages(id),epoch INTEGER NOT NULL,state TEXT NOT NULL,created INTEGER NOT NULL,updated INTEGER NOT NULL,result TEXT,error TEXT,cost_usd REAL NOT NULL DEFAULT 0,billing_month TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS ai_control(conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),epoch INTEGER NOT NULL DEFAULT 0,handoff TEXT NOT NULL DEFAULT '');`);
@@ -75,6 +80,15 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
     for(const [k,max]of Object.entries({reply:700,summary:1800,missing:1000,nextStep:1000,reason:500}))if(typeof result[k]!=='string'||result[k].length>max||/\0/.test(result[k]))throw Error('Invalid output');
     if(/https?:\/\/|www\.|sk-proj-|Bearer /i.test(result.reply))throw Error('Unsafe output');
     if(/R\$|\b(?:custa|custará|garantimos)\b|\b(?:prazo|entrega).{0,35}\d/i.test(result.reply))throw Error('Unapproved commitment');
+    const decision=result.directorDecision;
+    if(decision!==undefined){
+      if(!decision||typeof decision.required!=='boolean'||!['tecnica','comercial','administrativa','nenhuma'].includes(decision.category)
+        ||typeof decision.question!=='string'||typeof decision.basis!=='string'
+        ||decision.question.length>500||decision.basis.length>1000)throw Error('Invalid director decision');
+      if(decision.required&&(!result.handoff||result.kind==='comercial'||decision.category==='nenhuma'
+        ||!decision.question.trim()||!decision.basis.trim()))throw Error('Unauthorized director decision');
+      if(!decision.required&&(decision.category!=='nenhuma'||decision.question||decision.basis))throw Error('Unexpected director decision');
+    }
     if(!result.reply.trim()&&!result.handoff)throw Error('Empty output');return result;
   }
   function supplierEvidence(result,history){
@@ -192,6 +206,9 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
       const stillCurrent=valid(job);
       context.aiRecord(conversation.id,job.id,result,result.handoff&&stillCurrent,{expectedVersion:job.contextVersion,updateCurrent:stillCurrent,clientId:ctx.client_id});
       if(stillCurrent)job.contextVersion=context.view(conversation.id).version;
+      if(stillCurrent&&result.handoff&&result.directorDecision?.required&&result.kind!=='comercial'){
+        directionDecisions?.fromAI(conversation.id,job.id,result.directorDecision);
+      }
       if(result.kind==='comercial'&&result.supplier?.complete&&!result.handoff&&result.reply.trim()&&valid(job)){
         const closed=run("UPDATE conversations SET status='closed',pending_since=NULL WHERE id=? AND last_received=? AND status='open'",conversation.id,conversation.last_received);
         if(closed.changes)pause(conversation.id);
