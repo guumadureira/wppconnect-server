@@ -150,7 +150,7 @@ export function createTemplateResumption(db,config={},transport=fetch,{ready=fal
         state IN ('sending','sent','unknown') AND created>? LIMIT 1`,id,current()-elapsed);
       if(freshRecent)fail(409,'Outra retomada está sendo processada para este contato.');
       run("INSERT INTO messages(id,conversation_id,request_id,direction,body,agent_id,agent_name,status,created) VALUES(?,?,?,?,?,?,?,?,?)",
-        messageId,id,requestId,'out','[Modelo de retomada: '+meta.name+']',user.id,user.signatureName||user.name,'sending',at);
+        messageId,id,'template:'+requestId,'out','[Modelo de retomada: '+meta.name+']',user.id,user.signatureName||user.name,'sending',at);
       run(`INSERT INTO template_resumptions(id,request_id,conversation_id,message_id,name,language,category,state,
         created,updated,actor_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
         dispatchId,requestId,id,messageId,meta.name,meta.language,meta.category,'sending',at,at,user.id);
