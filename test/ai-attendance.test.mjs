@@ -195,13 +195,13 @@ test('assumir enquanto o modelo trabalha cancela a resposta e preserva controle 
 test('resposta pelo aplicativo Business pausa a IA mesmo durante geração',async t=>{
   let started,finish;const began=new Promise(r=>started=r),waiting=new Promise(r=>finish=r);
   const f=fixture(t,{},async url=>{if(url.includes('openai.com')){started();await waiting;}});const c=f.incoming();const work=f.app.ai.process();await began;
-  f.app.intake({metadata:{phone_number_id:'test-phone'},message_echoes:[{id:'human-echo',to:phone,type:'text',text:{body:'Vou cuidar disso.'},timestamp:Math.floor(Date.now()/1000)}]},'smb_message_echoes');finish();await work;
+  f.app.intake({metadata:{phone_number_id:'test-phone'},message_echoes:[{id:'human-echo',from:'5544000000002',to:phone,type:'text',text:{body:'Vou cuidar disso.'},timestamp:Math.floor(Date.now()/1000)}]},'smb_message_echoes');finish();await work;
   assert.equal(f.calls.length,1);assert.equal(f.app.customerContext.view(c.id).mode,'human');
 });
 
 test('eco humano mantém autoria, deduplica e entra no contexto após liberação explícita',async t=>{
   const f=fixture(t),c=f.incoming();
-  const echo={metadata:{phone_number_id:'test-phone'},message_echoes:[{id:'echo-context',to:phone,type:'text',text:{body:'Combinamos conferir o projeto na sexta-feira.'},timestamp:Math.floor(Date.now()/1000)}]};
+  const echo={metadata:{phone_number_id:'test-phone'},message_echoes:[{id:'echo-context',from:'5544000000002',to:phone,type:'text',text:{body:'Combinamos conferir o projeto na sexta-feira.'},timestamp:Math.floor(Date.now()/1000)}]};
   f.app.intake(echo,'smb_message_echoes');f.app.intake(echo,'smb_message_echoes');
   await f.app.ai.process();assert.equal(f.calls.length,0);
   const saved=f.app.db.prepare("SELECT * FROM messages WHERE provider_id='echo-context'").all();
