@@ -24,7 +24,9 @@ export function createNotionContext(db,config,transport,options={}){
     CREATE TABLE IF NOT EXISTS service_events(id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,conversation_id TEXT NOT NULL REFERENCES conversations(id),request_id TEXT,client_id TEXT,work_id TEXT,kind TEXT NOT NULL,summary TEXT NOT NULL,missing TEXT NOT NULL DEFAULT '',next_step TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'Em atendimento',qualification TEXT NOT NULL,actor TEXT NOT NULL,source TEXT NOT NULL,message_id TEXT,created INTEGER NOT NULL,sync_state TEXT NOT NULL,sync_error TEXT,notion_page_id TEXT,attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0);
     CREATE INDEX IF NOT EXISTS service_events_queue ON service_events(sync_state,next_attempt);
     CREATE TABLE IF NOT EXISTS notion_client_operations(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL REFERENCES conversations(id),operation_key TEXT UNIQUE NOT NULL,state TEXT NOT NULL,client_id TEXT,error TEXT,created INTEGER NOT NULL);`);
-  db.exec("CREATE TABLE IF NOT EXISTS context_lookup_jobs(conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),last_received INTEGER,state TEXT NOT NULL,next_attempt INTEGER NOT NULL DEFAULT 0,error TEXT)");
+  db.exec("CREATE TABLE IF NOT EXISTS context_lookup_jobs(conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),last_received INTEGER,state TEXT NOT NULL,next_attempt INTEGER NOT NULL DEFAULT 0,error TEXT,lookup_only INTEGER NOT NULL DEFAULT 0)");
+  if(!db.prepare('PRAGMA table_info(context_lookup_jobs)').all().some(column=>column.name==='lookup_only'))
+    db.exec('ALTER TABLE context_lookup_jobs ADD COLUMN lookup_only INTEGER NOT NULL DEFAULT 0');
   db.exec("CREATE TABLE IF NOT EXISTS notion_client_summaries(client_id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,revision TEXT NOT NULL,payload TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',error TEXT,next_attempt INTEGER NOT NULL DEFAULT 0,updated INTEGER NOT NULL)");
   // A process restart during creation leaves an uncertain outcome. Reconcile before another write.
   run("UPDATE service_events SET sync_state='uncertain',sync_error='Resultado anterior não confirmado; aguardando conferência no Notion.' WHERE sync_state='sending'");
@@ -203,9 +205,17 @@ export function createNotionContext(db,config,transport,options={}){
     const op=resolveBeforeReply(conversation,guard);resolving.set(key,op);
     try{return await op;}finally{resolving.delete(key);}
   }
-  function queueLookup(c){
-    if(!enabled())return;
-    run("INSERT INTO context_lookup_jobs(conversation_id,last_received,state) VALUES(?,?,'pending') ON CONFLICT(conversation_id) DO UPDATE SET last_received=excluded.last_received,state='pending'",c.id,c.last_received);
+  function queueLookup(c,{lookupOnly=false}={}){
+    if(!enabled()||options.isDirectionContact?.(c.phone))return;
+    // Echo-only jobs may link to a pre-existing client but must never create
+    // a new Notion client based solely on an outbound Business App message.
+    const only=lookupOnly?1:0;
+    run(`INSERT INTO context_lookup_jobs(conversation_id,last_received,state,lookup_only)
+      VALUES(?,?,'pending',?)
+      ON CONFLICT(conversation_id) DO UPDATE SET last_received=excluded.last_received,
+        state='pending',next_attempt=0,error=NULL,
+        lookup_only=CASE WHEN context_lookup_jobs.lookup_only=0 THEN 0 ELSE excluded.lookup_only END`,
+      c.id,c.last_received,only);
   }
   let lookupWorker=null;
   function processLookups(){
@@ -223,7 +233,7 @@ export function createNotionContext(db,config,transport,options={}){
             run("UPDATE context_lookup_jobs SET state='commercial',error=NULL WHERE conversation_id=? AND last_received=?",c.id,job.last_received);continue;
           }
           const result=await resolve(c,guard);
-          if(automaticContacts()&&result.state==='not_found'&&!options.isDirectionContact?.(c.phone)&&guard()){
+          if(automaticContacts()&&!job.lookup_only&&result.state==='not_found'&&!options.isDirectionContact?.(c.phone)&&guard()){
             const name=/[A-Za-zÀ-ÿ]/.test(c.name)?c.name.slice(0,120):'Contato '+canonicalPhone(c.phone);
             await createClient(c,{name,version:context(c.id).version,requestId:'automatic-contact',guard},systemActor);
             result.state='created';
