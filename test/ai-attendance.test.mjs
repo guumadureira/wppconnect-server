@@ -379,3 +379,35 @@ test('eco antigo entregue depois do cliente nao altera a ordem causal do context
   assert.ok(input.turn.unansweredMessageIds.length>=2);
   assert.equal(f.calls.filter(x=>x.url.includes('openai.com')).length,2);
 });
+
+test('contexto geral do Notion integra a resposta seguinte sem expor trechos de fora da secao',async t=>{
+  const pageId='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  let service='Projeto residencial e regularizacao';
+  const f=fixture(t,{NOTION_ENABLED:'true',NOTION_TOKEN:'test-private-notion',
+    NOTION_GLOBAL_CONTEXT_PAGE_ID:pageId},async url=>{
+    if(url==='https://api.notion.com/v1/pages/'+pageId)
+      return Response.json({id:pageId,archived:false,in_trash:false});
+    if(url.includes('/blocks/'+pageId+'/children'))
+      return Response.json({results:[
+        {type:'heading_2',heading_2:{rich_text:[{plain_text:'Serviços identificados nos documentos'}]}},
+        {type:'bulleted_list_item',bulleted_list_item:{rich_text:[{plain_text:service}]}},
+        {type:'heading_2',heading_2:{rich_text:[{plain_text:'Segredos internos'}]}},
+        {type:'paragraph',paragraph:{rich_text:[{plain_text:'NAO_REVELAR'}]}}
+      ],has_more:false});
+    return null;
+  });
+  f.incoming('Que tipo de serviço a Domum faz?');
+  await f.app.ai.process();
+  const input1=JSON.parse(f.calls.find(c=>c.url.includes('api.openai.com')).body.input[0].content);
+  assert.equal(input1.generalServiceReference.available,true);
+  assert.match(input1.generalServiceReference.text,/Projeto residencial/);
+  assert.doesNotMatch(JSON.stringify(input1.generalServiceReference),/NAO_REVELAR|test-private-notion/);
+  service='Regularizacao e Habite-se sob analise';
+  const checked=await f.app.globalContext.refresh(true);
+  assert.equal(checked.available,true);
+  f.incoming('E Habite-se?');
+  await f.app.ai.process();
+  const input2=JSON.parse(f.calls.filter(c=>c.url.includes('api.openai.com')).at(-1).body.input[0].content);
+  assert.match(input2.generalServiceReference.text,/Habite-se sob analise/);
+  assert.doesNotMatch(input2.generalServiceReference.text,/Projeto residencial/);
+});
