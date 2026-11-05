@@ -1,4 +1,5 @@
 name: Central MCP tests
+# Validation only: no production deploy, network secrets, or customer data.
 on:
   push:
     branches:
