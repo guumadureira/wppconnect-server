@@ -27,6 +27,39 @@ test('simulação gratuita não usa modelo nem grava atendimento',()=>{
   assert.equal(simulateAttendance('Ofereço parceria comercial').kind,'comercial');assert.throws(()=>simulateAttendance(''),/mensagem de teste/);
 });
 
+test('homologação bloqueia IA em interno/teste e descarta turno reclassificado durante consulta',async t=>{
+  const f=fixture(t,{CONTEXT_CLASSIFICATION_ENABLED:'true'}),c=f.incoming();await f.app.ai.process();
+  assert.equal(f.calls.length,0);
+  const messageId=f.app.db.prepare('SELECT id FROM messages WHERE conversation_id=?').get(c.id).id;
+  const profile={version:0,requestId:'identity-1',identity:'internal',topics:[{id:randomUUID(),title:'Teste',purpose:'simulation',summary:'Simulação interna fictícia',messageIds:[messageId]}]};profile.activeTopicId=profile.topics[0].id;
+  const actor={id:'admin-test',role:'admin'};
+  f.app.customerContext.classify(c,profile,actor);f.incoming('Isto é apenas um teste');await f.app.ai.process();assert.equal(f.calls.length,0);
+  const customer={...profile,version:1,requestId:'identity-2',identity:'external',topics:[{...profile.topics[0],purpose:'customer',summary:'Demanda fictícia confirmada'}]};
+  f.app.customerContext.classify(c,customer,actor);
+  f.app.customerContext.control(c,{mode:'assisted',requestId:randomUUID(),version:f.app.customerContext.view(c.id).version},{id:'operator',signatureName:'Equipe'});f.app.ai.release(c);
+  f.app.globalContext.get=async()=>{
+    f.app.customerContext.classify(c,{...customer,version:2,requestId:'identity-3',topics:[{...customer.topics[0],summary:'Outro assunto confirmado'}]},actor);
+    return{available:false};
+  };
+  f.incoming('Detalhe novo');await f.app.ai.process();
+  assert.equal(f.calls.length,0);assert.equal(f.app.customerContext.view(c.id).mode,'human');
+  assert.equal(f.app.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE direction='out'").get().n,0);
+});
+
+test('turno homologado usa resumo do assunto revisado e separa classificação do histórico',async t=>{
+  const f=fixture(t,{CONTEXT_CLASSIFICATION_ENABLED:'true'}),c=f.incoming();
+  const messageId=f.app.db.prepare('SELECT id FROM messages WHERE conversation_id=?').get(c.id).id,topicId=randomUUID();
+  f.app.db.prepare("UPDATE conversation_context SET summary='Simulação anterior não revisada',missing='Dado antigo',next_step='Passo antigo'").run();
+  f.app.customerContext.classify(c,{version:0,requestId:'customer-1',identity:'external',activeTopicId:topicId,topics:[{id:topicId,title:'Demanda confirmada',purpose:'customer',summary:'Assunto atual revisado pelo administrador',messageIds:[messageId]}]},{id:'admin-test',role:'admin'});
+  f.app.customerContext.control(c,{mode:'assisted',requestId:randomUUID(),version:f.app.customerContext.view(c.id).version},{id:'operator',signatureName:'Equipe'});f.app.ai.release(c);
+  f.incoming('Pode continuar');await f.app.ai.process();
+  const model=f.calls.find(c=>c.url.includes('openai.com'));assert.ok(model);
+  const input=JSON.parse(model.body.input[0].content);
+  assert.equal(input.context.summary,'Assunto atual revisado pelo administrador');assert.equal(input.context.missing,'');
+  assert.equal(input.contextClassification.source,'admin_confirmed');assert.equal(input.contextClassification.purpose,'customer');
+  assert.deepEqual(input.context.history,[]);assert.equal(input.contextClassification.needsReview,true);
+});
+
 test('consulta geral, eco Business e direcao coexistem sem retomar IA ou chamar modelo apos intervencao',async t=>{
   const internal='5544000000008';
   const f=fixture(t,{AI_ALLOW_ALL_CONTACTS:'true',DIRECTION_CONTACT_PHONES:internal,
