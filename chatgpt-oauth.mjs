@@ -22,6 +22,7 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
   const run=(sql,...params)=>db.prepare(sql).run(...params);
   const attempts=new Map();
   const clientCache=new Map();
+  const abuseKey=ip=>ip+'|all';
   if(enabled)db.exec(`CREATE TABLE IF NOT EXISTS chatgpt_oauth_pending (
     id_hash TEXT PRIMARY KEY,client_id TEXT NOT NULL,redirect_uri TEXT NOT NULL,
     challenge TEXT NOT NULL,state TEXT NOT NULL,scope TEXT NOT NULL,expires INTEGER NOT NULL);
@@ -109,11 +110,11 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
     const payload=await response.text();
     if(payload.length>32000)fail(400,'Metadados do cliente inválidos.');
     const data=JSON.parse(payload);
-    if(data.client_id!==clientId||!Array.isArray(data.redirect_uris)||data.redirect_uris.length>30||
+    if(data.client_id!==clientId||typeof data.client_name!=='string'||!data.client_name.trim()||data.client_name.length>160||
+        !Array.isArray(data.redirect_uris)||!data.redirect_uris.length||data.redirect_uris.length>30||
         !data.redirect_uris.every(uri=>typeof uri==='string'&&uri.length<500))fail(400,'Metadados do cliente inválidos.');
-    if(data.grant_types&&!data.grant_types.includes('authorization_code'))fail(400,'Cliente sem autorização de código.');
-    if(data.token_endpoint_auth_methods_supported&&!data.token_endpoint_auth_methods_supported.includes('none')&&data.token_endpoint_auth_method!=='none')
-      fail(400,'Cliente não permite autenticação pública.');
+    if(data.grant_types&&(!Array.isArray(data.grant_types)||!data.grant_types.includes('authorization_code')))fail(400,'Cliente sem autorização de código.');
+    if(data.token_endpoint_auth_method&&data.token_endpoint_auth_method!=='none')fail(400,'Cliente não permite autenticação pública.');
     clientCache.set(clientId,{until:Date.now()+300000,redirects:data.redirect_uris});
     return data.redirect_uris.includes(redirect);
   }
@@ -152,11 +153,12 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
       if(ticket.length>128||!ticket||email.length>160||password.length>512)fail(400,'Formulário inválido.');
       const pending=get('SELECT * FROM chatgpt_oauth_pending WHERE id_hash=? AND expires>?',hash(ticket),Date.now());
       if(!pending)fail(400,'Solicitação vencida. Reinicie a autorização no ChatGPT.');
-      const key=String(req.socket.remoteAddress||'')+'|'+hash(email);
-      if(limited(key))fail(429,'Muitas tentativas. Aguarde.');
+      const ip=String(req.socket.remoteAddress||'');
+      const key=ip+'|'+hash(email),globalKey=abuseKey(ip);
+      if(limited(key)||limited(globalKey))fail(429,'Muitas tentativas. Aguarde.');
       const account=await authenticate(email,password);
       if(!account||account.role!=='admin'||!currentAdmin(account.id)){
-        recordFailure(key);
+        recordFailure(key);recordFailure(globalKey);
         return htmlReply(res,401,'<h1>Acesso negado</h1><p>Confira as credenciais e inicie novamente a conexão no ChatGPT.</p>');
       }
       run('DELETE FROM chatgpt_oauth_pending WHERE id_hash=?',hash(ticket));
