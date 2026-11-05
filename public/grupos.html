@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Grupos · Central Domum</title>
+<style>
+:root{color-scheme:light;font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;color:#20302a;background:#f5f7f4}*{box-sizing:border-box}
+body{margin:0}header{padding:22px max(16px,calc((100vw - 950px)/2));background:#163e33;color:white}header a{color:#e5f3ed}h1{font-size:1.6rem;margin:8px 0}h2{font-size:1.12rem}main{max-width:950px;margin:auto;padding:18px}
+section{padding:18px;margin-bottom:14px;border:1px solid #e0e8e2;background:white;border-radius:12px}
+input,select,textarea{display:block;width:100%;border:1px solid #c5cec6;border-radius:8px;padding:10px;font:inherit;margin:6px 0 12px}
+textarea{min-height:110px}label{font-weight:600}button{background:#24684f;color:white;border:0;border-radius:8px;padding:10px 15px;margin:5px 8px 5px 0;font:inherit;cursor:pointer}
+button:disabled{opacity:.5}button.secondary{background:#ebf1eb;color:#214334}
+small,.muted{color:#68756f}#status{min-height:20px;color:#875323;white-space:pre-wrap}#messages{white-space:pre-wrap;overflow-wrap:anywhere}
+.message{border-bottom:1px solid #e6eae6;padding:9px 0}.message strong{color:#24684f}.message time{font-size:.8rem;color:#67776c;display:block}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f7f4;border-radius:8px;padding:12px}
+</style></head><body>
+<header><a href="/">Voltar à Central</a><h1>Grupos · contexto e histórico</h1><p>Leitura interna, sem respostas automáticas e sem integração direta aos clientes do Notion.</p></header>
+<main><p class="muted">Os grupos atuais do WhatsApp Business não são sincronizados por esta ferramenta. Exporte um TXT do grupo pelo próprio aplicativo e revise-o antes de importar. Os autores são apenas aqueles observados nas mensagens, não a lista atual de integrantes.</p>
+<p id="status" role="status" aria-live="polite"></p>
+<section><h2>1. Selecionar grupo</h2><label for="group">Grupo existente</label><select id="group"><option value="">Selecione...</option></select><button id="reload" class="secondary">Atualizar lista</button>
+<details><summary>Adicionar grupo</summary><label for="name">Nome do grupo</label><input id="name" maxlength="120" placeholder="Ex.: Obra — Equipe técnica"><button id="create">Cadastrar grupo</button></details></section>
+<section><h2>2. Importar histórico</h2><label for="file">Exportação TXT do WhatsApp</label><input id="file" type="file" accept=".txt,text/plain"><label for="order">Ordem de dia e mês</label>
+<select id="order"><option value="dmy">Dia / mês / ano</option><option value="mdy">Mês / dia / ano</option></select>
+<label><input id="confirmed-group" type="checkbox" style="display:inline;width:auto"> Confirmei que o TXT é do grupo selecionado.</label>
+<p><button id="preview">Conferir prévia</button><button id="confirm" disabled>Confirmar importação</button></p><pre id="preview-output">Nenhuma prévia.</pre></section>
+<section><h2>3. Mensagens e autores observados</h2><p id="authors" class="muted">Selecione um grupo.</p><div id="messages"></div></section>
+</main>
+<script>
+(function(){
+'use strict';
+const el=id=>document.getElementById(id);let pending=null;
+const status=message=>el('status').textContent=message;
+const fmt=t=>new Date(t).toLocaleString('pt-BR');
+async function api(path,method='GET',body){
+ const response=await fetch(path,{method,credentials:'same-origin',cache:'no-store',headers:{'content-type':'application/json'},body:body?JSON.stringify(body):undefined});
+ const data=await response.json().catch(()=>({}));
+ if(!response.ok)throw Error(data.error||'Operação não concluída.');
+ return data;
+}
+async function reload(selectId){
+ const data=await api('/api/groups');el('group').replaceChildren(new Option('Selecione...',''));
+ for(const g of data.groups)el('group').add(new Option(g.name+' ('+g.message_count+' mensagens)',g.id));
+ if(selectId)el('group').value=selectId;
+ await detail();
+}
+async function detail(){
+ pending=null;el('confirm').disabled=true;el('preview-output').textContent='Nenhuma prévia.';
+ el('messages').replaceChildren();
+ const id=el('group').value;if(!id){el('authors').textContent='Selecione um grupo.';return;}
+ const data=await api('/api/groups/'+id);
+ el('authors').textContent=data.observed_authors.length?'Autores observados: '+data.observed_authors.map(a=>a.author+' ('+a.messages+')').join(', '):'Sem autores observados.';
+ for(const m of data.messages){
+  const item=document.createElement('div');item.className='message';
+  const author=document.createElement('strong');author.textContent=m.author;
+  const date=document.createElement('time');date.textContent=fmt(m.created);
+  const body=document.createElement('div');body.textContent=m.body;
+  item.append(author,date,body);el('messages').append(item);
+ }
+}
+async function perform(fn){try{status('');await fn();}catch(e){status(e.message);}}
+el('reload').onclick=()=>perform(()=>reload(el('group').value));
+el('group').onchange=()=>perform(detail);
+el('create').onclick=()=>perform(async()=>{
+ const value=el('name').value.trim();const g=await api('/api/groups','POST',{name:value});
+ await reload(g.id);status('Grupo cadastrado. Sem sincronização automática.');
+});
+el('preview').onclick=()=>perform(async()=>{
+ const id=el('group').value,file=el('file').files[0];
+ if(!id||!file)throw Error('Selecione um grupo e um arquivo TXT.');
+ if(file.size>1000000)throw Error('O TXT deve ter no máximo 1 MB.');
+ const text=await file.text();
+ pending=await api('/api/groups/'+id+'/preview','POST',{text,dateOrder:el('order').value,groupConfirmed:el('confirmed-group').checked});
+ pending.groupId=id;
+ el('preview-output').textContent=JSON.stringify({novas:pending.count,duplicadas:pending.duplicates,autoresObservados:pending.observedAuthors,amostra:pending.sample},null,2);
+ el('confirm').disabled=false;
+});
+el('confirm').onclick=()=>perform(async()=>{
+ if(!pending||el('group').value!==pending.groupId)throw Error('Refaça a prévia do grupo.');
+ const result=await api('/api/groups/'+pending.groupId+'/confirm','POST',{previewId:pending.previewId,digest:pending.digest,confirmed:true});
+ await reload(pending.groupId);status('Importadas '+result.imported+' mensagens, sem respostas automáticas.');
+});
+perform(()=>reload());
+})();
+</script></body></html>
