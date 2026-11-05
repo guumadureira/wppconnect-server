@@ -229,7 +229,7 @@ export function createCentralMCP(db,config,transport,{context,ai,media,ready}){
   async function handle(req,res,{origin,readBody,reply,externalReadOnly=false}){
     if(!externalReadOnly&&!enabled)fail(503,'Conexão MCP não habilitada.');
     if(externalReadOnly&&!phones.size)fail(503,'A conexão não possui contatos autorizados.');
-    if(req.headers.origin&&req.headers.origin!==origin)fail(403,'Origem não autorizada.');
+    if(req.headers.origin&&req.headers.origin!==origin&&!(externalReadOnly&&req.headers.origin==='https://chatgpt.com'))fail(403,'Origem não autorizada.');
     if(!externalReadOnly){
       const supplied=String(req.headers.authorization||'');
       if(!timingSafeEqual(Buffer.from(hash(supplied)),Buffer.from(hash('Bearer '+token)))){res.setHeader('www-authenticate','Bearer realm="central-mcp"');fail(401,'Credencial da integração inválida.');}
