@@ -599,3 +599,26 @@ test('prazo de pausa sobrevive a reinicialização e não dispara mensagem sozin
     assert.equal(calls.filter(url=>url.includes('api.openai.com')).length,1);
   }finally{if(app)await app.close();rmSync(dir,{recursive:true,force:true});}
 });
+
+
+test('responsável previamente atribuído não impede retomada de conversa que estava assistida',async t=>{
+  const f=fixture(t,{AI_BUSINESS_ECHO_AUTO_RESUME_ENABLED:'true',AI_BUSINESS_ECHO_RESUME_MINUTES:'60'});
+  const c=f.incoming('Tenho uma dúvida sobre o projeto');await f.app.ai.process();
+  assert.equal(f.app.customerContext.view(c.id).mode,'assisted');
+  assert.equal(f.calls.filter(x=>x.url.includes('openai.com')).length,1);
+  f.app.db.prepare("INSERT INTO agents(id,name,email,password,role,active) VALUES(?,?,?,?,?,1)")
+    .run('assigned-before-echo','Atendente de teste','preassigned@example.invalid','senha-ficticia','agent');
+  f.app.db.prepare('UPDATE conversations SET owner_id=? WHERE id=?').run('assigned-before-echo',c.id);
+  f.app.intake({metadata:{phone_number_id:'test-phone'},message_echoes:[{
+    id:'echo-to-assigned-assisted',from:'5544000000002',to:phone,
+    type:'text',text:{body:'Vou confirmar o combinado.'},timestamp:Math.floor(Date.now()/1000)
+  }]},'smb_message_echoes');
+  const control=f.app.db.prepare('SELECT resume_after,resume_owner_id FROM ai_control WHERE conversation_id=?').get(c.id);
+  assert.equal(control.resume_owner_id,'assigned-before-echo');
+  assert.ok(control.resume_after>Date.now()+59*60000);
+  f.app.db.prepare('UPDATE ai_control SET resume_after=? WHERE conversation_id=?').run(Date.now()-1200,c.id);
+  f.incoming('Pode atualizar meu atendimento?');await f.app.ai.process();
+  assert.equal(f.calls.filter(x=>x.url.includes('openai.com')).length,2);
+  assert.equal(f.app.customerContext.view(c.id).mode,'assisted');
+  assert.equal(f.app.db.prepare('SELECT resume_after FROM ai_control WHERE conversation_id=?').get(c.id).resume_after,null);
+});
