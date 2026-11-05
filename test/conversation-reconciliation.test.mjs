@@ -4,7 +4,7 @@ import {DatabaseSync} from 'node:sqlite';
 import {createConversationReconciliation} from '../conversation-reconciliation.mjs';
 import {createCentral} from '../server.mjs';
 
-function fixture(t,{enabled=true,kind='atendimento',clientId=null,onRequest,notionAvailable=false,refreshFailure=false,isDirectionContact=()=>false}={}){
+function fixture(t,{enabled=true,kind='atendimento',clientId=null,onRequest,notionAvailable=false,notionSummaryAvailable=notionAvailable,refreshFailure=false,isDirectionContact=()=>false}={}){
   const db=new DatabaseSync(':memory:');
   db.exec(`PRAGMA foreign_keys=ON;
     CREATE TABLE conversations(id TEXT PRIMARY KEY,phone TEXT NOT NULL,name TEXT NOT NULL);
@@ -17,7 +17,7 @@ function fixture(t,{enabled=true,kind='atendimento',clientId=null,onRequest,noti
   let state={client_id:clientId,kind,summary:'Demanda em análise',missing:'',next_step:'',version:1,snapshot:null};
   const context={
     view:()=>({...state}),
-    status:()=>({enabled:notionAvailable}),
+    status:()=>({enabled:notionAvailable,summaryEnabled:notionSummaryAvailable}),
     refresh:async()=>{
       if(refreshFailure)throw Error('Notion indisponível');
       return {...state,snapshot:{client:{attendanceSummary:'Resumo documental previamente conferido',attendanceMissing:'',attendanceNext:'',attendanceAt:'2026-11-04'},sections:{works:{rows:[]}}},checked_at:Date.now()};
@@ -196,7 +196,7 @@ test('Notion desabilitado bloqueia atualização de cliente vinculado',async t=>
   assert.equal(f.applied.length,0);
   const row=f.db.prepare('SELECT state,error FROM context_reconciliation_jobs').get();
   assert.equal(row.state,'retry');
-  assert.match(row.error,/Notion desabilitado/);
+  assert.match(row.error,/Integração e resumo/);
 });
 
 test('confirmação de envio durante síntese invalida resposta antiga mesmo sem novo rowid',async t=>{
@@ -220,4 +220,13 @@ test('confirmação de envio durante síntese invalida resposta antiga mesmo sem
   const messages=JSON.parse(f.requests.at(-1).input[0].content).messages;
   assert.equal(messages.length,2);
   assert.match(messages[1].text,/Vou avaliar/);
+});
+
+test('resumo desabilitado no Notion impede perda de sincronização do cliente vinculado',async t=>{
+  const f=fixture(t,{clientId:'aaa',notionAvailable:true,notionSummaryAvailable:false});
+  f.insert('in','Solicito informação de orçamento');
+  await f.worker.process();
+  assert.equal(f.requests.length,0);
+  assert.equal(f.applied.length,0);
+  assert.equal(f.db.prepare('SELECT state FROM context_reconciliation_jobs').get().state,'retry');
 });
