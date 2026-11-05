@@ -14,6 +14,7 @@ import { createCentralMCP } from './central-mcp.mjs';
 import { createChatGPTAuth } from './chatgpt-oauth.mjs';
 import {createSupplierRegister} from './supplier-register.mjs';
 import {createHistoryImport} from './history-import.mjs';
+import {createGroupHistory} from './group-history.mjs';
 import {createOperatorChat} from './operator-chat.mjs';
 import {createOperatorContext} from './operator-context.mjs';
 import {createOperatorAI} from './operator-ai.mjs';
@@ -78,6 +79,7 @@ export function createCentral(config = process.env, transport = fetch, options =
   const templateResumption=createTemplateResumption(db,config,transport,{ready:!!ready});
   ai = createAIAttendance(db,config,transport,customerContext,{ready:!!ready,debounceMs:options.aiDebounceMs,media,suppliers,isDirectionContact:directionGuard.isDirectionContact,directionDecisions,globalContext,importedHistory:id=>manualHistory?.forAI(id)});
   manualHistory=createHistoryImport(db,customerContext,ai);
+  const groupHistory=createGroupHistory(db);
   const centralMCP=createCentralMCP(db,config,transport,{context:customerContext,ai,media,ready:!!ready});
   const chatgptAuth=createChatGPTAuth(db,config,async(email,password)=>{
     const agent=get('SELECT * FROM agents WHERE email=? AND active=1',email);
@@ -397,6 +399,20 @@ export function createCentral(config = process.env, transport = fetch, options =
         if(req.method==='PATCH'&&reportId)return reply(200,{reports:quality.review(id,reportId,body,user)});
         fail(405,'Método não permitido.');
       }
+      if(url.pathname==='/api/groups'&&req.method==='GET')return reply(200,{groups:groupHistory.list(),source:'manual_export',liveSync:false,aiResponses:false});
+      if(url.pathname==='/api/groups'&&req.method==='POST'){
+        if(user.role!=='admin')fail(403,'Somente administradores podem cadastrar grupos.');
+        return reply(201,groupHistory.create(body));
+      }
+      const groupMatch=url.pathname.match(/^\/api\/groups\/([a-f0-9-]{36})(?:\/(preview|confirm))?$/i);
+      if(groupMatch){
+        if(req.method==='GET'&&!groupMatch[2])return reply(200,groupHistory.detail(groupMatch[1]));
+        if(req.method==='POST'&&groupMatch[2]){
+          if(user.role!=='admin')fail(403,'Somente administradores podem importar grupos.');
+          return reply(200,groupHistory[groupMatch[2]](groupMatch[1],body,user));
+        }
+        fail(405,'Metodo nao permitido.');
+      }
       const historyMatch=url.pathname.match(/^\/api\/conversations\/([^/]+)\/history-import\/(inspect|preview|confirm)$/);
       if(historyMatch&&req.method==='POST'){
         if(user.role!=='admin')fail(403,'Somente administradores podem importar histórico.');
@@ -653,7 +669,7 @@ export function createCentral(config = process.env, transport = fetch, options =
     try{await deliverAlerts();await media.processPending();await customerContext.processLookups();await customerContext.processQueue();await suppliers.process();}catch{console.error('Falha ao verificar lembretes, anexos ou integração.');}finally{delivering=false;}
   },60000);
   timer.unref();
-  return {server,db,intake,tick,deliverAlerts,media,customerContext,globalContext,ai,suppliers,directionDecisions,templateResumption,manualHistory,operatorChat,close:()=>{
+  return {server,db,intake,tick,deliverAlerts,media,customerContext,globalContext,ai,suppliers,directionDecisions,templateResumption,manualHistory,groupHistory,operatorChat,close:()=>{
     clearInterval(timer);
     clearInterval(aiTimer);
     return new Promise((resolve,reject)=>server.close(async error=>{
