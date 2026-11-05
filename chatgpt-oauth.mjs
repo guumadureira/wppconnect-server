@@ -1,4 +1,5 @@
 import {createHash,randomBytes,timingSafeEqual} from 'node:crypto';
+import {normalizeContactPhone,samePhone} from './contact-phone.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const sha256url = value => createHash('sha256').update(value).digest('base64url');
@@ -14,11 +15,17 @@ const html = text => `<!doctype html><html lang="pt-BR"><head><meta charset="utf
 export function createChatGPTAuth(db,config,authenticate,transport=fetch){
   const origin=String(config.PUBLIC_ORIGIN||config.RENDER_EXTERNAL_URL||'').replace(/\/$/,'');
   const resource=origin+'/mcp/chatgpt';
+  const legacyPhones=String(config.CENTRAL_MCP_ALLOWED_PHONES||'').split(',').map(x=>x.trim()).filter(Boolean);
+  const oauthPhones=String(config.CHATGPT_OAUTH_ALLOWED_PHONES||'').split(',').map(x=>x.trim()).filter(Boolean);
+  // Reject the entire OAuth configuration if any configured phone is malformed
+  // or not explicitly allowed in the existing channel. Do not activate a login form
+  // that cannot securely authorize even one customer conversation.
+  const validPhoneScope=oauthPhones.length>0&&oauthPhones.every(phone=>
+    !!normalizeContactPhone(phone)&&legacyPhones.some(legacy=>!!normalizeContactPhone(legacy)&&samePhone(legacy,phone)));
   const enabled=String(config.CHATGPT_OAUTH_ENABLED)==='true'&&
     /^https:\/\/[^/?#]+$/.test(origin)&&
     String(config.CHATGPT_OAUTH_ADMIN_EMAIL||'').includes('@')&&
-    String(config.CENTRAL_MCP_ALLOWED_PHONES||'').trim().length>0&&
-    String(config.CHATGPT_OAUTH_ALLOWED_PHONES||'').trim().length>0;
+    validPhoneScope;
   const get=(sql,...params)=>db.prepare(sql).get(...params);
   const run=(sql,...params)=>db.prepare(sql).run(...params);
   const attempts=new Map();
