@@ -80,7 +80,11 @@ export function createConversationReconciliation(db, config, transport, context,
           run("UPDATE context_reconciliation_jobs SET state='excluded',error=NULL WHERE conversation_id=? AND cursor=?",job.conversation_id,job.cursor);continue;
         }
         let view=context.view(job.conversation_id);
-        if(view.client_id&&context.status().enabled){
+        if(view.client_id){
+          if(!context.status().enabled){
+            run("UPDATE context_reconciliation_jobs SET state='retry',next_attempt=?,error=? WHERE conversation_id=? AND cursor=?",Date.now()+60000,'Notion desabilitado; não alterar contexto de cliente vinculado.',job.conversation_id,job.cursor);
+            continue;
+          }
           try{
             // Read the canonical client context before proposing any revision.
             view=await context.refresh(conversation);
