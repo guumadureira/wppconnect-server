@@ -4,9 +4,12 @@ on:
   push:
     branches:
       - codex/central-mcp-consulta-paginada-20261105
+      - codex/chatgpt-fase-b-homologacao-20261105
     paths:
       - 'central-mcp.mjs'
       - 'chatgpt-oauth.mjs'
+      - 'chatgpt-policy.mjs'
+      - 'scripts/verificar-integracao-chatgpt.mjs'
       - 'test/**'
       - 'server.mjs'
       - '.github/workflows/central-mcp-tests.yml'
@@ -14,6 +17,8 @@ on:
     paths:
       - 'central-mcp.mjs'
       - 'chatgpt-oauth.mjs'
+      - 'chatgpt-policy.mjs'
+      - 'scripts/verificar-integracao-chatgpt.mjs'
       - 'test/**'
       - 'server.mjs'
       - '.github/workflows/central-mcp-tests.yml'

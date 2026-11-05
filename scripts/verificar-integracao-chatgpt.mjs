@@ -3,39 +3,33 @@ import {DatabaseSync} from 'node:sqlite';
 import {realpathSync,statSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {normalizeContactPhone,samePhone} from '../contact-phone.mjs';
-
-const phoneList=value=>String(value||'').split(',').map(v=>v.trim()).filter(Boolean);
-const publicOrigin=value=>/^https:\/\/[^/?#]+$/.test(String(value||'').replace(/\/$/,''));
+import {chatgptPolicy} from '../chatgpt-policy.mjs';
 
 export function inspectChatGPTConnection(db,config={}){
-  const legacy=phoneList(config.CENTRAL_MCP_ALLOWED_PHONES);
-  const scoped=phoneList(config.CHATGPT_OAUTH_ALLOWED_PHONES);
-  const origin=String(config.PUBLIC_ORIGIN||config.RENDER_EXTERNAL_URL||'');
-  const email=String(config.CHATGPT_OAUTH_ADMIN_EMAIL||'').trim().toLowerCase();
-  const scopedPhonesValid=scoped.length>0&&scoped.every(p=>!!normalizeContactPhone(p));
-  const scopeSubsetOfLegacy=scopedPhonesValid&&scoped.every(p=>legacy.some(l=>
-    !!normalizeContactPhone(l)&&samePhone(l,p)));
+  const policy=chatgptPolicy(config),email=policy.email;
   let activeAdmin=false;
-  if(email.includes('@')&&email.length<=160){
+  if(policy.administratorConfigured){
     try{
       const entry=db.prepare("SELECT id FROM agents WHERE active=1 AND role='admin' AND lower(email)=? LIMIT 1").get(email);
       activeAdmin=!!entry;
     }catch{activeAdmin=false;}
   }
   const checks={
-    httpsOrigin:publicOrigin(origin),
-    administratorConfigured:email.includes('@')&&email.length<=160,
+    httpsOrigin:!!policy.origin,
+    administratorConfigured:policy.administratorConfigured,
     activeAdministratorFound:activeAdmin,
-    explicitChatGPTScope:scopedPhonesValid,
-    scopeContainedInLegacy:scopeSubsetOfLegacy,
+    explicitChatGPTScope:policy.explicitScope,
+    singleInternalPhone:policy.singlePhone,
+    scopeContainedInLegacy:policy.scopeSubset,
     oauthFeatureEnabled:String(config.CHATGPT_OAUTH_ENABLED)==='true'
   };
-  const readyToEnable=Object.entries(checks).every(([key,ok])=>key==='oauthFeatureEnabled'||ok);
+  const oauthTables=db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('chatgpt_oauth_pending','chatgpt_oauth_codes','chatgpt_oauth_access','chatgpt_oauth_refresh')").all().length;
+  const readyToEnable=[0,4].includes(oauthTables)&&Object.entries(checks).every(([key,ok])=>key==='oauthFeatureEnabled'||ok);
   return{
     checks,
+    oauthSchema:{expectedTables:4,presentTables:oauthTables,absent:oauthTables===0,complete:oauthTables===4},
     readyToEnable,
-    readyForPrivateOAuthTest:readyToEnable&&checks.oauthFeatureEnabled,
+    readyForPrivateOAuthTest:readyToEnable&&checks.oauthFeatureEnabled&&oauthTables===4,
     allowedOperation:'read_only',
     note:'This checks configuration and database metadata only. It does not test a ChatGPT login, change permissions or prove a live MCP connection.'
   };

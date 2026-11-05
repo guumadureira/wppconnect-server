@@ -25,6 +25,7 @@ test('preflight com OAuth desligado identifica preparo sem expor credenciais',t=
 
 test('preflight confirma somente requisitos de configuração, não a conexão real',t=>{
   const db=setup(t);
+  for(const name of ['pending','codes','access','refresh'])db.exec(`CREATE TABLE chatgpt_oauth_${name} (id TEXT)`);
   const report=inspectChatGPTConnection(db,{...valid,CHATGPT_OAUTH_ENABLED:'true'});
   assert.equal(report.readyForPrivateOAuthTest,true);
   assert.equal(report.checks.activeAdministratorFound,true);
@@ -59,4 +60,28 @@ test('preflight não faz alterações de esquema nem adiciona registros',t=>{
   inspectChatGPTConnection(db,{...valid,CHATGPT_OAUTH_ENABLED:'false'});
   const after=db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(x=>x.name);
   assert.deepEqual(after,before);
+});
+
+test('preflight exige um único telefone e aplica a mesma validação de origem do runtime',t=>{
+  const db=setup(t);
+  assert.equal(inspectChatGPTConnection(db,{...valid,CHATGPT_OAUTH_ALLOWED_PHONES:valid.CENTRAL_MCP_ALLOWED_PHONES}).checks.singleInternalPhone,false);
+  for(const PUBLIC_ORIGIN of ['https://user:pass@central.example','https://central.example:invalid','https://central.example/path']){
+    assert.equal(inspectChatGPTConnection(db,{...valid,PUBLIC_ORIGIN}).readyToEnable,false);
+  }
+});
+
+test('preflight relata esquema OAuth ausente, parcial e completo sem modificar tabelas',t=>{
+  const db=setup(t);
+  assert.deepEqual(inspectChatGPTConnection(db,valid).oauthSchema,{expectedTables:4,presentTables:0,absent:true,complete:false});
+  db.exec('CREATE TABLE chatgpt_oauth_pending (id TEXT)');
+  assert.equal(inspectChatGPTConnection(db,valid).oauthSchema.presentTables,1);
+  assert.equal(inspectChatGPTConnection(db,valid).readyToEnable,false);
+  for(const name of ['codes','access','refresh'])db.exec(`CREATE TABLE chatgpt_oauth_${name} (id TEXT)`);
+  assert.equal(inspectChatGPTConnection(db,valid).oauthSchema.complete,true);
+});
+
+test('flag ligada sem tabelas não pode indicar que o teste privado está pronto',t=>{
+  const report=inspectChatGPTConnection(setup(t),{...valid,CHATGPT_OAUTH_ENABLED:'true'});
+  assert.equal(report.readyForPrivateOAuthTest,false);
+  assert.equal(report.oauthSchema.absent,true);
 });

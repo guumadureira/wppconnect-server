@@ -3,13 +3,28 @@ import assert from 'node:assert/strict';
 import {createHash,randomUUID} from 'node:crypto';
 import {createCentral} from '../server.mjs';
 
+test('OAuth desligado mantém todos os endpoints fechados e não cria tabelas no servidor completo',async t=>{
+  const app=createCentral({DATABASE_PATH:':memory:',WHATSAPP_MODE:'demo',CHATGPT_OAUTH_ENABLED:'false'},async()=>{
+    assert.fail('Nenhuma rede externa é permitida neste teste');
+  });
+  await new Promise(resolve=>app.server.listen(0,'127.0.0.1',resolve));t.after(()=>app.close());
+  const base='http://127.0.0.1:'+app.server.address().port;
+  for(const path of ['/.well-known/oauth-protected-resource','/.well-known/oauth-protected-resource/mcp/chatgpt',
+    '/.well-known/oauth-authorization-server','/oauth/authorize','/oauth/approve','/oauth/token','/mcp/chatgpt']){
+    assert.equal((await fetch(base+path)).status,404,path);
+  }
+  assert.equal(app.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE 'chatgpt_oauth_%'").get().n,0);
+  const health=await(await fetch(base+'/healthz')).json();assert.equal(health.status,'ok');assert.equal(health.mode,'demo');
+});
+
 test('ChatGPT OAuth reads authorized conversation but never bypasses legacy MCP or sends',async t=>{
   const phone='5544987654321',other='5544987654322',origin='https://central.example',client='https://chatgpt.com/oauth/client.json';
   const redirect='https://chatgpt.com/connector_platform_oauth_redirect',verifier='v'.repeat(43);
   const calls=[];
+  const legacyToken='test-only-legacy-token-not-a-real-credential-123';
   const config={DATABASE_PATH:':memory:',HOST:'127.0.0.1',PUBLIC_ORIGIN:origin,SETUP_TOKEN:'setup-secret-only',
     WHATSAPP_MODE:'demo',WHATSAPP_PHONE_NUMBER_ID:'fake-number',
-    CENTRAL_MCP_ENABLED:'false',CENTRAL_MCP_TOKEN:'',CENTRAL_MCP_SEND_ENABLED:'true',
+    CENTRAL_MCP_ENABLED:'true',CENTRAL_MCP_TOKEN:legacyToken,CENTRAL_MCP_SEND_ENABLED:'true',
     CENTRAL_MCP_ALLOWED_PHONES:phone+','+other,CHATGPT_OAUTH_ENABLED:'true',CHATGPT_OAUTH_ADMIN_EMAIL:'admin@example.invalid',CHATGPT_OAUTH_ALLOWED_PHONES:phone};
   const app=createCentral(config,async url=>{
     calls.push(String(url));
@@ -52,6 +67,12 @@ test('ChatGPT OAuth reads authorized conversation but never bypasses legacy MCP 
   const credential=(await token.json()).access_token;
   const rpc=(method,params)=>post('/mcp/chatgpt',{jsonrpc:'2.0',id:randomUUID(),method,params},{
     authorization:'Bearer '+credential,accept:'application/json, text/event-stream'});
+  const init=(await(await rpc('initialize',{protocolVersion:'2025-06-18'})).json()).result;
+  assert.match(init.instructions,/somente de leitura/);
+  assert.ok(!init.instructions.includes('confirmar_envio'));
+  const notification=await post('/mcp/chatgpt',{jsonrpc:'2.0',method:'notifications/initialized'},{
+    authorization:'Bearer '+credential,accept:'application/json, text/event-stream'});
+  assert.equal(notification.status,202);
   const scan=await rpc('tools/list');assert.equal(scan.status,200);
   const tools=(await scan.json()).result.tools;
   assert.ok(tools.some(x=>x.name==='consultar_historico'));
@@ -80,7 +101,18 @@ test('ChatGPT OAuth reads authorized conversation but never bypasses legacy MCP 
   assert.equal((await write.json()).result.isError,true);
   const legacy=await post('/mcp',{jsonrpc:'2.0',id:1,method:'tools/list'},{
     authorization:'Bearer '+credential,accept:'application/json'});
-  assert.equal(legacy.status,503);
+  assert.equal(legacy.status,401);
+  const staticToOAuth=await post('/mcp/chatgpt',{jsonrpc:'2.0',id:1,method:'tools/list'},{
+    authorization:'Bearer '+legacyToken,accept:'application/json'});
+  assert.equal(staticToOAuth.status,401);
+  const oldChannel=await post('/mcp',{jsonrpc:'2.0',id:1,method:'tools/list'},{
+    authorization:'Bearer '+legacyToken,accept:'application/json'});
+  assert.equal(oldChannel.status,200);
+  assert.ok((await oldChannel.json()).result.tools.some(t=>t.name==='preparar_envio'));
+  const oversized=await fetch(base+'/oauth/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},
+    body:'field='+'x'.repeat(8192)});
+  assert.equal(oversized.status,413);
   assert.equal(calls.length,1);
   assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM integration_drafts').get().n,0);
+  assert.equal(app.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE direction='out'").get().n,0);
 });

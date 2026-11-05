@@ -55,7 +55,7 @@ Referências:
 2. Rever a lista efetiva de telefones permitidos e as permissões Notion atuais, sem ampliar escopo.
 3. Configurar OAuth em ambiente de teste, sem tokens em Git/Notion/chat; testar 401, negação de acesso alheio, tokens expirados e listagem de ferramentas.
 4. Preservar e testar backup do SQLite real antes de qualquer deploy. A rotina existente em `docs/retomada-integrada-2026-11-04.md` define inspeção e backup. Não implantar automaticamente.
-5. Após homologação, o administrador do workspace conecta **no ChatGPT web** em Plugins > Add custom MCP server, com endpoint `https://central-atendimento-znn0.onrender.com/mcp` e OAuth. Atualizar/revisar a lista de ações do plugin após novas versões.
+5. Após homologação e autorização específica de ativação, o administrador conecta **no ChatGPT web**, pela opção de adicionar servidor MCP disponível na conta, com endpoint `https://central-atendimento-znn0.onrender.com/mcp/chatgpt` e OAuth/CIMD. Atualizar/revisar a lista de ações do plugin após novas versões. Consulte o [estado e roteiro atual da Fase B](chatgpt-fase-b-homologacao-2026-11-05.md); os registros históricos abaixo não substituem a publicação já concluída da Fase A nem comprovam conexão real no ChatGPT.
 6. Primeiro teste com um único telefone interno autorizado, validando a leitura das conversas e anexos **sem enviar mensagens**.
 
 ## Limites
