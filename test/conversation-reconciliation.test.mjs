@@ -230,3 +230,31 @@ test('resumo desabilitado no Notion impede perda de sincronização do cliente v
   assert.equal(f.applied.length,0);
   assert.equal(f.db.prepare('SELECT state FROM context_reconciliation_jobs').get().state,'retry');
 });
+
+test('recuperação histórica exige sessão de administrador e confirmação explícita',async t=>{
+  const app=createCentral({DATABASE_PATH:':memory:',WHATSAPP_MODE:'demo',WHATSAPP_PHONE_NUMBER_ID:'test-phone'});
+  await new Promise(resolve=>app.server.listen(0,'127.0.0.1',resolve));
+  t.after(()=>app.close());
+  const origin='http://127.0.0.1:'+app.server.address().port;
+  async function call(path,method='GET',body,cookie){
+    const response=await fetch(origin+path,{method,
+      headers:{origin,...(body?{'content-type':'application/json'}:{}),...(cookie?{cookie}:{})},
+      body:body?JSON.stringify(body):undefined});
+    return {status:response.status,data:await response.json(),cookie:response.headers.get('set-cookie')?.split(';')[0]};
+  }
+  assert.equal((await call('/api/context/reconciliation/backfill')).status,401);
+  const admin={name:'Admin',email:'admin@example.invalid',password:'test-only-password-1234'};
+  assert.equal((await call('/api/setup','POST',admin)).status,201);
+  const session=await call('/api/login','POST',admin);
+  assert.equal(session.status,200);
+  const adminCookie=session.cookie;
+  assert.equal((await call('/api/context/reconciliation/backfill?limit=100','GET',null,adminCookie)).status,200);
+  assert.equal((await call('/api/context/reconciliation/backfill?limit=999','GET',null,adminCookie)).status,400);
+  assert.equal((await call('/api/context/reconciliation/backfill','POST',{confirmed:false},adminCookie)).status,400);
+  assert.equal((await call('/api/context/reconciliation/backfill','POST',{confirmed:true},adminCookie)).status,409);
+  const agent={name:'Atendente',email:'agent@example.invalid',password:'test-only-password-9876'};
+  assert.equal((await call('/api/agents','POST',agent,adminCookie)).status,201);
+  const agentCookie=(await call('/api/login','POST',agent)).cookie;
+  assert.equal((await call('/api/context/reconciliation/status','GET',null,agentCookie)).status,403);
+  assert.equal((await call('/api/context/reconciliation/backfill','GET',null,agentCookie)).status,403);
+});
