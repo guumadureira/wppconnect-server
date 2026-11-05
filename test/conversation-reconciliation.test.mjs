@@ -187,3 +187,37 @@ test('nova mensagem é conciliada apesar de envio antigo desconhecido',async t=>
   assert.equal(input.messages[0].direction,'in');
   assert.equal(JSON.stringify(input.messages).includes('cujo envio não está confirmado'),false);
 });
+
+test('Notion desabilitado bloqueia atualização de cliente vinculado',async t=>{
+  const f=fixture(t,{clientId:'aaa',notionAvailable:false});
+  f.insert('in','Solicito nova etapa contratual');
+  await f.worker.process();
+  assert.equal(f.requests.length,0);
+  assert.equal(f.applied.length,0);
+  const row=f.db.prepare('SELECT state,error FROM context_reconciliation_jobs').get();
+  assert.equal(row.state,'retry');
+  assert.match(row.error,/Notion desabilitado/);
+});
+
+test('confirmação de envio durante síntese invalida resposta antiga mesmo sem novo rowid',async t=>{
+  let requests=0;
+  const f=fixture(t,{onRequest:({db})=>{
+    if(++requests===1){
+      db.prepare("UPDATE messages SET status='sent' WHERE id=?").run('msg-2');
+    }
+  }});
+  f.insert('in','Preciso de uma atualização do processo');
+  f.insert('out','*Equipe:* Vou avaliar e retorno.','unknown','Equipe');
+  const cursor=f.db.prepare('SELECT cursor FROM context_reconciliation_jobs').get().cursor;
+  await f.worker.process();
+  assert.equal(f.applied.length,0);
+  const pending=f.db.prepare('SELECT cursor,state,generation FROM context_reconciliation_jobs').get();
+  assert.equal(pending.cursor,cursor);
+  assert.equal(pending.state,'pending');
+  assert.ok(pending.generation>0);
+  await f.worker.process();
+  assert.equal(f.applied.length,1);
+  const messages=JSON.parse(f.requests.at(-1).input[0].content).messages;
+  assert.equal(messages.length,2);
+  assert.match(messages[1].text,/Vou avaliar/);
+});
