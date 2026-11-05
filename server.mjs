@@ -427,12 +427,18 @@ export function createCentral(config = process.env, transport = fetch, options =
         if(!customerContext.status().enabled)fail(503,'Configure a integração própria da central com o Notion antes de sincronizar.');
         await customerContext.processQueue(true);return reply(200,customerContext.status());
       }
-      const contextMatch=url.pathname.match(/^\/api\/conversations\/([^/]+)\/context(?:\/(lookup|link|refresh|client|requests|control)(?:\/([^/]+))?)?$/);
+      const contextMatch=url.pathname.match(/^\/api\/conversations\/([^/]+)\/context(?:\/(lookup|link|refresh|client|requests|control|classification)(?:\/([^/]+))?)?$/);
       if(contextMatch){
         const c=get('SELECT * FROM conversations WHERE id=?',contextMatch[1]);if(!c)fail(404,'Conversa não encontrada.');
         const action=contextMatch[2],requestId=contextMatch[3];let result;
         if(!action&&req.method==='GET')return reply(200,{...customerContext.view(c.id),ai:ai.result(c.id)});
         if(!action&&req.method==='PATCH')result=await customerContext.save(c,body,user);
+        else if(action==='classification'&&req.method==='PATCH'){
+          const previous=customerContext.view(c.id).classification?.version||0;
+          result=customerContext.classify(c,body,user);
+          if(result.version!==previous)ai.pause(c.id,'Classificação revisada; liberação da IA exige ação própria.');
+          return reply(200,result);
+        }
         else if(action==='lookup'&&req.method==='POST')return reply(200,await customerContext.lookup(c,body.query||''));
         else if(action==='link'&&req.method==='POST')result=await customerContext.link(c,body,user);
         else if(action==='refresh'&&req.method==='POST')return reply(200,await customerContext.refresh(c));

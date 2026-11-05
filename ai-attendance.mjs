@@ -72,6 +72,7 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
     run("UPDATE conversation_context SET mode='human',version=version+1,updated=? WHERE conversation_id=? AND mode<>'human'",Date.now(),id);
   }
   function release(conversation){
+    if(context.customerAutomationAllowed?.(conversation.id)===false)fail(403,'Confirme contato externo e demanda real antes de liberar a IA de clientes.');
     if(!enabled())fail(503,'Configure a chave, o piloto, o limite de consumo e a conexão WhatsApp antes de liberar a IA.');
     if(isDirectionContact(conversation.phone))fail(403,'Contatos internos da direção não podem ser liberados no atendimento automático de clientes.');
     if(!allowed(conversation.phone))fail(403,'Este telefone não está autorizado no piloto da IA.');
@@ -79,6 +80,7 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
   }
   function incoming(conversation,message,{fresh=false,echo=false,type='text'}={}){
     if(echo){pause(conversation.id,'',{businessEcho:true,at:message.created});return;}
+    if(context.customerAutomationAllowed?.(conversation.id)===false){pause(conversation.id,'Identidade ou finalidade exige atendimento humano.');return;}
     if(isDirectionContact(conversation.phone)){pause(conversation.id,'Contato interno da direção: atendimento automático a clientes desativado.');return;}
     if(!enabled()||!allowed(conversation.phone))return;
     const c=context.view(conversation.id),previous=ensure(conversation.id);
@@ -110,7 +112,7 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
   }
   const valid=job=>{
     const c=get('SELECT *,rowid AS chat_row FROM conversations WHERE id=?',job.conversation_id),control=ensure(job.conversation_id),ctx=context.view(job.conversation_id);
-    return !stopped&&enabled()&&allowed(c.phone)&&!isDirectionContact(c.phone)&&c.status==='open'&&ctx.mode==='assisted'&&control.epoch===job.epoch&&(job.contextVersion===undefined||ctx.version===job.contextVersion)&&c.last_received===get('SELECT rowid AS n FROM messages WHERE id=?',job.message_id)?.n&&Date.now()-c.last_inbound<24*3600000;
+    return !stopped&&enabled()&&allowed(c.phone)&&context.customerAutomationAllowed?.(c.id)!==false&&!isDirectionContact(c.phone)&&c.status==='open'&&ctx.mode==='assisted'&&control.epoch===job.epoch&&(job.contextVersion===undefined||ctx.version===job.contextVersion)&&c.last_received===get('SELECT rowid AS n FROM messages WHERE id=?',job.message_id)?.n&&Date.now()-c.last_inbound<24*3600000;
   };
   function resultView(id){const row=get('SELECT state,result,error,updated FROM ai_jobs WHERE conversation_id=? ORDER BY created DESC,rowid DESC LIMIT 1',id);return row?{...row,result:row.result?JSON.parse(row.result):null,handoff:ensure(id).handoff}:null;}
   function validated(result){
@@ -200,11 +202,18 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
         if(message.id===job.message_id&&/(?:quero|preciso).{0,30}(?:humano|humana|atendente)|(?:falar|conversar).{0,25}(?:pessoa|gustavo|atendente)/i.test(text)){handoff(conversation.id,job.id,'Contato solicitou atendimento humano por áudio.');return;}
       }
       const attachments=all('SELECT m.kind,m.name,m.state,mm.message_id FROM message_media mm JOIN media m ON m.id=mm.media_id JOIN messages x ON x.id=mm.message_id WHERE x.conversation_id=? ORDER BY x.rowid DESC LIMIT 5',conversation.id);
+      // The reviewed active topic is distinct from the previous mixed summary.
+      // Historical messages remain evidence, never administrative classification.
+      if(ctx.classification){
+        const active=ctx.classification.activeTopic;
+        ctx={...ctx,summary:active?.summary||'',missing:'',next_step:'',history:[],
+          snapshot:ctx.snapshot?{...ctx.snapshot,attendance:null,history:null,client:{...ctx.snapshot.client,attendanceSummary:'',attendanceMissing:'',attendanceNext:'',attendanceAt:''}}:null};
+      }
       // Only the allowlisted operational subset from the Notion adapter, never a raw page.
       const snapshot=ctx.snapshot&&!ctx.last_error?{attendance:ctx.snapshot.attendance,client:{name:ctx.snapshot.client?.name,stage:ctx.snapshot.client?.stage,registration:ctx.snapshot.client?.registration,attendanceSummary:ctx.snapshot.client?.attendanceSummary,attendanceMissing:ctx.snapshot.client?.attendanceMissing,attendanceNext:ctx.snapshot.client?.attendanceNext,attendanceAt:ctx.snapshot.client?.attendanceAt},sections:Object.fromEntries(Object.entries(ctx.snapshot.sections||{}).map(([k,v])=>[k,{configured:v.configured,complete:v.complete,error:!!v.error,rows:(v.rows||[]).slice(0,8).map(r=>({title:r.title,status:r.status,due:r.due,next:r.next,contract:r.contract}))}]))}:null;
       const generalServiceReference=globalContext?.get?await globalContext.get():{available:false};
       if(!valid(job))return;
-      const input=JSON.stringify({generalServiceReference,currentDate:new Date().toISOString(),turn,clientLookup,referenceGuide:knowledgeFor(history.slice(-8).filter(m=>m.direction==='in').map(m=>transcripts.get(m.id)||m.body).join(' '),Date.now(),ctx.summary+' '+(snapshot?.client?.attendanceSummary||'')),serviceGuides:serviceGuidesFor({latest:transcripts.get(job.message_id)||history.at(-1)?.body||'',recent:history.slice(-8).map(m=>transcripts.get(m.id)||m.body).join(' '),summary:ctx.summary}),importedHistory:importedHistory?.(conversation.id),registrationAvailable:String(config.AI_AUTO_REGISTER)==='true'&&context.status().enabled,attachments,context:{notionUnavailable:!!ctx.last_error,clientLinked:!!ctx.client_id,summary:ctx.summary,missing:ctx.missing,nextStep:ctx.next_step,notion:snapshot,history:ctx.history.slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next_step,source:e.source,qualification:e.qualification,at:e.created})),notionHistory:(!ctx.last_error&&ctx.snapshot?.history?.rows||[]).slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next,source:e.source,qualification:e.qualification,at:e.at}))},messages:history.map(m=>({id:m.id,from:m.direction==='in'?'contato':m.agent_name||'equipe',text:(transcripts.get(m.id)||m.body).slice(0,transcripts.has(m.id)?8000:2000),...(transcripts.has(m.id)?{source:'transcricao_automatica',original:'audio'}:{})}))});
+      const input=JSON.stringify({contextClassification:ctx.classification||null,generalServiceReference,currentDate:new Date().toISOString(),turn,clientLookup,referenceGuide:knowledgeFor(history.slice(-8).filter(m=>m.direction==='in').map(m=>transcripts.get(m.id)||m.body).join(' '),Date.now(),ctx.summary+' '+(snapshot?.client?.attendanceSummary||'')),serviceGuides:serviceGuidesFor({latest:transcripts.get(job.message_id)||history.at(-1)?.body||'',recent:history.slice(-8).map(m=>transcripts.get(m.id)||m.body).join(' '),summary:ctx.summary}),importedHistory:importedHistory?.(conversation.id),registrationAvailable:String(config.AI_AUTO_REGISTER)==='true'&&context.status().enabled,attachments,context:{notionUnavailable:!!ctx.last_error,clientLinked:!!ctx.client_id,summary:ctx.summary,missing:ctx.missing,nextStep:ctx.next_step,notion:snapshot,history:ctx.history.slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next_step,source:e.source,qualification:e.qualification,at:e.created})),notionHistory:(!ctx.last_error&&ctx.snapshot?.history?.rows||[]).slice(0,8).map(e=>({summary:e.summary,missing:e.missing,nextStep:e.next,source:e.source,qualification:e.qualification,at:e.at}))},messages:history.map(m=>({id:m.id,from:m.direction==='in'?'contato':m.agent_name||'equipe',text:(transcripts.get(m.id)||m.body).slice(0,transcripts.has(m.id)?8000:2000),...(transcripts.has(m.id)?{source:'transcricao_automatica',original:'audio'}:{})}))});
       if(Buffer.byteLength(input)>36000)throw Error('Context too large');
       const body={model:MODEL,store:false,instructions,input:[{role:'user',content:input}],reasoning:{effort:'none'},max_output_tokens:MAX_OUTPUT,text:{format:{type:'json_schema',name:'domum_attendance',strict:true,schema}}};
       // Reserve by UTF-8 bytes (a conservative upper bound for input tokens), including schema/overhead.
