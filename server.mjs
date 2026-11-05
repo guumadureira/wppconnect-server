@@ -199,7 +199,7 @@ export function createCentral(config = process.env, transport = fetch, options =
     const reply = (status, data) => {res.writeHead(status, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'});res.end(JSON.stringify(data));};
     const readBody = async () => {
       const chunks=[];let length=0;
-      const limit=/^\/api\/conversations\/[^/]+\/history-import\//.test(url.pathname)?2_100_000:131072;
+      const limit=url.pathname.startsWith('/oauth/')?8192:/^\/api\/conversations\/[^/]+\/history-import\//.test(url.pathname)?2_100_000:131072;
       for await (const chunk of req) {length+=chunk.length;if(length>limit) fail(413,'Mensagem muito grande.');chunks.push(chunk);}
       return Buffer.concat(chunks);
     };

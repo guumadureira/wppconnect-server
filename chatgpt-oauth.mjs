@@ -1,5 +1,5 @@
 import {createHash,randomBytes,timingSafeEqual} from 'node:crypto';
-import {normalizeContactPhone,samePhone} from './contact-phone.mjs';
+import {chatgptPolicy} from './chatgpt-policy.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const sha256url = value => createHash('sha256').update(value).digest('base64url');
@@ -13,27 +13,31 @@ const html = text => `<!doctype html><html lang="pt-BR"><head><meta charset="utf
 
 /** An isolated OAuth 2.1 authorization layer. Does not authenticate legacy /mcp traffic. */
 export function createChatGPTAuth(db,config,authenticate,transport=fetch){
-  const origin=String(config.PUBLIC_ORIGIN||config.RENDER_EXTERNAL_URL||'').replace(/\/$/,'');
+  const policy=chatgptPolicy(config),origin=policy.origin;
   const resource=origin+'/mcp/chatgpt';
-  const legacyPhones=String(config.CENTRAL_MCP_ALLOWED_PHONES||'').split(',').map(x=>x.trim()).filter(Boolean);
-  const oauthPhones=String(config.CHATGPT_OAUTH_ALLOWED_PHONES||'').split(',').map(x=>x.trim()).filter(Boolean);
-  // Reject the entire OAuth configuration if any configured phone is malformed
-  // or not explicitly allowed in the existing channel. Do not activate a login form
-  // that cannot securely authorize even one customer conversation.
-  const validPhoneScope=oauthPhones.length>0&&oauthPhones.every(phone=>
-    !!normalizeContactPhone(phone)&&legacyPhones.some(legacy=>!!normalizeContactPhone(legacy)&&samePhone(legacy,phone)));
-  const enabled=String(config.CHATGPT_OAUTH_ENABLED)==='true'&&
-    /^https:\/\/[^/?#]+$/.test(origin)&&
-    String(config.CHATGPT_OAUTH_ADMIN_EMAIL||'').includes('@')&&
-    validPhoneScope;
+  // Fail closed unless the private pilot has one contact in the existing scope.
+  const enabled=String(config.CHATGPT_OAUTH_ENABLED)==='true'&&policy.ready;
   const get=(sql,...params)=>db.prepare(sql).get(...params);
   const run=(sql,...params)=>db.prepare(sql).run(...params);
   const attempts=new Map();
   const authRequests=new Map();
   const clientCache=new Map();
+  const endpointLimits=new Map();
+  let activeApprovals=0;
+  function allowEndpoint(name,max,period){
+    const now=Date.now(),previous=endpointLimits.get(name);
+    if(previous?.until>now&&previous.n>=max)return false;
+    endpointLimits.set(name,previous?.until>now?{n:previous.n+1,until:previous.until}:{n:1,until:now+period});
+    return true;
+  }
+  function prune(map){
+    for(const [key,value] of map)if(value.until<=Date.now())map.delete(key);
+    return map.size<1024;
+  }
   const abuseKey=ip=>ip+'|all';
   function allowAuthorize(ip){
     const now=Date.now(),previous=authRequests.get(ip);
+    if(!previous&&!prune(authRequests))return false;
     if(previous?.until>now&&previous.n>=16)return false;
     authRequests.set(ip,previous?.until>now
       ?{n:previous.n+1,until:previous.until}:{n:1,until:now+300000});
@@ -77,26 +81,32 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
     attempts.set(key,v&&v.until>now?{n:v.n+1,until:v.until}:{n:1,until:now+900000});
   }
   function currentAdmin(userId){
-    return get("SELECT id,password FROM agents WHERE id=? AND active=1 AND role='admin' AND lower(email)=?",userId,String(config.CHATGPT_OAUTH_ADMIN_EMAIL).trim().toLowerCase());
+    return get("SELECT id,password FROM agents WHERE id=? AND active=1 AND role='admin' AND lower(email)=?",userId,policy.email);
   }
-  // A password reset invalidates all tokens, without requiring database schema changes.
+  // Bind grants to the password and pilot policy without additional schema changes.
   function passwordStamp(userId){
     const account=currentAdmin(userId);
-    return account?.password?hash('central-chatgpt-admin:'+userId+':'+account.password).slice(0,32):null;
+    return account?.password?hash(JSON.stringify([userId,account.password,policy.email,resource,policy.phones])).slice(0,32):null;
   }
   function familyIsCurrent(userId,family){
     const stamp=passwordStamp(userId);
     return !!stamp&&typeof family==='string'&&family.endsWith('.'+stamp);
   }
-  function issue(userId,clientId,family=null){
+  function transaction(work){
+    db.exec('BEGIN IMMEDIATE');
+    try{const result=work();db.exec('COMMIT');return result;}
+    catch(error){db.exec('ROLLBACK');throw error;}
+  }
+  function issue(userId,clientId,family=null,familyExpires=Date.now()+30*86400000){
     const stamp=passwordStamp(userId);
     if(!stamp)fail(403,'Administrador sem autorização ativa.');
     const familyId=family??(random()+'.'+stamp);
     if(!familyIsCurrent(userId,familyId))fail(403,'Autorização de sessão desatualizada.');
     const access=random(),refresh=random(),now=Date.now();
-    run('INSERT INTO chatgpt_oauth_access VALUES(?,?,?,?,?,?)',hash(access),clientId,userId,familyId,resource,now+900000);
-    run('INSERT INTO chatgpt_oauth_refresh(token_hash,client_id,user_id,family,resource,expires) VALUES(?,?,?,?,?,?)',hash(refresh),clientId,userId,familyId,resource,now+30*86400000);
-    return{access_token:access,token_type:'Bearer',expires_in:900,refresh_token:refresh,scope:SCOPE};
+    const accessExpires=Math.min(now+900000,familyExpires);
+    run('INSERT INTO chatgpt_oauth_access VALUES(?,?,?,?,?,?)',hash(access),clientId,userId,familyId,resource,accessExpires);
+    run('INSERT INTO chatgpt_oauth_refresh(token_hash,client_id,user_id,family,resource,expires) VALUES(?,?,?,?,?,?)',hash(refresh),clientId,userId,familyId,resource,familyExpires);
+    return{access_token:access,token_type:'Bearer',expires_in:Math.floor((accessExpires-now)/1000),refresh_token:refresh,scope:SCOPE};
   }
   function validToken(supplied){
     if(typeof supplied!=='string'||!/^Bearer [A-Za-z0-9_-]{40,256}$/.test(supplied))return false;
@@ -127,7 +137,12 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
     if(!String(req.headers['content-type']||'').startsWith('application/x-www-form-urlencoded'))fail(415,'Tipo inválido.');
     const bytes=await readBody();
     if(bytes.length>MAX_FORM)fail(413,'Formulário muito grande.');
-    return new URLSearchParams(bytes.toString('utf8'));
+    const form=new URLSearchParams(bytes.toString('utf8'));
+    uniqueParameters(form);
+    return form;
+  }
+  function uniqueParameters(params){
+    for(const key of new Set(params.keys()))if(params.getAll(key).length!==1)fail(400,'Parâmetro OAuth duplicado.');
   }
   async function validClient(clientId,redirect){
     if(!CLIENT.test(clientId)||typeof redirect!=='string'||redirect.length>400||!redirect.startsWith('https://chatgpt.com/'))return false;
@@ -136,9 +151,14 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
     if(cached?.until>Date.now())return cached.redirects.includes(redirect);
     const response=await transport(clientId,{redirect:'error',signal:AbortSignal.timeout(5000),headers:{accept:'application/json'}});
     if(!response.ok)fail(503,'Não foi possível verificar o cliente OAuth.');
-    const payload=await response.text();
-    if(payload.length>32000)fail(400,'Metadados do cliente inválidos.');
-    const data=JSON.parse(payload);
+    const reader=response.body?.getReader();
+    if(!reader)fail(400,'Metadados do cliente inválidos.');
+    const chunks=[];let size=0;
+    try{while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;
+      if(size>32000)fail(400,'Metadados do cliente inválidos.');chunks.push(Buffer.from(value));}}
+    finally{await reader.cancel();reader.releaseLock();}
+    let data;try{data=JSON.parse(Buffer.concat(chunks).toString('utf8'));}catch{fail(400,'Metadados do cliente inválidos.');}
+    if(!data||typeof data!=='object'||Array.isArray(data))fail(400,'Metadados do cliente inválidos.');
     if(data.client_id!==clientId||typeof data.client_name!=='string'||!data.client_name.trim()||data.client_name.length>160||
         !Array.isArray(data.redirect_uris)||!data.redirect_uris.length||data.redirect_uris.length>30||
         !data.redirect_uris.every(uri=>typeof uri==='string'&&uri.length<500))fail(400,'Metadados do cliente inválidos.');
@@ -150,6 +170,7 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
       if(!Array.isArray(methods)||!methods.length||!methods.every(m=>typeof m==='string')||!methods.includes('none'))
         fail(400,'Cliente não permite autenticação pública.');
     }else if(data.token_endpoint_auth_method!=='none')fail(400,'Cliente não permite autenticação pública.');
+    if(!prune(clientCache))fail(429,'Muitos clientes OAuth. Aguarde.');
     clientCache.set(clientId,{until:Date.now()+300000,redirects:data.redirect_uris});
     return data.redirect_uris.includes(redirect);
   }
@@ -172,6 +193,7 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
       if(req.method!=='GET')fail(405,'Método não permitido.');
       if(!allowAuthorize(String(req.socket.remoteAddress||'unknown')))fail(429,'Muitas solicitações de autorização. Aguarde.');
       const q=url.searchParams,clientId=q.get('client_id'),redirect=q.get('redirect_uri'),challenge=q.get('code_challenge');
+      uniqueParameters(q);
       if(q.get('response_type')!=='code'||q.get('code_challenge_method')!=='S256'||!challenge||
           !/^[A-Za-z0-9_-]{43}$/.test(challenge)||!q.get('state')||q.get('state').length>512||
           q.get('resource')!==resource||!clientId||!redirect||!await validClient(clientId,redirect))fail(400,'Solicitação OAuth inválida.');
@@ -186,22 +208,30 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
     if(path==='/oauth/approve'){
       if(req.method!=='POST')fail(405,'Método não permitido.');
       if(req.headers.origin!==origin)fail(403,'Origem não autorizada.');
+      if(!allowEndpoint('approve',60,60000))fail(429,'Muitas tentativas. Aguarde.');
       const form=await readForm(req,readBody),ticket=form.get('ticket')||'',email=String(form.get('email')||'').trim().toLowerCase(),password=String(form.get('password')||'');
       if(ticket.length>128||!ticket||email.length>160||password.length>512)fail(400,'Formulário inválido.');
       const pending=get('SELECT * FROM chatgpt_oauth_pending WHERE id_hash=? AND expires>?',hash(ticket),Date.now());
       if(!pending)fail(400,'Solicitação vencida. Reinicie a autorização no ChatGPT.');
       const ip=String(req.socket.remoteAddress||'');
       const key=ip+'|'+hash(email),globalKey=abuseKey(ip);
+      if((!attempts.has(key)||!attempts.has(globalKey))&&!prune(attempts))fail(429,'Muitas tentativas. Aguarde.');
       if(limited(key)||limited(globalKey))fail(429,'Muitas tentativas. Aguarde.');
-      const account=await authenticate(email,password);
-      if(!account||account.role!=='admin'||!currentAdmin(account.id)){
+      if(activeApprovals>=2)fail(429,'Aguarde a autenticação em andamento.');
+      const expected=get("SELECT id FROM agents WHERE active=1 AND role='admin' AND lower(email)=?",policy.email);
+      const expectedStamp=expected?passwordStamp(expected.id):null;
+      let account;
+      activeApprovals++;
+      try{account=await authenticate(email,password);}finally{activeApprovals--;}
+      if(!account||account.role!=='admin'||!expectedStamp||account.id!==expected.id||expectedStamp!==passwordStamp(account.id)){
         recordFailure(key);recordFailure(globalKey);
         return htmlReply(res,401,'<h1>Acesso negado</h1><p>Confira as credenciais e inicie novamente a conexão no ChatGPT.</p>');
       }
-      run('DELETE FROM chatgpt_oauth_pending WHERE id_hash=?',hash(ticket));
+      const claim=run('DELETE FROM chatgpt_oauth_pending WHERE id_hash=? AND expires>?',hash(ticket),Date.now());
+      if(claim.changes!==1)fail(400,'Solicitação vencida ou já utilizada.');
       attempts.delete(key);
       const code=random();
-      run('INSERT INTO chatgpt_oauth_codes VALUES(?,?,?,?,?,?,?)',hash(code),pending.client_id,pending.redirect_uri,pending.challenge,account.id,resource,Date.now()+300000);
+      run('INSERT INTO chatgpt_oauth_codes VALUES(?,?,?,?,?,?,?)',hash(code),pending.client_id,pending.redirect_uri,pending.challenge+'.'+passwordStamp(account.id),account.id,resource,Date.now()+300000);
       const callback=new URL(pending.redirect_uri);
       callback.searchParams.set('code',code);
       callback.searchParams.set('state',pending.state);
@@ -211,17 +241,21 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
     }
     if(path==='/oauth/token'){
       if(req.method!=='POST')fail(405,'Método não permitido.');
+      if(!allowEndpoint('token',120,60000))return tokenError(res,'temporarily_unavailable',429);
       const form=await readForm(req,readBody),grant=form.get('grant_type'),clientId=form.get('client_id')||'';
+      if(req.headers.authorization||['client_secret','client_assertion','client_assertion_type'].some(k=>form.has(k)))return tokenError(res,'invalid_client',401);
       if(!CLIENT.test(clientId)||form.get('resource')!==resource)return tokenError(res,'invalid_request');
       if(grant==='authorization_code'){
         const code=form.get('code')||'',verifier=form.get('code_verifier')||'',redirect=form.get('redirect_uri')||'';
         if(code.length>200||!code||!/^[A-Za-z0-9._~-]{43,128}$/.test(verifier))return tokenError(res);
         const row=get('SELECT * FROM chatgpt_oauth_codes WHERE code_hash=? AND expires>?',hash(code),Date.now());
         if(!row||row.client_id!==clientId||row.redirect_uri!==redirect||row.resource!==resource||!currentAdmin(row.user_id)||
-            !safe(sha256url(verifier),row.challenge))return tokenError(res);
-        const claim=run('DELETE FROM chatgpt_oauth_codes WHERE code_hash=?',hash(code));
-        if(claim.changes!==1)return tokenError(res);
-        return json(res,200,issue(row.user_id,clientId));
+            !safe(sha256url(verifier)+'.'+passwordStamp(row.user_id),row.challenge))return tokenError(res);
+        const tokens=transaction(()=>{
+          const claim=run('DELETE FROM chatgpt_oauth_codes WHERE code_hash=?',hash(code));
+          return claim.changes===1?issue(row.user_id,clientId):null;
+        });
+        return tokens?json(res,200,tokens):tokenError(res);
       }
       if(grant==='refresh_token'){
         const secret=form.get('refresh_token')||'';
@@ -234,9 +268,11 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
           return tokenError(res);
         }
         if(row.expires<=Date.now()||!familyIsCurrent(row.user_id,row.family))return tokenError(res);
-        const claim=run('UPDATE chatgpt_oauth_refresh SET used=1 WHERE token_hash=? AND used=0 AND revoked=0',hash(secret));
-        if(claim.changes!==1)return tokenError(res);
-        return json(res,200,issue(row.user_id,clientId,row.family));
+        const tokens=transaction(()=>{
+          const claim=run('UPDATE chatgpt_oauth_refresh SET used=1 WHERE token_hash=? AND used=0 AND revoked=0',hash(secret));
+          return claim.changes===1?issue(row.user_id,clientId,row.family,row.expires):null;
+        });
+        return tokens?json(res,200,tokens):tokenError(res);
       }
       return tokenError(res,'unsupported_grant_type');
     }

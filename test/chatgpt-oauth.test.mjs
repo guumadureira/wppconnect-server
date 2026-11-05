@@ -9,7 +9,7 @@ const client='https://chatgpt.com/oauth/client.json',redirect='https://chatgpt.c
 const issuer='https://central.example',resource=issuer+'/mcp/chatgpt',verifier='a'.repeat(43);
 const challenge=value=>createHash('sha256').update(value).digest('base64url');
 
-async function fixture(t,extra={},transport){
+async function fixture(t,extra={},transport,authenticate){
   const db=new DatabaseSync(':memory:');
   db.exec("CREATE TABLE agents(id TEXT PRIMARY KEY,email TEXT,role TEXT,active INTEGER,password TEXT NOT NULL); INSERT INTO agents VALUES ('admin1','admin@example.invalid','admin',1,'test-hash-original')");
   let auth;
@@ -24,7 +24,7 @@ async function fixture(t,extra={},transport){
   const mock=transport|| (async url=>Response.json({client_id:url,client_name:'ChatGPT oficial',redirect_uris:[redirect],grant_types:['authorization_code'],token_endpoint_auth_method:'none'}));
   auth=createChatGPTAuth(db,{PUBLIC_ORIGIN:issuer,CHATGPT_OAUTH_ENABLED:'true',
     CHATGPT_OAUTH_ADMIN_EMAIL:'admin@example.invalid',CENTRAL_MCP_ALLOWED_PHONES:'5544999999999',CHATGPT_OAUTH_ALLOWED_PHONES:'5544999999999',...extra},
-    async(email,password)=>email==='admin@example.invalid'&&password==='correct'?{id:'admin1',role:'admin'}:null,mock);
+    authenticate|| (async(email,password)=>email==='admin@example.invalid'&&password==='correct'?{id:'admin1',role:'admin'}:null),mock);
   const base='http://127.0.0.1:'+server.address().port;
   const fetchPath=(path,opts={})=>fetch(base+path,{redirect:'manual',...opts});
   const body=params=>new URLSearchParams(params);
@@ -190,4 +190,149 @@ test('recusa autorizações novas quando há 64 solicitações pendentes',async 
   const query=f.db.prepare('INSERT INTO chatgpt_oauth_pending VALUES(?,?,?,?,?,?,?)');
   for(let i=0;i<64;i++)query.run('pending-'+i,client,redirect,challenge(verifier),'state', 'central:read',Date.now()+600000);
   assert.equal((await f.start()).status,429);
+});
+
+test('duas aprovações simultâneas do mesmo ticket emitem somente um código',async t=>{
+  let entered=0,release;
+  const barrier=new Promise(resolve=>release=resolve);
+  const f=await fixture(t,{},undefined,async()=>{
+    if(++entered===2)release();await barrier;return{id:'admin1',role:'admin'};
+  });
+  const page=await f.start(),ticket=/name="ticket" value="([^"]+)"/.exec(await page.text())[1];
+  const results=await Promise.all([f.login(ticket),f.login(ticket)]);
+  assert.deepEqual(results.map(r=>r.status).sort(),[302,400]);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM chatgpt_oauth_codes').get().n,1);
+});
+
+test('ticket vencido durante autenticação não emite código',async t=>{
+  let f;
+  f=await fixture(t,{},undefined,async()=>{
+    f.db.exec('UPDATE chatgpt_oauth_pending SET expires=0');return{id:'admin1',role:'admin'};
+  });
+  const page=await f.start(),ticket=/name="ticket" value="([^"]+)"/.exec(await page.text())[1];
+  assert.equal((await f.login(ticket)).status,400);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM chatgpt_oauth_codes').get().n,0);
+});
+
+test('senha alterada durante autenticação não autoriza com a credencial anterior',async t=>{
+  let f;
+  f=await fixture(t,{},undefined,async()=>{
+    f.db.exec("UPDATE agents SET password='changed-during-login'");return{id:'admin1',role:'admin'};
+  });
+  const page=await f.start(),ticket=/name="ticket" value="([^"]+)"/.exec(await page.text())[1];
+  assert.equal((await f.login(ticket)).status,401);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM chatgpt_oauth_codes').get().n,0);
+});
+
+test('troca de senha entre consentimento e token invalida o código pendente',async t=>{
+  const f=await fixture(t),code=await f.authorization();
+  f.db.exec("UPDATE agents SET password='new-password-hash'");
+  assert.equal((await f.token({grant_type:'authorization_code',client_id:client,redirect_uri:redirect,
+    code,code_verifier:verifier,resource})).status,400);
+});
+
+test('rotação conserva validade absoluta da família e limita o último access token',async t=>{
+  const f=await fixture(t),code=await f.authorization();
+  const first=await(await f.token({grant_type:'authorization_code',client_id:client,redirect_uri:redirect,
+    code,code_verifier:verifier,resource})).json();
+  const deadline=Date.now()+120000;
+  f.db.prepare('UPDATE chatgpt_oauth_refresh SET expires=?').run(deadline);
+  const second=await(await f.token({grant_type:'refresh_token',client_id:client,
+    refresh_token:first.refresh_token,resource})).json();
+  assert.ok(second.expires_in<=120);
+  const expires=f.db.prepare('SELECT expires FROM chatgpt_oauth_refresh').all();
+  assert.equal(expires.length,2);assert.ok(expires.every(r=>r.expires===deadline));
+  assert.ok(f.db.prepare('SELECT expires FROM chatgpt_oauth_access ORDER BY rowid DESC LIMIT 1').get().expires<=deadline);
+});
+
+test('falha SQLite ao emitir tokens desfaz consumo do código e não deixa token órfão',async t=>{
+  const f=await fixture(t),code=await f.authorization();
+  f.db.exec("CREATE TRIGGER fail_refresh BEFORE INSERT ON chatgpt_oauth_refresh BEGIN SELECT RAISE(ABORT,'test-only'); END");
+  const params={grant_type:'authorization_code',client_id:client,redirect_uri:redirect,code,code_verifier:verifier,resource};
+  assert.equal((await f.token(params)).status,500);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM chatgpt_oauth_access').get().n,0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM chatgpt_oauth_codes').get().n,1);
+  f.db.exec('DROP TRIGGER fail_refresh');assert.equal((await f.token(params)).status,200);
+});
+
+test('não aceita parâmetros duplicados nem autenticação diferente de none',async t=>{
+  const f=await fixture(t);
+  const params=new URLSearchParams({grant_type:'refresh_token',client_id:client,resource,refresh_token:'fake'});
+  params.append('resource',resource);
+  const response=await f.fetchPath('/oauth/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:params});
+  assert.equal(response.status,400);
+  const query=new URLSearchParams({response_type:'code',client_id:client,redirect_uri:redirect,
+    code_challenge:challenge(verifier),code_challenge_method:'S256',state:'state',resource});
+  query.append('client_id',client);
+  assert.equal((await f.fetchPath('/oauth/authorize?'+query)).status,400);
+  assert.equal((await f.token({grant_type:'refresh_token',client_id:client,resource,client_secret:'fake'})).status,401);
+  const basic=await f.fetchPath('/oauth/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded',authorization:'Basic fake'},body:new URLSearchParams({client_id:client,resource})});
+  assert.equal(basic.status,401);
+});
+
+test('limita abuso do token endpoint sem confiar em cabeçalhos de IP',async t=>{
+  const f=await fixture(t);
+  for(let i=0;i<120;i++)assert.equal((await f.token({client_id:client,resource,grant_type:'refresh_token',refresh_token:'fake'})).status,400);
+  const denied=await f.token({client_id:client,resource});assert.equal(denied.status,429);
+  assert.deepEqual(await denied.json(),{error:'temporarily_unavailable'});
+});
+
+test('metadados CIMD grandes, inválidos ou redirecionados nunca autorizam',async t=>{
+  for(const payload of ['x'.repeat(33000),'null','{invalid']){
+    const f=await fixture(t,{},async()=>new Response(payload));
+    assert.equal((await f.start()).status,400);
+  }
+  const f=await fixture(t,{},async(url,options)=>{
+    assert.equal(options.redirect,'error');assert.ok(options.signal);return new Response('',{status:302});
+  });
+  assert.equal((await f.start()).status,503);
+});
+
+test('CIMD e callback específicos da conexão completam PKCE com issuer exato',async t=>{
+  const scopedClient='https://chatgpt.com/oauth/test_callback/client.json';
+  const scopedRedirect='https://chatgpt.com/connector/oauth/test_callback';
+  const f=await fixture(t,{},async url=>Response.json({client_id:url,client_name:'ChatGPT',
+    redirect_uris:[scopedRedirect],token_endpoint_auth_methods_supported:['none','private_key_jwt']}));
+  const page=await f.start({client_id:scopedClient,redirect_uri:scopedRedirect});assert.equal(page.status,200);
+  const ticket=/name="ticket" value="([^"]+)"/.exec(await page.text())[1];
+  const callback=new URL((await f.login(ticket)).headers.get('location'));
+  assert.equal(callback.searchParams.get('iss'),issuer);
+  assert.equal((await f.token({client_id:scopedClient,redirect_uri:scopedRedirect,resource,
+    grant_type:'authorization_code',code:callback.searchParams.get('code'),code_verifier:verifier})).status,200);
+});
+
+test('piloto recusa múltiplos telefones e origens com credenciais ou sintaxe ambígua sem criar tabelas',async t=>{
+  for(const extra of [
+    {CHATGPT_OAUTH_ALLOWED_PHONES:'5544999999999,5544999999999'},
+    {PUBLIC_ORIGIN:'https://user:password@central.example'},
+    {PUBLIC_ORIGIN:'https://central.example:invalid'},
+    {PUBLIC_ORIGIN:'https://central.example\\evil'},
+    {CHATGPT_OAUTH_ADMIN_EMAIL:'admin @example.invalid'}
+  ]){
+    const f=await fixture(t,extra);assert.equal(f.auth.enabled,false);
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE 'chatgpt_oauth_%'").get().n,0);
+    assert.equal((await f.fetchPath('/.well-known/oauth-authorization-server')).status,404);
+  }
+});
+
+test('tokens expirados são recusados e somente hashes ficam no SQLite',async t=>{
+  const f=await fixture(t),code=await f.authorization();
+  const tokens=await(await f.token({grant_type:'authorization_code',client_id:client,redirect_uri:redirect,
+    code,code_verifier:verifier,resource})).json();
+  const rows=JSON.stringify({access:f.db.prepare('SELECT * FROM chatgpt_oauth_access').all(),refresh:f.db.prepare('SELECT * FROM chatgpt_oauth_refresh').all()});
+  for(const secret of [tokens.access_token,tokens.refresh_token,code])assert.ok(!rows.includes(secret));
+  f.db.exec('UPDATE chatgpt_oauth_access SET expires=0; UPDATE chatgpt_oauth_refresh SET expires=0');
+  assert.equal((await f.fetchPath('/mcp/chatgpt',{headers:{authorization:'Bearer '+tokens.access_token}})).status,401);
+  assert.equal((await f.token({client_id:client,resource,grant_type:'refresh_token',refresh_token:tokens.refresh_token})).status,400);
+});
+
+test('mudança do telefone do piloto invalida tokens anteriores mesmo com o mesmo administrador',async t=>{
+  const f=await fixture(t),code=await f.authorization();
+  const tokens=await(await f.token({grant_type:'authorization_code',client_id:client,redirect_uri:redirect,
+    code,code_verifier:verifier,resource})).json();
+  const replacement=createChatGPTAuth(f.db,{PUBLIC_ORIGIN:issuer,CHATGPT_OAUTH_ENABLED:'true',
+    CHATGPT_OAUTH_ADMIN_EMAIL:'admin@example.invalid',CENTRAL_MCP_ALLOWED_PHONES:'5544888888888',
+    CHATGPT_OAUTH_ALLOWED_PHONES:'5544888888888'},async()=>null);
+  assert.equal(replacement.enabled,true);
+  assert.equal(replacement.validToken('Bearer '+tokens.access_token),false);
 });
