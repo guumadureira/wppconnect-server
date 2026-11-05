@@ -28,6 +28,15 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
   db.exec(`CREATE TABLE IF NOT EXISTS ai_jobs(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL REFERENCES conversations(id),message_id TEXT UNIQUE NOT NULL REFERENCES messages(id),epoch INTEGER NOT NULL,state TEXT NOT NULL,created INTEGER NOT NULL,updated INTEGER NOT NULL,result TEXT,error TEXT,cost_usd REAL NOT NULL DEFAULT 0,billing_month TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS ai_control(conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),epoch INTEGER NOT NULL DEFAULT 0,handoff TEXT NOT NULL DEFAULT '');`);
   // Unknown API results and sends are never retried automatically after a restart.
+  // A business-app echo can temporarily pause the AI. Older databases are migrated
+  // in place; no preexisting handoff or manually paused conversation is opted in.
+  if(!db.prepare('PRAGMA table_info(ai_control)').all().some(column=>column.name==='resume_after'))
+    db.exec('ALTER TABLE ai_control ADD COLUMN resume_after INTEGER');
+  const autoResumeEnabled=String(config.AI_BUSINESS_ECHO_AUTO_RESUME_ENABLED).trim()==='true';
+  const configuredMinutes=Number(config.AI_BUSINESS_ECHO_RESUME_MINUTES??60);
+  const autoResumeMs=Number.isInteger(configuredMinutes)&&configuredMinutes>=1&&configuredMinutes<=1440
+    ?configuredMinutes*60000:0;
+  const humanRequest=body=>/(?:falar|conversar|atendido|atendida).{0,35}(?:pessoa|humano|humana|gustavo|atendente)|(?:quero|preciso).{0,20}(?:humano|humana)/i.test(String(body||''));
   const interrupted=all("SELECT * FROM ai_jobs WHERE state='running'");
   run("UPDATE ai_jobs SET state='error',error='Execução interrompida; conferir antes de retomar.',updated=? WHERE state='running'",Date.now());
   const phones=String(config.AI_ALLOWED_PHONES||'').split(',').map(v=>v.trim()).filter(v=>/^[1-9]\d{7,14}$/.test(v));
@@ -40,9 +49,13 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
   const transcriber=createAudioTranscription(db,config,transport,media,cost=>spent()+cost<=budget&&(!totalBudget||totalSpent()+cost<=totalBudget));
   const spent=()=>get('SELECT COALESCE(SUM(cost_usd),0) AS n FROM ai_jobs WHERE billing_month=?',month()).n+transcriber.cost(month())+operatorAICost(db,month());
   const totalSpent=()=>get('SELECT COALESCE(SUM(cost_usd),0) AS n FROM ai_jobs').n+transcriber.cost()+operatorAICost(db);
-  function status(){return{enabled:enabled(),model:MODEL,credentialPresent:!!String(config.OPENAI_API_KEY||'').trim(),activationPending:String(config.AI_ENABLED).trim()!=='true',pilotConfigured:phones.length>0,allContacts,scopeConfigured:allContacts||phones.length>0,budgetUsd:budget>0&&budget<=100?budget:0,usedUsd:spent(),totalBudgetUsd:totalBudget,usedTotalUsd:totalSpent(),audioEnabled:String(config.AI_AUDIO_ENABLED)==='true',autoRegistration:String(config.AI_AUTO_REGISTER)==='true',whatsappReady:ready,pending:get("SELECT COUNT(*) AS n FROM ai_jobs WHERE state IN ('pending','running')").n,handoffs:all("SELECT a.conversation_id,c.name,a.handoff FROM ai_control a JOIN conversations c ON c.id=a.conversation_id WHERE a.handoff<>'' ORDER BY c.updated DESC LIMIT 30")};}
-  function pause(id,reason=''){
-    ensure(id);run('UPDATE ai_control SET epoch=epoch+1,handoff=? WHERE conversation_id=?',reason,id);
+  function status(){return{businessEchoAutoResume:{enabled:autoResumeEnabled&&autoResumeMs>0,minutes:autoResumeMs/60000},enabled:enabled(),model:MODEL,credentialPresent:!!String(config.OPENAI_API_KEY||'').trim(),activationPending:String(config.AI_ENABLED).trim()!=='true',pilotConfigured:phones.length>0,allContacts,scopeConfigured:allContacts||phones.length>0,budgetUsd:budget>0&&budget<=100?budget:0,usedUsd:spent(),totalBudgetUsd:totalBudget,usedTotalUsd:totalSpent(),audioEnabled:String(config.AI_AUDIO_ENABLED)==='true',autoRegistration:String(config.AI_AUTO_REGISTER)==='true',whatsappReady:ready,pending:get("SELECT COUNT(*) AS n FROM ai_jobs WHERE state IN ('pending','running')").n,handoffs:all("SELECT a.conversation_id,c.name,a.handoff FROM ai_control a JOIN conversations c ON c.id=a.conversation_id WHERE a.handoff<>'' ORDER BY c.updated DESC LIMIT 30")};}
+  function pause(id,reason='',{businessEcho=false}={}){
+    ensure(id);
+    // Only a confirmed Business-app echo is eligible for time-limited handoff.
+    // Manual handoffs, explicit human requests and operational failures never expire.
+    const resumeAfter=businessEcho&&autoResumeEnabled&&autoResumeMs>0?Date.now()+autoResumeMs:null;
+    run('UPDATE ai_control SET epoch=epoch+1,handoff=?,resume_after=? WHERE conversation_id=?',reason,resumeAfter,id);
     run("UPDATE ai_jobs SET state='cancelled',updated=? WHERE conversation_id=? AND state='pending'",Date.now(),id);
     run("UPDATE conversation_context SET mode='human',version=version+1,updated=? WHERE conversation_id=? AND mode<>'human'",Date.now(),id);
   }
@@ -50,19 +63,32 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
     if(!enabled())fail(503,'Configure a chave, o piloto, o limite de consumo e a conexão WhatsApp antes de liberar a IA.');
     if(isDirectionContact(conversation.phone))fail(403,'Contatos internos da direção não podem ser liberados no atendimento automático de clientes.');
     if(!allowed(conversation.phone))fail(403,'Este telefone não está autorizado no piloto da IA.');
-    ensure(conversation.id);run("UPDATE ai_control SET epoch=epoch+1,handoff='' WHERE conversation_id=?",conversation.id);
+    ensure(conversation.id);run("UPDATE ai_control SET epoch=epoch+1,handoff='',resume_after=NULL WHERE conversation_id=?",conversation.id);
   }
   function incoming(conversation,message,{fresh=false,echo=false,type='text'}={}){
-    if(echo){pause(conversation.id);return;}
+    if(echo){pause(conversation.id,'',{businessEcho:true});return;}
     if(isDirectionContact(conversation.phone)){pause(conversation.id,'Contato interno da direção: atendimento automático a clientes desativado.');return;}
     if(!enabled()||!allowed(conversation.phone))return;
-    const c=context.view(conversation.id);
+    const c=context.view(conversation.id),previous=ensure(conversation.id);
+    if(c.mode!=='assisted'&&!fresh&&previous.resume_after){
+      // A human request during the cooldown is permanent until an operator releases it.
+      if(humanRequest(message.body)){pause(conversation.id,'Contato solicitou atendimento humano.');return;}
+      // A clock expiry alone never sends a message: only a NEW client message can resume.
+      // A delayed webhook older than the deadline cannot reactivate old work.
+      const eligible=c.mode==='human'&&conversation.status==='open'&&!conversation.owner_id
+        &&!previous.handoff&&Date.now()>=previous.resume_after
+        &&Number(message.created)>previous.resume_after;
+      if(!eligible)return;
+      const changed=run("UPDATE conversation_context SET mode='assisted',version=version+1,updated=? WHERE conversation_id=? AND mode='human'",Date.now(),conversation.id);
+      if(changed.changes!==1)return;
+      run('UPDATE ai_control SET epoch=epoch+1,resume_after=NULL WHERE conversation_id=? AND resume_after=?',conversation.id,previous.resume_after);
+    }
     if(fresh&&!conversation.owner_id){run("UPDATE conversation_context SET mode='assisted',version=version+1 WHERE conversation_id=?",conversation.id);}
-    else if(c.mode!=='assisted')return;
+    else if(context.view(conversation.id).mode!=='assisted')return;
     const control=ensure(conversation.id);
     if(!['text','image','document'].includes(type)&&!(type==='audio'&&String(config.AI_AUDIO_ENABLED)==='true')){handoff(conversation.id,message.id,'Arquivo recebido: precisa de conferência humana.');return;}
     const salesOffer=c.kind==='comercial'||/\b(?:oferecemos|vendemos|ofereço|represento)\b|sou .{0,30}(?:prestador|fornecedor|representante)/i.test(message.body);
-    if(!salesOffer&&/(?:falar|conversar|atendido|atendida).{0,35}(?:pessoa|humano|humana|gustavo|atendente)|(?:quero|preciso).{0,20}(?:humano|humana)/i.test(message.body)){handoff(conversation.id,message.id,'Contato solicitou atendimento humano.');return;}
+    if(!salesOffer&&humanRequest(message.body)){handoff(conversation.id,message.id,'Contato solicitou atendimento humano.');return;}
     run("UPDATE ai_jobs SET state='cancelled',updated=? WHERE conversation_id=? AND state='pending'",Date.now(),conversation.id);
     run("INSERT OR IGNORE INTO ai_jobs(id,conversation_id,message_id,epoch,state,created,updated,billing_month) VALUES(?,?,?,?,'pending',?,?,?)",randomUUID(),conversation.id,message.id,control.epoch,Date.now(),Date.now(),month());
   }
