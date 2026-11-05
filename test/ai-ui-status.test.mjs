@@ -36,5 +36,5 @@ test('interface mostra assistência somente quando o modo atualizado permite',()
 
 test('modo assistido com piloto indisponível é descrito sem prometer resposta',()=>{
   const result=banner('assisted','assisted',false);
-  assert.match(result,/Assistência liberada · IA automática indisponível/);
+  assert.match(result,/Assistência liberada · IA automática ainda não ativa/);
 });
