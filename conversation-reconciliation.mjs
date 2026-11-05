@@ -81,8 +81,9 @@ export function createConversationReconciliation(db, config, transport, context,
         }
         let view=context.view(job.conversation_id);
         if(view.client_id){
-          if(!context.status().enabled){
-            run("UPDATE context_reconciliation_jobs SET state='retry',next_attempt=?,error=? WHERE conversation_id=? AND cursor=?",Date.now()+60000,'Notion desabilitado; não alterar contexto de cliente vinculado.',job.conversation_id,job.cursor);
+          const integration=context.status();
+          if(!integration.enabled||!integration.summaryEnabled){
+            run("UPDATE context_reconciliation_jobs SET state='retry',next_attempt=?,error=? WHERE conversation_id=? AND cursor=?",Date.now()+60000,'Integração e resumo da Central no Notion devem estar habilitados antes de atualizar cliente vinculado.',job.conversation_id,job.cursor);
             continue;
           }
           try{
