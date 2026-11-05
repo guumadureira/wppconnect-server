@@ -85,3 +85,11 @@ test('flag ligada sem tabelas não pode indicar que o teste privado está pronto
   assert.equal(report.readyForPrivateOAuthTest,false);
   assert.equal(report.oauthSchema.absent,true);
 });
+
+test('leitura completa exige opt-in exato e dispensa a lista legada somente no canal ChatGPT',t=>{
+  const db=setup(t),config={...valid,CENTRAL_MCP_ALLOWED_PHONES:'',CHATGPT_OAUTH_ALLOWED_PHONES:'',CHATGPT_OAUTH_READ_ALL_CONTACTS:'true'};
+  const report=inspectChatGPTConnection(db,config);
+  assert.equal(report.readyToEnable,true);assert.equal(report.readScope,'all_conversations_and_contacts');
+  assert.equal(report.checks.singleInternalPhone,null);assert.equal(report.checks.scopeContainedInLegacy,null);
+  for(const value of ['', 'false','TRUE'])assert.equal(inspectChatGPTConnection(db,{...config,CHATGPT_OAUTH_READ_ALL_CONTACTS:value}).readyToEnable,false);
+});

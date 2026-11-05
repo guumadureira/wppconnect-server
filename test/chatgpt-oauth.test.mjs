@@ -373,3 +373,13 @@ test('mudança do telefone do piloto invalida tokens anteriores mesmo com o mesm
   assert.equal(replacement.enabled,true);
   assert.equal(replacement.validToken('Bearer '+tokens.access_token),false);
 });
+
+test('ampliar leitura exige novo consentimento e não eleva tokens antigos do piloto',async t=>{
+  const f=await fixture(t),code=await f.authorization();
+  const tokens=await(await f.token({grant_type:'authorization_code',client_id:client,redirect_uri:redirect,code,code_verifier:verifier,resource})).json();
+  const expanded=createChatGPTAuth(f.db,{PUBLIC_ORIGIN:issuer,CHATGPT_OAUTH_ENABLED:'true',CHATGPT_OAUTH_ADMIN_EMAIL:'admin@example.invalid',
+    CENTRAL_MCP_ALLOWED_PHONES:'5544999999999',CHATGPT_OAUTH_ALLOWED_PHONES:'5544999999999',CHATGPT_OAUTH_READ_ALL_CONTACTS:'true'},async()=>null);
+  assert.equal(expanded.enabled,true);assert.equal(expanded.validToken('Bearer '+tokens.access_token),false);
+  const all=await fixture(t,{CHATGPT_OAUTH_READ_ALL_CONTACTS:'true',CHATGPT_OAUTH_ALLOWED_PHONES:'',CENTRAL_MCP_ALLOWED_PHONES:''});
+  const page=await all.start();assert.equal(page.status,200);assert.match(await page.text(),/todas as conversas e contatos/);
+});

@@ -18,15 +18,16 @@ export function inspectChatGPTConnection(db,config={}){
     httpsOrigin:!!policy.origin,
     administratorConfigured:policy.administratorConfigured,
     activeAdministratorFound:activeAdmin,
-    explicitChatGPTScope:policy.explicitScope,
-    singleInternalPhone:policy.singlePhone,
-    scopeContainedInLegacy:policy.scopeSubset,
+    explicitChatGPTScope:policy.allContacts||policy.explicitScope,
+    singleInternalPhone:policy.allContacts?null:policy.singlePhone,
+    scopeContainedInLegacy:policy.allContacts?null:policy.scopeSubset,
     oauthFeatureEnabled:String(config.CHATGPT_OAUTH_ENABLED)==='true'
   };
   const oauthTables=db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('chatgpt_oauth_pending','chatgpt_oauth_codes','chatgpt_oauth_access','chatgpt_oauth_refresh')").all().length;
-  const readyToEnable=[0,4].includes(oauthTables)&&Object.entries(checks).every(([key,ok])=>key==='oauthFeatureEnabled'||ok);
+  const readyToEnable=[0,4].includes(oauthTables)&&Object.entries(checks).every(([key,ok])=>key==='oauthFeatureEnabled'||ok===null||ok);
   return{
     checks,
+    readScope:policy.allContacts?'all_conversations_and_contacts':'single_internal_phone',
     oauthSchema:{expectedTables:4,presentTables:oauthTables,absent:oauthTables===0,complete:oauthTables===4},
     readyToEnable,
     readyForPrivateOAuthTest:readyToEnable&&checks.oauthFeatureEnabled&&oauthTables===4,

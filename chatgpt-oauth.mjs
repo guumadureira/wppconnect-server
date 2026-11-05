@@ -19,7 +19,7 @@ const html = text => `<!doctype html><html lang="pt-BR"><head><meta charset="utf
 export function createChatGPTAuth(db,config,authenticate,transport=fetch){
   const policy=chatgptPolicy(config),origin=policy.origin;
   const resource=origin+'/mcp/chatgpt';
-  // Fail closed unless the private pilot has one contact in the existing scope.
+  // Broader read access requires its own explicit flag; the pilot remains the default.
   const enabled=String(config.CHATGPT_OAUTH_ENABLED)==='true'&&policy.ready;
   const get=(sql,...params)=>db.prepare(sql).get(...params);
   const run=(sql,...params)=>db.prepare(sql).run(...params);
@@ -90,7 +90,9 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
   // Bind grants to the password and pilot policy without additional schema changes.
   function passwordStamp(userId){
     const account=currentAdmin(userId);
-    return account?.password?hash(JSON.stringify([userId,account.password,policy.email,resource,policy.phones])).slice(0,32):null;
+    const binding=[userId,account?.password,policy.email,resource,policy.phones];
+    if(policy.allContacts)binding.push('all_contacts_read_only');
+    return account?.password?hash(JSON.stringify(binding)).slice(0,32):null;
   }
   function familyIsCurrent(userId,family){
     const stamp=passwordStamp(userId);
@@ -209,7 +211,8 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
       if(get('SELECT COUNT(*) AS n FROM chatgpt_oauth_pending').n>=64)fail(429,'Muitas autorizações pendentes. Aguarde.');
       const ticket=random();
       run('INSERT INTO chatgpt_oauth_pending VALUES(?,?,?,?,?,?,?)',hash(ticket),clientId,redirect,challenge,q.get('state'),SCOPE,Date.now()+300000);
-      return htmlReply(res,200,`<h1>Conectar ChatGPT à Central Domum</h1><p>Autorize a consulta somente de leitura das conversas previamente permitidas. Nenhum envio de mensagem será habilitado.</p><form method="post" action="/oauth/approve"><input type="hidden" name="ticket" value="${ticket}"><label>E-mail do administrador<input type="email" name="email" autocomplete="username" required maxlength="160"></label><label>Senha da Central<input type="password" name="password" autocomplete="current-password" required maxlength="512"></label><button type="submit">Autorizar consulta</button></form>`,redirect);
+      const scopeNotice=policy.allContacts?'de todas as conversas e contatos da Central':'das conversas previamente permitidas';
+      return htmlReply(res,200,`<h1>Conectar ChatGPT à Central Domum</h1><p>Autorize a consulta somente de leitura ${scopeNotice}. Nenhum envio de mensagem será habilitado.</p><form method="post" action="/oauth/approve"><input type="hidden" name="ticket" value="${ticket}"><label>E-mail do administrador<input type="email" name="email" autocomplete="username" required maxlength="160"></label><label>Senha da Central<input type="password" name="password" autocomplete="current-password" required maxlength="512"></label><button type="submit">Autorizar consulta</button></form>`,redirect);
     }
     if(path==='/oauth/approve'){
       if(req.method!=='POST')fail(405,'Método não permitido.');
