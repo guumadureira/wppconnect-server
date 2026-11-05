@@ -9,6 +9,10 @@ const fail = (code,message) => {throw Object.assign(Error(message),{status:code}
 const CLIENT = /^https:\/\/chatgpt\.com\/oauth\/(?:[A-Za-z0-9_-]{1,96}\/)?client\.json$/;
 const SCOPE = 'central:read';
 const MAX_FORM = 8192;
+// Chromium can apply form-action to redirects after POST. Permit only the exact
+// callback already validated against ChatGPT's CIMD, never the whole domain.
+const formPolicy = callback => "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'"+
+  (callback?' '+callback:'')+"; base-uri 'none'; frame-ancestors 'none'";
 const html = text => `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="no-referrer"><title>Autorizar leitura — Central Domum</title><style>body{font:16px system-ui,sans-serif;max-width:440px;margin:3rem auto;padding:1rem}input,button{box-sizing:border-box;width:100%;padding:12px;margin:8px 0;font:inherit}button{background:#252525;color:white;border:0;cursor:pointer}p{line-height:1.5}</style></head><body>${text}</body></html>`;
 
 /** An isolated OAuth 2.1 authorization layer. Does not authenticate legacy /mcp traffic. */
@@ -127,8 +131,8 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
     res.setHeader('www-authenticate',`Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp/chatgpt", scope="${SCOPE}"`);
     return json(res,401,{error:'unauthorized'});
   }
-  function htmlReply(res,status,body){
-    res.setHeader('content-security-policy',"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+  function htmlReply(res,status,body,callback){
+    res.setHeader('content-security-policy',formPolicy(callback));
     res.setHeader('referrer-policy','no-referrer');
     res.writeHead(status,{'content-type':'text/html; charset=utf-8','cache-control':'no-store'});
     return res.end(html(body));
@@ -203,7 +207,7 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
       if(get('SELECT COUNT(*) AS n FROM chatgpt_oauth_pending').n>=64)fail(429,'Muitas autorizações pendentes. Aguarde.');
       const ticket=random();
       run('INSERT INTO chatgpt_oauth_pending VALUES(?,?,?,?,?,?,?)',hash(ticket),clientId,redirect,challenge,q.get('state'),SCOPE,Date.now()+300000);
-      return htmlReply(res,200,`<h1>Conectar ChatGPT à Central Domum</h1><p>Autorize a consulta somente de leitura das conversas previamente permitidas. Nenhum envio de mensagem será habilitado.</p><form method="post" action="/oauth/approve"><input type="hidden" name="ticket" value="${ticket}"><label>E-mail do administrador<input type="email" name="email" autocomplete="username" required maxlength="160"></label><label>Senha da Central<input type="password" name="password" autocomplete="current-password" required maxlength="512"></label><button type="submit">Autorizar consulta</button></form>`);
+      return htmlReply(res,200,`<h1>Conectar ChatGPT à Central Domum</h1><p>Autorize a consulta somente de leitura das conversas previamente permitidas. Nenhum envio de mensagem será habilitado.</p><form method="post" action="/oauth/approve"><input type="hidden" name="ticket" value="${ticket}"><label>E-mail do administrador<input type="email" name="email" autocomplete="username" required maxlength="160"></label><label>Senha da Central<input type="password" name="password" autocomplete="current-password" required maxlength="512"></label><button type="submit">Autorizar consulta</button></form>`,redirect);
     }
     if(path==='/oauth/approve'){
       if(req.method!=='POST')fail(405,'Método não permitido.');
@@ -236,6 +240,7 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
       callback.searchParams.set('code',code);
       callback.searchParams.set('state',pending.state);
       callback.searchParams.set('iss',origin);
+      res.setHeader('content-security-policy',formPolicy(pending.redirect_uri));
       res.writeHead(302,{location:callback.toString(),'cache-control':'no-store','referrer-policy':'no-referrer'});
       return res.end();
     }
