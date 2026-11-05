@@ -11,7 +11,7 @@ const challenge=value=>createHash('sha256').update(value).digest('base64url');
 
 async function fixture(t,extra={},transport){
   const db=new DatabaseSync(':memory:');
-  db.exec("CREATE TABLE agents(id TEXT PRIMARY KEY,email TEXT,role TEXT,active INTEGER); INSERT INTO agents VALUES ('admin1','admin@example.invalid','admin',1)");
+  db.exec("CREATE TABLE agents(id TEXT PRIMARY KEY,email TEXT,role TEXT,active INTEGER,password TEXT NOT NULL); INSERT INTO agents VALUES ('admin1','admin@example.invalid','admin',1,'test-hash-original')");
   let auth;
   const server=createServer(async(req,res)=>{
     const url=new URL(req.url,issuer);
@@ -161,4 +161,33 @@ test('OAuth bloqueia configuração com telefone inválido, não autorizado ou m
     assert.equal(f.auth.enabled,false,allowed);
     assert.equal((await f.fetchPath('/oauth/authorize')).status,404,allowed);
   }
+});
+
+test('alterar a senha do administrador revoga access e refresh tokens emitidos anteriormente',async t=>{
+  const f=await fixture(t),code=await f.authorization();
+  const granted=await f.token({grant_type:'authorization_code',client_id:client,redirect_uri:redirect,
+    code,code_verifier:verifier,resource});
+  assert.equal(granted.status,200);
+  const tokens=await granted.json();
+  assert.equal((await f.fetchPath('/mcp/chatgpt',{headers:{authorization:'Bearer '+tokens.access_token}})).status,200);
+  f.db.exec("UPDATE agents SET password='test-hash-after-change' WHERE id='admin1'");
+  assert.equal((await f.fetchPath('/mcp/chatgpt',{headers:{authorization:'Bearer '+tokens.access_token}})).status,401);
+  assert.equal((await f.token({grant_type:'refresh_token',client_id:client,resource,refresh_token:tokens.refresh_token})).status,400);
+});
+
+test('limita pedidos públicos de autorização antes de esgotar os recursos do servidor',async t=>{
+  const f=await fixture(t);
+  for(let i=0;i<16;i++){
+    const response=await f.start();
+    assert.equal(response.status,200,'tentativa '+i);
+    await response.text();
+  }
+  assert.equal((await f.start()).status,429);
+});
+
+test('recusa autorizações novas quando há 64 solicitações pendentes',async t=>{
+  const f=await fixture(t);
+  const query=f.db.prepare('INSERT INTO chatgpt_oauth_pending VALUES(?,?,?,?,?,?,?)');
+  for(let i=0;i<64;i++)query.run('pending-'+i,client,redirect,challenge(verifier),'state', 'central:read',Date.now()+600000);
+  assert.equal((await f.start()).status,429);
 });
