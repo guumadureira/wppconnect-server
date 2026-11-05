@@ -1,0 +1,54 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {parseGroupExport} from '../group-history.mjs';
+import {createCentral} from '../server.mjs';
+
+const now=Date.UTC(2026,10,5,16);
+const sample='05/11/2026 12:00 - Ana: Projeto aprovado?\n05/11/2026 12:01 - Gustavo: Precisamos conferir a versao\n05/11/2026 12:02 - Jonatan: Vou verificar.';
+test('exportacao em grupo preserva todos os autores, mensagens e horario',()=>{
+ const parsed=parseGroupExport(sample,'dmy',now);
+ assert.equal(parsed.messages.length,3);
+ assert.deepEqual(parsed.authors,['Ana','Gustavo','Jonatan']);
+ assert.equal(parsed.messages[0].created,Date.UTC(2026,10,5,15));
+ assert.throws(()=>parseGroupExport('13/11/2026 12:00 - A: teste','mdy',now),/Datas invalidas/);
+ assert.throws(()=>parseGroupExport('05/11/2026 12:00 - A: teste'+String.fromCharCode(0),'dmy',now),/invalido/);
+});
+test('grupos nao geram conversas, IA ou eventos de clientes no Notion e evitam duplicidade',async t=>{
+ const app=createCentral({DATABASE_PATH:':memory:'},()=>{assert.fail('Nunca deve chamar servicos externos');});
+ t.after(()=>app.close());
+ const actor={id:'admin'};
+ const group=app.groupHistory.create({name:'Obra piloto'});
+ const p=app.groupHistory.preview(group.id,{text:sample,dateOrder:'dmy',groupConfirmed:true},actor);
+ assert.equal(p.count,3);
+ assert.equal(app.groupHistory.detail(group.id).messages.length,0);
+ assert.throws(()=>app.groupHistory.confirm(group.id,{...p,confirmed:true,digest:'errado'},actor),/invalida/);
+ assert.equal(app.groupHistory.confirm(group.id,{...p,confirmed:true},actor).imported,3);
+ assert.equal(app.groupHistory.detail(group.id).observed_authors.length,3);
+ assert.equal(app.groupHistory.preview(group.id,{text:sample,dateOrder:'dmy',groupConfirmed:true},actor).duplicates,3);
+ assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM conversations').get().n,0);
+ assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM ai_jobs').get().n,0);
+ assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM service_events').get().n,0);
+ assert.equal(app.groupHistory.confirm(group.id,{...p,confirmed:true},actor).repeated,true);
+});
+test('rotas de grupos exigem login e restringem edicoes aos admins',async t=>{
+ const config={DATABASE_PATH:':memory:'};const app=createCentral(config);await new Promise(r=>app.server.listen(0,'127.0.0.1',r));t.after(()=>app.close());
+ const base='http://127.0.0.1:'+app.server.address().port;config.PUBLIC_ORIGIN=base;
+ const post=(path,data,cookie)=>fetch(base+path,{method:'POST',headers:{origin:base,'content-type':'application/json',...(cookie?{cookie}:{})},body:JSON.stringify(data)});
+ const admin={name:'Admin',email:'group@example.invalid',password:'teste'};
+ await post('/api/setup',admin);
+ const login=await post('/api/login',admin),cookie=login.headers.get('set-cookie').split(';')[0];
+ assert.equal((await post('/api/groups',{name:'Obra piloto'})).status,401);
+ const created=await post('/api/groups',{name:'Obra piloto'},cookie);assert.equal(created.status,201);
+ const group=await created.json();
+ const list=await fetch(base+'/api/groups',{headers:{cookie}});
+ assert.equal((await list.json()).groups.length,1);
+ const preview=await post('/api/groups/'+group.id+'/preview',{text:'05/11/2026 12:00 - A: teste',dateOrder:'dmy',groupConfirmed:true},cookie);
+ assert.equal(preview.status,200);
+ const p=await preview.json();
+ assert.equal((await post('/api/groups/'+group.id+'/confirm',{...p,confirmed:true},cookie)).status,200);
+ app.db.prepare("UPDATE agents SET role='agent'").run();
+ assert.equal((await post('/api/groups',{name:'Outro grupo'},cookie)).status,403);
+ assert.equal((await post('/api/groups/'+group.id+'/preview',{text:sample,groupConfirmed:true},cookie)).status,403);
+ const detail=await fetch(base+'/api/groups/'+group.id,{headers:{cookie}});
+ assert.equal(detail.status,200);
+});

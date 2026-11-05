@@ -14,6 +14,7 @@ import { createCentralMCP } from './central-mcp.mjs';
 import { createChatGPTAuth } from './chatgpt-oauth.mjs';
 import {createSupplierRegister} from './supplier-register.mjs';
 import {createHistoryImport} from './history-import.mjs';
+import {createGroupHistory} from './group-history.mjs';
 import {createOperatorChat} from './operator-chat.mjs';
 import {createOperatorContext} from './operator-context.mjs';
 import {createOperatorAI} from './operator-ai.mjs';
@@ -78,6 +79,7 @@ export function createCentral(config = process.env, transport = fetch, options =
   const templateResumption=createTemplateResumption(db,config,transport,{ready:!!ready});
   ai = createAIAttendance(db,config,transport,customerContext,{ready:!!ready,debounceMs:options.aiDebounceMs,media,suppliers,isDirectionContact:directionGuard.isDirectionContact,directionDecisions,globalContext,importedHistory:id=>manualHistory?.forAI(id)});
   manualHistory=createHistoryImport(db,customerContext,ai);
+  const groupHistory=createGroupHistory(db);
   const centralMCP=createCentralMCP(db,config,transport,{context:customerContext,ai,media,ready:!!ready});
   const chatgptAuth=createChatGPTAuth(db,config,async(email,password)=>{
     const agent=get('SELECT * FROM agents WHERE email=? AND active=1',email);
@@ -275,7 +277,8 @@ export function createCentral(config = process.env, transport = fetch, options =
       const signupPage = ['/connect/whatsapp','/assets/whatsapp-signup.mjs'].includes(url.pathname);
       const directionPage=url.pathname==='/direcao';
       const resumptionPage=url.pathname==='/retomadas';
-      if (!url.pathname.startsWith('/api/') && !signupPage && !directionPage && !resumptionPage) fail(404,'Página não encontrada.');
+      const groupsPage=url.pathname==='/grupos';
+      if (!url.pathname.startsWith('/api/') && !signupPage && !directionPage && !resumptionPage && !groupsPage) fail(404,'Página não encontrada.');
       if (!['GET','HEAD'].includes(req.method) && req.headers.origin !== origin) fail(403,'Origem não autorizada.');
       let body = {};
       if (['POST','PATCH','DELETE'].includes(req.method) && !(url.pathname==='/api/media'&&req.method==='POST')) {const raw=await readBody();try{body=JSON.parse(raw.toString() || '{}');}catch{fail(400,'Dados inválidos.');}if(!body||typeof body!=='object'||Array.isArray(body))fail(400,'Dados inválidos.');}
@@ -311,6 +314,10 @@ export function createCentral(config = process.env, transport = fetch, options =
         return reply(200,{ok:true});
       }
       if (!user) fail(401,'Entre com seu usuário para continuar.');
+      if(groupsPage&&req.method==='GET'){
+        res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store'});
+        return res.end(readFileSync(new URL('./public/grupos.html',import.meta.url)));
+      }
       if(directionPage&&req.method==='GET'){
         directionDecisions.list(user,'pending');
         res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store'});
@@ -396,6 +403,20 @@ export function createCentral(config = process.env, transport = fetch, options =
         if(req.method==='POST'&&!reportId)return reply(201,{reports:quality.report(id,body,user)});
         if(req.method==='PATCH'&&reportId)return reply(200,{reports:quality.review(id,reportId,body,user)});
         fail(405,'Método não permitido.');
+      }
+      if(url.pathname==='/api/groups'&&req.method==='GET')return reply(200,{groups:groupHistory.list(),source:'manual_export',liveSync:false,aiResponses:false});
+      if(url.pathname==='/api/groups'&&req.method==='POST'){
+        if(user.role!=='admin')fail(403,'Somente administradores podem cadastrar grupos.');
+        return reply(201,groupHistory.create(body));
+      }
+      const groupMatch=url.pathname.match(/^\/api\/groups\/([a-f0-9-]{36})(?:\/(preview|confirm))?$/i);
+      if(groupMatch){
+        if(req.method==='GET'&&!groupMatch[2])return reply(200,groupHistory.detail(groupMatch[1]));
+        if(req.method==='POST'&&groupMatch[2]){
+          if(user.role!=='admin')fail(403,'Somente administradores podem importar grupos.');
+          return reply(200,groupHistory[groupMatch[2]](groupMatch[1],body,user));
+        }
+        fail(405,'Metodo nao permitido.');
       }
       const historyMatch=url.pathname.match(/^\/api\/conversations\/([^/]+)\/history-import\/(inspect|preview|confirm)$/);
       if(historyMatch&&req.method==='POST'){
@@ -653,7 +674,7 @@ export function createCentral(config = process.env, transport = fetch, options =
     try{await deliverAlerts();await media.processPending();await customerContext.processLookups();await customerContext.processQueue();await suppliers.process();}catch{console.error('Falha ao verificar lembretes, anexos ou integração.');}finally{delivering=false;}
   },60000);
   timer.unref();
-  return {server,db,intake,tick,deliverAlerts,media,customerContext,globalContext,ai,suppliers,directionDecisions,templateResumption,manualHistory,operatorChat,close:()=>{
+  return {server,db,intake,tick,deliverAlerts,media,customerContext,globalContext,ai,suppliers,directionDecisions,templateResumption,manualHistory,groupHistory,operatorChat,close:()=>{
     clearInterval(timer);
     clearInterval(aiTimer);
     return new Promise((resolve,reject)=>server.close(async error=>{
