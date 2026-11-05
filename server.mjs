@@ -423,6 +423,17 @@ export function createCentral(config = process.env, transport = fetch, options =
         if(user.role!=='admin')fail(403,'Somente administradores podem consultar a conciliação.');
         return reply(200,reconciliation.status());
       }
+      if(url.pathname==='/api/context/reconciliation/backfill'&&['GET','POST'].includes(req.method)){
+        if(user.role!=='admin')fail(403,'Somente administradores podem preparar o histórico.');
+        const confirmed=req.method==='POST';
+        if(confirmed&&body.confirmed!==true)fail(400,'Confirme explicitamente a recuperação histórica.');
+        if(confirmed&&!reconciliation.status().enabled)fail(409,'Habilite primeiro a conciliação em ambiente homologado.');
+        const rawLimit=confirmed?(body.limit??100):(url.searchParams.get('limit')??'100');
+        const limit=Number(rawLimit);
+        if(!Number.isInteger(limit)||limit<1||limit>100)fail(400,'Limite de recuperação inválido.');
+        const result=reconciliation.backfill({confirmed,limit});
+        return reply(200,result);
+      }
       if(url.pathname==='/api/notion/status'&&req.method==='GET')return reply(200,customerContext.status());
       if(url.pathname==='/api/notion/verify'&&req.method==='POST'){
         if(user.role!=='admin')fail(403,'Somente administradores podem verificar a integração.');
