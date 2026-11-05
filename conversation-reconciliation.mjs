@@ -47,7 +47,7 @@ export function createConversationReconciliation(db, config, transport, context,
       GROUP BY c.id ORDER BY MAX(m.rowid) DESC LIMIT ?`,limit);
     let excluded=0,unchanged=0;const eligible=[];
     for(const row of candidates){
-      const kind=context.view(row.id).kind;
+      const kind=get('SELECT kind FROM conversation_context WHERE conversation_id=?',row.id)?.kind||'atendimento';
       if(isDirectionContact(row.phone)||kind==='comercial'){excluded++;continue;}
       if(row.known_cursor===row.cursor && ['done','pending','running','retry','needs_review','excluded'].includes(row.known_state)){unchanged++;continue;}
       eligible.push(row);
