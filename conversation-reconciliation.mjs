@@ -21,6 +21,15 @@ export function createConversationReconciliation(db, config, transport, context,
     VALUES(NEW.conversation_id,NEW.rowid,'pending',0,0,NULL,NEW.created)
     ON CONFLICT(conversation_id) DO UPDATE SET cursor=MAX(cursor,excluded.cursor),
       state='pending',next_attempt=0,error=NULL,updated=MAX(updated,excluded.updated);
+  END;
+  CREATE TRIGGER IF NOT EXISTS context_reconciliation_status_confirmed AFTER UPDATE OF status ON messages
+  WHEN NEW.direction='out' AND OLD.status IN ('sending','unknown')
+    AND NEW.status IN ('sent','delivered','read','failed')
+  BEGIN
+    INSERT INTO context_reconciliation_jobs(conversation_id,cursor,state,next_attempt,attempts,error,updated)
+    VALUES(NEW.conversation_id,NEW.rowid,'pending',0,0,NULL,NEW.created)
+    ON CONFLICT(conversation_id) DO UPDATE SET cursor=MAX(cursor,excluded.cursor),
+      state='pending',next_attempt=0,error=NULL,updated=MAX(updated,excluded.updated);
   END;`);
   // An interrupted call has an unknown cost. Keep it pending without automatic replay.
   run("UPDATE context_reconciliation_jobs SET state='needs_review',error='Interrupção durante análise; revisão necessária.' WHERE state='running'");
@@ -28,6 +37,32 @@ export function createConversationReconciliation(db, config, transport, context,
   const enabled=()=>String(config.CONTEXT_RECONCILIATION_ENABLED)==='true'
     &&!!String(config.OPENAI_API_KEY||'').trim()&&Number.isFinite(budget)&&budget>0&&budget<=20;
   const used=()=>get("SELECT COALESCE(SUM(cost_usd),0) AS n FROM context_reconciliation_usage WHERE month=?",new Date().toISOString().slice(0,7)).n;
+  // Historic messages predate the trigger. Preview is read-only; replay is explicit.
+  // Preserve completed and review-required states unless new messages arrived.
+  function backfill({confirmed=false,limit=100}={}){
+    if(!Number.isInteger(limit)||limit<1||limit>100)throw Object.assign(Error('Limite deve estar entre 1 e 100.'),{status:400});
+    const candidates=all(`SELECT c.id,c.phone,MAX(m.rowid) AS cursor,j.cursor AS known_cursor,j.state AS known_state
+      FROM conversations c JOIN messages m ON m.conversation_id=c.id
+      LEFT JOIN context_reconciliation_jobs j ON j.conversation_id=c.id
+      GROUP BY c.id ORDER BY MAX(m.rowid) DESC LIMIT ?`,limit);
+    let excluded=0,unchanged=0;const eligible=[];
+    for(const row of candidates){
+      const kind=context.view(row.id).kind;
+      if(isDirectionContact(row.phone)||kind==='comercial'){excluded++;continue;}
+      if(row.known_cursor===row.cursor && ['done','pending','running','retry','needs_review','excluded'].includes(row.known_state)){unchanged++;continue;}
+      eligible.push(row);
+    }
+    if(confirmed){
+      for(const row of eligible)run(`INSERT INTO context_reconciliation_jobs
+        (conversation_id,cursor,state,next_attempt,attempts,error,updated)
+        VALUES(?,?,'pending',0,0,NULL,?)
+        ON CONFLICT(conversation_id) DO UPDATE SET
+          cursor=excluded.cursor,state='pending',next_attempt=0,attempts=0,error=NULL,updated=excluded.updated`,
+          row.id,row.cursor,Date.now());
+    }
+    return {confirmed,scanned:candidates.length,eligible:eligible.length,excluded,unchanged,
+      enqueued:confirmed?eligible.length:0,limit,morePossible:candidates.length===limit};
+  }
   let running=null,stopped=false;
   async function process(){
     if(running||stopped||!enabled())return running||Promise.resolve();
@@ -99,5 +134,5 @@ export function createConversationReconciliation(db, config, transport, context,
     })().finally(()=>{running=null;});
     return running;
   }
-  return {process,pendingForContact:id=>enabled()&&['pending','running','retry','needs_review'].includes(get('SELECT state FROM context_reconciliation_jobs WHERE conversation_id=?',id)?.state),status:()=>({enabled:enabled(),pending:get("SELECT COUNT(*) AS n FROM context_reconciliation_jobs WHERE state IN ('pending','retry','running')").n,needsReview:get("SELECT COUNT(*) AS n FROM context_reconciliation_jobs WHERE state='needs_review'").n,budgetUsd:budget||0,usedUsd:used()}),close:async()=>{stopped=true;if(running)await running;}};
+  return {process,backfill,pendingForContact:id=>enabled()&&['pending','running','retry','needs_review'].includes(get('SELECT state FROM context_reconciliation_jobs WHERE conversation_id=?',id)?.state),status:()=>({enabled:enabled(),pending:get("SELECT COUNT(*) AS n FROM context_reconciliation_jobs WHERE state IN ('pending','retry','running')").n,needsReview:get("SELECT COUNT(*) AS n FROM context_reconciliation_jobs WHERE state='needs_review'").n,budgetUsd:budget||0,usedUsd:used()}),close:async()=>{stopped=true;if(running)await running;}};
 }
