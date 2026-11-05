@@ -95,5 +95,5 @@ export function createConversationReconciliation(db, config, transport, context,
     })().finally(()=>{running=null;});
     return running;
   }
-  return {process,status:()=>({enabled:enabled(),pending:get("SELECT COUNT(*) AS n FROM context_reconciliation_jobs WHERE state IN ('pending','retry')").n,needsReview:get("SELECT COUNT(*) AS n FROM context_reconciliation_jobs WHERE state='needs_review'").n,budgetUsd:budget||0,usedUsd:used()}),close:async()=>{stopped=true;if(running)await running;}};
+  return {process,pendingForContact:id=>enabled()&&['pending','running','retry','needs_review'].includes(get('SELECT state FROM context_reconciliation_jobs WHERE conversation_id=?',id)?.state),status:()=>({enabled:enabled(),pending:get("SELECT COUNT(*) AS n FROM context_reconciliation_jobs WHERE state IN ('pending','retry','running')").n,needsReview:get("SELECT COUNT(*) AS n FROM context_reconciliation_jobs WHERE state='needs_review'").n,budgetUsd:budget||0,usedUsd:used()}),close:async()=>{stopped=true;if(running)await running;}};
 }
