@@ -39,6 +39,7 @@ As variáveis têm efeito apenas onde forem configuradas. **O padrão é `false`
 8. Conversa previamente assistida e atribuída a um responsável pode retomar se a atribuição permanecer igual; se o responsável for alterado durante a pausa, a retomada é bloqueada.
 9. A interface mostra o modo atual do servidor, priorizando-o sobre cache antigo da tela, e comunica explicitamente quando a IA está pausada.
 10. Com flag desligada, permanece o comportamento anterior: pausa até liberação explícita.
+11. Desligar a flag ou configurar intervalo inválido também bloqueia prazos persistidos por uma execução anterior. Um prazo já gravado não pode contornar a configuração atual após reinício.
 
 ## Homologação antes de qualquer deploy
 

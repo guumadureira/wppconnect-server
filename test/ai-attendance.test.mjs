@@ -622,3 +622,19 @@ test('responsável previamente atribuído não impede retomada de conversa que e
   assert.equal(f.app.customerContext.view(c.id).mode,'assisted');
   assert.equal(f.app.db.prepare('SELECT resume_after FROM ai_control WHERE conversation_id=?').get(c.id).resume_after,null);
 });
+
+test('desligar retomada ou invalidar o intervalo bloqueia prazos persistidos de execução anterior',async t=>{
+  for(const config of [
+    {AI_BUSINESS_ECHO_AUTO_RESUME_ENABLED:'false'},
+    {AI_BUSINESS_ECHO_AUTO_RESUME_ENABLED:'true',AI_BUSINESS_ECHO_RESUME_MINUTES:'0'}
+  ]){
+    const f=fixture(t,config),c=f.incoming('Primeiro contato');
+    f.app.ai.pause(c.id);
+    // Emulate the persisted cooldown from a previous enabled process.
+    f.app.db.prepare('UPDATE ai_control SET resume_after=?,resume_owner_id=NULL WHERE conversation_id=?').run(Date.now()-2000,c.id);
+    f.incoming('Nova mensagem após o prazo persistido');await f.app.ai.process();
+    assert.equal(f.app.customerContext.view(c.id).mode,'human');
+    assert.equal(f.calls.filter(x=>x.url.includes('openai.com')).length,0);
+    assert.equal(f.app.db.prepare("SELECT COUNT(*) AS n FROM ai_jobs WHERE state='pending'").get().n,0);
+  }
+});

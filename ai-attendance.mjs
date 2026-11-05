@@ -87,7 +87,7 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
       if(humanRequest(message.body)){pause(conversation.id,'Contato solicitou atendimento humano.');return;}
       // A clock expiry alone never sends a message: only a NEW client message can resume.
       // A delayed webhook older than the deadline cannot reactivate old work.
-      const eligible=c.mode==='human'&&conversation.status==='open'
+      const eligible=autoResumeEnabled&&autoResumeMs>0&&c.mode==='human'&&conversation.status==='open'
         &&(conversation.owner_id??null)===(previous.resume_owner_id??null)
         &&!previous.handoff&&Date.now()>=previous.resume_after
         &&Number(message.created)>previous.resume_after;
