@@ -226,6 +226,9 @@ export function createNotionContext(db,config,transport,options={}){
         const guard=()=>!stopped&&get('SELECT last_received FROM conversations WHERE id=?',c.id)?.last_received===job.last_received;
         if(!guard()){run("UPDATE context_lookup_jobs SET state='cancelled' WHERE conversation_id=? AND last_received=?",c.id,job.last_received);continue;}
         try{
+          // Wait for the dedicated reconciliation classifier before automatically creating a client.
+          // An unclassified commercial contact must never become a customer merely from a phone number.
+          if(automaticContacts()&&options.isReconciliationPending?.(c.id))continue;
           // Let an active AI turn classify a commercial offer before creating a client page.
           if(automaticContacts()&&options.aiEnabled?.()&&get("SELECT id FROM ai_jobs WHERE conversation_id=? AND state IN ('pending','running')",c.id))continue;
           if(automaticContacts()&&context(c.id).kind==='comercial'){
