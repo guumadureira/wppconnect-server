@@ -13,7 +13,7 @@ test('ChatGPT OAuth reads authorized conversation but never bypasses legacy MCP 
     CENTRAL_MCP_ALLOWED_PHONES:phone,CHATGPT_OAUTH_ENABLED:'true',CHATGPT_OAUTH_ADMIN_EMAIL:'admin@example.invalid'};
   const app=createCentral(config,async url=>{
     calls.push(String(url));
-    if(url===client)return Response.json({client_id:client,redirect_uris:[redirect],
+    if(url===client)return Response.json({client_id:client,client_name:'ChatGPT oficial',redirect_uris:[redirect],
       grant_types:['authorization_code'],token_endpoint_auth_methods_supported:['none']});
     throw Error('Network call not allowed by test');
   });
