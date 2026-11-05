@@ -15,6 +15,7 @@ import {createSupplierRegister} from './supplier-register.mjs';
 import {createHistoryImport} from './history-import.mjs';
 import {createOperatorChat} from './operator-chat.mjs';
 import {createOperatorContext} from './operator-context.mjs';
+import {createOperatorAI} from './operator-ai.mjs';
 import {samePhone,normalizeContactPhone} from './contact-phone.mjs';
 import {createDirectionContactGuard} from './direction-contact.mjs';
 import {createCoexistenceDiagnostics} from './coexistence-diagnostics.mjs';
@@ -78,7 +79,8 @@ export function createCentral(config = process.env, transport = fetch, options =
   manualHistory=createHistoryImport(db,customerContext,ai);
   const centralMCP=createCentralMCP(db,config,transport,{context:customerContext,ai,media,ready:!!ready});
   const operatorContext=createOperatorContext(db,customerContext);
-  const operatorChat=createOperatorChat(db,config,transport,{conversationContext:operatorContext});
+  const centralAssistant=createOperatorAI(db,config,transport,{usage:()=>ai.status(),validContext:ctx=>!!get('SELECT id FROM conversations WHERE id=?',ctx.conversation.id)&&customerContext.view(ctx.conversation.id).client_id===(ctx.client?.id||null)});
+  const operatorChat=createOperatorChat(db,config,transport,{conversationContext:operatorContext,centralAssistant});
   const quality=createAIQuality(db);
   // Only operational counts and timestamps; no payload, phone or credentials.
   // These observations start again with each server process.
@@ -269,7 +271,7 @@ export function createCentral(config = process.env, transport = fetch, options =
       if (!url.pathname.startsWith('/api/') && !signupPage && !directionPage && !resumptionPage) fail(404,'Página não encontrada.');
       if (!['GET','HEAD'].includes(req.method) && req.headers.origin !== origin) fail(403,'Origem não autorizada.');
       let body = {};
-      if (['POST','PATCH'].includes(req.method) && !(url.pathname==='/api/media'&&req.method==='POST')) {const raw=await readBody();try{body=JSON.parse(raw.toString() || '{}');}catch{fail(400,'Dados inválidos.');}if(!body||typeof body!=='object'||Array.isArray(body))fail(400,'Dados inválidos.');}
+      if (['POST','PATCH','DELETE'].includes(req.method) && !(url.pathname==='/api/media'&&req.method==='POST')) {const raw=await readBody();try{body=JSON.parse(raw.toString() || '{}');}catch{fail(400,'Dados inválidos.');}if(!body||typeof body!=='object'||Array.isArray(body))fail(400,'Dados inválidos.');}
       const token = (req.headers.cookie || '').split(';').map(v=>v.trim()).find(v=>v.startsWith('central_session='))?.slice(16);
       const user = token ? get('SELECT a.id,a.name,a.email,a.role,COALESCE(s.signature_name,a.name) AS signatureName FROM sessions s JOIN agents a ON a.id=s.agent_id WHERE s.token=? AND s.expires>? AND a.active=1',hash(token),now()) : null;
       const setupRequired = !get('SELECT id FROM agents LIMIT 1');
@@ -363,6 +365,7 @@ export function createCentral(config = process.env, transport = fetch, options =
       }
       const operatorMatch=url.pathname.match(/^\/api\/operator-chat\/([a-f0-9-]+)(?:\/(refresh|action))?$/i);
       if(operatorMatch){
+        if(req.method==='DELETE'&&!operatorMatch[2])return reply(200,operatorChat.remove(user,operatorMatch[1],body.confirmed));
         if(req.method==='GET'&&!operatorMatch[2])return reply(200,operatorChat.view(user,operatorMatch[1]));
         if(req.method==='POST'&&operatorMatch[2]==='refresh')return reply(200,await operatorChat.refresh(user,operatorMatch[1]));
         if(req.method==='POST'&&operatorMatch[2]==='action')return reply(200,await operatorChat.action(user,{...body,chatId:operatorMatch[1]}));
