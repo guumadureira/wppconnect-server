@@ -10,17 +10,22 @@ export function createConversationReconciliation(db, config, transport, context,
   const run=(sql,...args)=>db.prepare(sql).run(...args);
   db.exec(`CREATE TABLE IF NOT EXISTS context_reconciliation_jobs (
     conversation_id TEXT PRIMARY KEY REFERENCES conversations(id), cursor INTEGER NOT NULL,
+    generation INTEGER NOT NULL DEFAULT 0,
     state TEXT NOT NULL DEFAULT 'pending', next_attempt INTEGER NOT NULL DEFAULT 0,
     attempts INTEGER NOT NULL DEFAULT 0, error TEXT, updated INTEGER NOT NULL
   );
   CREATE TABLE IF NOT EXISTS context_reconciliation_usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT, month TEXT NOT NULL, cost_usd REAL NOT NULL, created INTEGER NOT NULL
   );
-  CREATE TRIGGER IF NOT EXISTS context_reconciliation_message_insert AFTER INSERT ON messages BEGIN
+  `);
+  // In-place migration for a database first opened with an earlier homologation build.
+  if(!db.prepare('PRAGMA table_info(context_reconciliation_jobs)').all().some(column=>column.name==='generation'))
+    db.exec('ALTER TABLE context_reconciliation_jobs ADD COLUMN generation INTEGER NOT NULL DEFAULT 0');
+  db.exec(`CREATE TRIGGER IF NOT EXISTS context_reconciliation_message_insert AFTER INSERT ON messages BEGIN
     INSERT INTO context_reconciliation_jobs(conversation_id,cursor,state,next_attempt,attempts,error,updated)
     VALUES(NEW.conversation_id,NEW.rowid,'pending',0,0,NULL,NEW.created)
     ON CONFLICT(conversation_id) DO UPDATE SET cursor=MAX(cursor,excluded.cursor),
-      state='pending',next_attempt=0,error=NULL,updated=MAX(updated,excluded.updated);
+      state='pending',generation=generation+1,next_attempt=0,error=NULL,updated=MAX(updated,excluded.updated);
   END;
   CREATE TRIGGER IF NOT EXISTS context_reconciliation_status_confirmed AFTER UPDATE OF status ON messages
   WHEN NEW.direction='out' AND OLD.status IN ('sending','unknown')
@@ -29,7 +34,7 @@ export function createConversationReconciliation(db, config, transport, context,
     INSERT INTO context_reconciliation_jobs(conversation_id,cursor,state,next_attempt,attempts,error,updated)
     VALUES(NEW.conversation_id,NEW.rowid,'pending',0,0,NULL,NEW.created)
     ON CONFLICT(conversation_id) DO UPDATE SET cursor=MAX(cursor,excluded.cursor),
-      state='pending',next_attempt=0,error=NULL,updated=MAX(updated,excluded.updated);
+      state='pending',generation=generation+1,next_attempt=0,error=NULL,updated=MAX(updated,excluded.updated);
   END;`);
   // An interrupted call has an unknown cost. Keep it pending without automatic replay.
   run("UPDATE context_reconciliation_jobs SET state='needs_review',error='Interrupção durante análise; revisão necessária.' WHERE state='running'");
@@ -57,7 +62,7 @@ export function createConversationReconciliation(db, config, transport, context,
         (conversation_id,cursor,state,next_attempt,attempts,error,updated)
         VALUES(?,?,'pending',0,0,NULL,?)
         ON CONFLICT(conversation_id) DO UPDATE SET
-          cursor=excluded.cursor,state='pending',next_attempt=0,attempts=0,error=NULL,updated=excluded.updated`,
+          cursor=excluded.cursor,state='pending',generation=generation+1,next_attempt=0,attempts=0,error=NULL,updated=excluded.updated`,
           row.id,row.cursor,Date.now());
     }
     return {confirmed,scanned:candidates.length,eligible:eligible.length,excluded,unchanged,
@@ -124,8 +129,9 @@ export function createConversationReconciliation(db, config, transport, context,
             run("UPDATE context_reconciliation_jobs SET state='needs_review',error=? WHERE conversation_id=? AND cursor=?", 'Contato vinculado classificado como oferta comercial; verificar antes de modificar o contexto.',job.conversation_id,job.cursor);
             continue;
           }
-          const latest=get('SELECT cursor FROM context_reconciliation_jobs WHERE conversation_id=?',job.conversation_id);
-          if(latest?.cursor!==job.cursor){continue;} // New messages win; never overwrite fresher context.
+          const latest=get('SELECT cursor,generation FROM context_reconciliation_jobs WHERE conversation_id=?',job.conversation_id);
+          // New messages OR a status-confirmation for the same message must invalidate old work.
+          if(latest?.cursor!==job.cursor||latest.generation!==job.generation){continue;}
           const applied=context.applyReconciliation(job.conversation_id,{...parsed,version:view.version,cursor:job.cursor});
           if(applied)run("UPDATE context_reconciliation_jobs SET state='done',error=NULL WHERE conversation_id=? AND cursor=?",job.conversation_id,job.cursor);
           else run("UPDATE context_reconciliation_jobs SET state='pending',next_attempt=? WHERE conversation_id=? AND cursor=?",Date.now()+30000,job.conversation_id,job.cursor);
