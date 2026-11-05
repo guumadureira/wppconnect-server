@@ -17,7 +17,8 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
   const enabled=String(config.CHATGPT_OAUTH_ENABLED)==='true'&&
     /^https:\/\/[^/?#]+$/.test(origin)&&
     String(config.CHATGPT_OAUTH_ADMIN_EMAIL||'').includes('@')&&
-    String(config.CENTRAL_MCP_ALLOWED_PHONES||'').trim().length>0;
+    String(config.CENTRAL_MCP_ALLOWED_PHONES||'').trim().length>0&&
+    String(config.CHATGPT_OAUTH_ALLOWED_PHONES||'').trim().length>0;
   const get=(sql,...params)=>db.prepare(sql).get(...params);
   const run=(sql,...params)=>db.prepare(sql).run(...params);
   const attempts=new Map();
