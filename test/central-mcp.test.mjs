@@ -471,3 +471,19 @@ test('MCP pagina histórico sem ampliar escopo, alterar mensagens ou enviar What
   assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM messages').get().n,before);
   assert.equal(f.calls.length,0);
 });
+
+test('modo MCP somente leitura não anuncia nem executa operações de escrita',async t=>{
+  const f=await fixture(t,{CENTRAL_MCP_READ_ONLY:'true',CENTRAL_MCP_SEND_ENABLED:'true'});
+  f.incoming('Mensagem de teste');
+  const list=await(await f.post({jsonrpc:'2.0',id:8,method:'tools/list'})).json();
+  const names=list.result.tools.map(tool=>tool.name);
+  for(const allowed of ['listar_conversas_autorizadas','consultar_conversa','consultar_historico','listar_arquivos_recebidos'])
+    assert.ok(names.includes(allowed));
+  for(const blocked of ['preparar_envio','confirmar_envio','atualizar_contexto_notion','preparar_documento_notion','preparar_pagina_notion_pdf'])
+    assert.ok(!names.includes(blocked));
+  assert.equal((await f.tool('preparar_envio',{telefone:phone,texto:'Não envia',requestId:randomUUID()})).isError,true);
+  assert.equal((await f.tool('atualizar_contexto_notion',{telefone:phone})).isError,true);
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM integration_drafts').get().n,0);
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM integration_audit').get().n,0);
+  assert.equal(f.calls.length,0);
+});
