@@ -134,3 +134,37 @@ Os conectores disponíveis nesta conversa permitem consultar Render, GitHub e lo
 - [ ] Conexão privada no ChatGPT web e teste de consulta sem envio de mensagens.
 
 Não tratar a suíte automatizada como certificação de segurança ou como comprovação de recuperação do banco real.
+
+
+## Pré-verificação privada antes de ativar — 05/11/2026
+
+Esta PR inclui `scripts/verificar-integracao-chatgpt.mjs`, uma rotina de **somente leitura** que verifica se o ambiente está pronto para ativação controlada de OAuth sem imprimir e-mail, telefone, token, senha, conteúdo de mensagens nem caminho do banco. Não acessa a rede e abre o SQLite existente em modo `readOnly`.
+
+Depois de um **deploy autorizado com `CHATGPT_OAUTH_ENABLED=false`**, executar no Shell do Render:
+
+```sh
+cd ~/project/src
+node scripts/verificar-integracao-chatgpt.mjs --database /var/data/central.sqlite
+```
+
+Campos do JSON:
+- `checks.httpsOrigin` — origem HTTPS está configurada;
+- `checks.administratorConfigured` e `checks.activeAdministratorFound` — e-mail configurado corresponde a um administrador ativo do banco;
+- `checks.explicitChatGPTScope` e `checks.scopeContainedInLegacy` — o escopo do ChatGPT é válido e subconjunto do escopo da Central;
+- `checks.oauthFeatureEnabled` — flag de ativação;
+- `readyToEnable` — pré-requisitos preenchidos, **não significa que o OAuth já foi ativado**;
+- `readyForPrivateOAuthTest` — pré-requisitos preenchidos e flag ativada, **não garante que o login com ChatGPT tenha sido testado**.
+
+Esse diagnóstico não cria tabelas nem modifica permissões. Quando o OAuth for habilitado, o código do serviço inicializa **quatro tabelas próprias para tokens e autorizações** no SQLite; obter autorização específica do responsável **antes de alterar o esquema em produção**. Não habilitar por antecipação.
+
+### Etapas propostas de publicação, sujeitas a autorização separada
+
+**Fase A — publicação de código desativado:** mesclar a PR após revisão, confirmar backup e cópia externa aprovada, publicar o código no Render com `CHATGPT_OAUTH_ENABLED=false`. Com a flag desativada, a nova autenticação não responde aos endpoints públicos nem cria as tabelas OAuth. Executar teste de regressão operacional (`/healthz`, login da Central, atendimento atual, Notion, logs), sem consultar ou enviar mensagens reais de teste.
+
+**Fase B — piloto privado restrito:** depois de autorização expressa para criar as quatro tabelas e configurar as variáveis privadas, liberar **um telefone interno** que esteja simultaneamente em `CENTRAL_MCP_ALLOWED_PHONES` e `CHATGPT_OAUTH_ALLOWED_PHONES`, além do e-mail exato de administrador ativo. Executar o script acima, testar 401 sem token, validar OAuth no ChatGPT web e conferir somente consultas. Não publicar o conector para todo o workspace.
+
+**Fase C — aumento controlado:** somente após consentimento operacional, revisão de riscos, restrição e validação do armazenamento externo dos backups, considerar mais contatos e automação de contexto com Notion. Não habilitar envios pelo conector na primeira fase.
+
+Teste automatizado da verificação de pré-ativação: **283 testes, 283 aprovados, 0 falhas** em cada um dos workflows [Central MCP tests #11](https://github.com/guumadureira/wppconnect-server/actions/runs/42048719026) e [Central de atendimento #246](https://github.com/guumadureira/wppconnect-server/actions/runs/42048719147), código em `8c4126968acd3e32c205b0ae3d46f1a442010d71`. Os testes são com bancos e credenciais fictícios, sem alteração de produção.
+
+A pasta `Backups Restritos` foi criada no SharePoint, mas sua herança de acesso continua abrangendo membros e visitantes. O usuário optou por deixar a restrição para depois: **não enviar SQLite para o SharePoint até concluir as permissões**. A cópia íntegra no Windows, com SHA-256 conferido, está disponível fora do Render; é diferente de um backup corporativo durável com acesso restrito.
