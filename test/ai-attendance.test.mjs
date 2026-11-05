@@ -513,6 +513,8 @@ test('retomada não ignora designação humana ou pausa manual; configuração d
   }]},'smb_message_echoes');
   echo('business-owned-1');
   f.app.db.prepare('UPDATE ai_control SET resume_after=? WHERE conversation_id=?').run(Date.now()-2000,c.id);
+  f.app.db.prepare("INSERT INTO agents(id,name,email,password,role,active) VALUES(?,?,?,?,?,1)")
+    .run('human-owner','Operador de teste','operador@example.invalid','senha-ficticia','agent');
   f.app.db.prepare('UPDATE conversations SET owner_id=? WHERE id=?').run('human-owner',c.id);
   f.incoming('Resposta depois da janela');await f.app.ai.process();
   assert.equal(f.app.customerContext.view(c.id).mode,'human');
