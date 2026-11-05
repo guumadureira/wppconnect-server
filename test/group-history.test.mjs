@@ -10,7 +10,7 @@ test('exportacao em grupo preserva todos os autores, mensagens e horario',()=>{
  assert.equal(parsed.messages.length,3);
  assert.deepEqual(parsed.authors,['Ana','Gustavo','Jonatan']);
  assert.equal(parsed.messages[0].created,Date.UTC(2026,10,5,15));
- assert.throws(()=>parseGroupExport('05/11/2026 12:00 - A: teste','mdy',now),/Datas invalidas/);
+ assert.throws(()=>parseGroupExport('13/11/2026 12:00 - A: teste','mdy',now),/Datas invalidas/);
  assert.throws(()=>parseGroupExport('05/11/2026 12:00 - A: teste'+String.fromCharCode(0),'dmy',now),/invalido/);
 });
 test('grupos nao geram conversas, IA ou eventos de clientes no Notion e evitam duplicidade',async t=>{
@@ -31,8 +31,8 @@ test('grupos nao geram conversas, IA ou eventos de clientes no Notion e evitam d
  assert.equal(app.groupHistory.confirm(group.id,{...p,confirmed:true},actor).repeated,true);
 });
 test('rotas de grupos exigem login e restringem edicoes aos admins',async t=>{
- const app=createCentral({DATABASE_PATH:':memory:'});await new Promise(r=>app.server.listen(0,'127.0.0.1',r));t.after(()=>app.close());
- const base='http://127.0.0.1:'+app.server.address().port;
+ const config={DATABASE_PATH:':memory:'};const app=createCentral(config);await new Promise(r=>app.server.listen(0,'127.0.0.1',r));t.after(()=>app.close());
+ const base='http://127.0.0.1:'+app.server.address().port;config.PUBLIC_ORIGIN=base;
  const post=(path,data,cookie)=>fetch(base+path,{method:'POST',headers:{origin:base,'content-type':'application/json',...(cookie?{cookie}:{})},body:JSON.stringify(data)});
  const admin={name:'Admin',email:'group@example.invalid',password:'teste'};
  await post('/api/setup',admin);
