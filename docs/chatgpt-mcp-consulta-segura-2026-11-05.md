@@ -62,3 +62,9 @@ Referências:
 
 Não existe aqui comprovação de que OAuth esteja configurado, de que a integração foi cadastrada no ChatGPT nem de que seja possível ler o banco de produção a partir deste chat. A revisão do código não é homologação de execução; até o teste efetivo, o acesso permanece indireto via GitHub/Render/Notion.
 
+
+## Revisão adicional de segurança — 05/11/2026
+
+Foram corrigidos dois pontos concretos do módulo OAuth: (1) validação explícita de `client_name` e de `token_endpoint_auth_method=none`, impedindo que metadados CIMD inconsistentes passem por uma condição ambígua; (2) limitação de tentativas de senha pela origem da conexão, mesmo quando a pessoa alterna e-mails. Os testes locais isolados (Node 22, SQLite experimental) passaram de seis para **oito casos aprovados**. A suíte completa e o teste de integração continuam **sem execução confirmada no CI com Node 24**.
+
+O repositório GitHub está **público**. Nenhum segredo ou informação de cliente deve ser versionado. A implementação OAuth é uma versão preparatória e exige auditoria de segurança, verificação de compatibilidade real do cliente ChatGPT, proteção contra abuso distribuído, homologação com credenciais fictícias e backup verificável antes de publicação. Ativar login administrativo em endpoint público apenas após revisão humana, pois credenciais de contas internas não devem ser expostas desnecessariamente.
