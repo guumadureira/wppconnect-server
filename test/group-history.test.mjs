@@ -11,7 +11,7 @@ test('exportacao em grupo preserva todos os autores, mensagens e horario',()=>{
  assert.deepEqual(parsed.authors,['Ana','Gustavo','Jonatan']);
  assert.equal(parsed.messages[0].created,Date.UTC(2026,10,5,15));
  assert.throws(()=>parseGroupExport('05/11/2026 12:00 - A: teste','mdy',now),/Datas invalidas/);
- assert.throws(()=>parseGroupExport('05/11/2026 12:00 - A: teste\\0','dmy',now),/invalido/);
+ assert.throws(()=>parseGroupExport('05/11/2026 12:00 - A: teste'+String.fromCharCode(0),'dmy',now),/invalido/);
 });
 test('grupos nao geram conversas, IA ou eventos de clientes no Notion e evitam duplicidade',async t=>{
  const app=createCentral({DATABASE_PATH:':memory:'},()=>{assert.fail('Nunca deve chamar servicos externos');});
