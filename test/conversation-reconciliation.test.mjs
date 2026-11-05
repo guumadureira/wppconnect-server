@@ -173,3 +173,17 @@ test('a prévia histórica exclui contatos comerciais sem criar novo cliente',as
   assert.equal(preview.excluded,1);
   assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM context_reconciliation_jobs').get().n,0);
 });
+
+test('nova mensagem é conciliada apesar de envio antigo desconhecido',async t=>{
+  const f=fixture(t);
+  f.insert('out','Mensagem cujo envio não está confirmado','unknown','Equipe');
+  f.insert('in','Quero acrescentar informação sobre meu projeto');
+  await f.worker.process();
+  assert.equal(f.applied.length,1);
+  assert.equal(f.requests.length,1);
+  const input=JSON.parse(f.requests[0].input[0].content);
+  assert.equal(input.unconfirmedOutboundCount,1);
+  assert.equal(input.messages.length,1);
+  assert.equal(input.messages[0].direction,'in');
+  assert.equal(JSON.stringify(input.messages).includes('cujo envio não está confirmado'),false);
+});
