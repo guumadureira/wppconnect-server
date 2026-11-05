@@ -100,9 +100,15 @@ test('nega callback, resource, scope, origem e autenticação incorretos',async 
   assert.equal((await f.login(ticket,'correct')).status,400);
 });
 
-test('CIMD alterado e integração desativada não concedem acesso',async t=>{
-  const invalid=await fixture(t,{},async()=>Response.json({client_id:'https://evil.example/client.json',redirect_uris:[redirect]}));
+test('CIMD com identidade adulterada é rejeitado mesmo com campos válidos',async t=>{
+  const invalid=await fixture(t,{},async()=>Response.json({
+    client_id:'https://evil.example/client.json',client_name:'ChatGPT',
+    redirect_uris:[redirect],token_endpoint_auth_method:'none'
+  }));
   assert.equal((await invalid.start()).status,400);
+});
+
+test('integração OAuth desativada não publica endpoints',async t=>{
   const off=await fixture(t,{CHATGPT_OAUTH_ENABLED:'false'});
   assert.equal(off.auth.enabled,false);
   assert.equal((await off.fetchPath('/oauth/authorize')).status,404);
