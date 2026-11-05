@@ -122,3 +122,23 @@ test('limita tentativas de senha mesmo alternando e-mails',async t=>{
   }
   assert.equal((await f.login(ticket,'correct')).status,429);
 });
+
+test('aceita CIMD oficial com preferência private_key_jwt quando none também está suportado',async t=>{
+  const f=await fixture(t,{},async url=>Response.json({
+    client_id:url,client_name:'ChatGPT',redirect_uris:[redirect],
+    token_endpoint_auth_method:'private_key_jwt',
+    token_endpoint_auth_methods_supported:['none','private_key_jwt'],
+    grant_types:['authorization_code','refresh_token']
+  }));
+  const response=await f.start();assert.equal(response.status,200);
+  assert.match(await response.text(),/Conectar ChatGPT/);
+});
+
+test('rejeita CIMD cuja lista não inclui none apesar de preferência antiga',async t=>{
+  const f=await fixture(t,{},async url=>Response.json({
+    client_id:url,client_name:'ChatGPT',redirect_uris:[redirect],
+    token_endpoint_auth_method:'none',
+    token_endpoint_auth_methods_supported:['private_key_jwt']
+  }));
+  assert.equal((await f.start()).status,400);
+});
