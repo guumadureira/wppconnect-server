@@ -19,11 +19,11 @@ As variáveis têm efeito apenas onde forem configuradas. **O padrão é `false`
 
 ## Limites de segurança
 
-- Handoffs manuais, atendimentos atribuídos a um humano, pedidos expressos de atendimento humano, bloqueios internos, contatos da direção e conversas encerradas não podem ser reativados pelo temporizador.
+- Handoffs manuais, pedidos expressos de atendimento humano, mudanças de responsável durante a pausa, bloqueios internos, contatos da direção e conversas encerradas não podem ser reativados pelo temporizador. Um responsável já atribuído **antes da pausa**, quando a conversa estava em modo assistido, não é por si só um handoff e pode continuar no fluxo. O identificador do responsável original é preservado para detectar mudanças.
 - O recurso depende de `AI_ENABLED`, números autorizados, orçamento, elegibilidade do atendimento e janela de 24 horas da Meta; não contorna esses requisitos.
 - Quando a IA está pausada, a chegada de pedido explícito por humano torna a pausa permanente até liberação manual, inclusive se o tempo ainda não venceu.
 - Repostas enviadas pela Central por um atendente permanecem em modo humano e exigem liberação explícita (fora do escopo deste piloto, que trata ecos do Business).
-- O prazo e o estado permanecem no SQLite e sobrevivem a reinício. A coluna nova `ai_control.resume_after` é nullable, adicionada na inicialização sem sobrescrever estados anteriores; valores nulos não autorizam retomada.
+- O prazo e o responsável vigente no momento da pausa ficam em `ai_control.resume_after` e `ai_control.resume_owner_id`, colunas nullable adicionadas na inicialização sem sobrescrever estados anteriores. O prazo usa a data real da mensagem humana, não o instante de entrega do webhook. Estados nulos não autorizam retomada.
 - Não utilizar timers de processo para envio. As verificações acontecem somente no recebimento de nova mensagem do cliente, com validação de época e versão para invalidar execuções antigas.
 - Sem alterações de assinatura de webhook na Meta; `smb_message_echoes` foi confirmado em teste anterior. Não mover nem duplicar registros no Notion automaticamente por conta deste recurso.
 
@@ -36,7 +36,9 @@ As variáveis têm efeito apenas onde forem configuradas. **O padrão é `false`
 5. Pedido por humano, atendimento designado e pausa manual não são revertidos pelo prazo, mesmo se chegar novo eco.
 6. Webhook atrasado com data da mensagem anterior ao prazo não provoca retomada indevida.
 7. Após reiniciar o processo, prazo e bloqueio continuam persistidos; testes usam banco isolado e transporte falso.
-8. Com flag desligada, permanece o comportamento anterior: pausa até liberação explícita.
+8. Conversa previamente assistida e atribuída a um responsável pode retomar se a atribuição permanecer igual; se o responsável for alterado durante a pausa, a retomada é bloqueada.
+9. A interface mostra o modo atual do servidor, priorizando-o sobre cache antigo da tela, e comunica explicitamente quando a IA está pausada.
+10. Com flag desligada, permanece o comportamento anterior: pausa até liberação explícita.
 
 ## Homologação antes de qualquer deploy
 
