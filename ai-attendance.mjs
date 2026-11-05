@@ -32,6 +32,8 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
   // in place; no preexisting handoff or manually paused conversation is opted in.
   if(!db.prepare('PRAGMA table_info(ai_control)').all().some(column=>column.name==='resume_after'))
     db.exec('ALTER TABLE ai_control ADD COLUMN resume_after INTEGER');
+  if(!db.prepare('PRAGMA table_info(ai_control)').all().some(column=>column.name==='resume_owner_id'))
+    db.exec('ALTER TABLE ai_control ADD COLUMN resume_owner_id TEXT');
   const autoResumeEnabled=String(config.AI_BUSINESS_ECHO_AUTO_RESUME_ENABLED).trim()==='true';
   const configuredMinutes=Number(config.AI_BUSINESS_ECHO_RESUME_MINUTES??60);
   const autoResumeMs=Number.isInteger(configuredMinutes)&&configuredMinutes>=1&&configuredMinutes<=1440
@@ -50,17 +52,22 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
   const spent=()=>get('SELECT COALESCE(SUM(cost_usd),0) AS n FROM ai_jobs WHERE billing_month=?',month()).n+transcriber.cost(month())+operatorAICost(db,month());
   const totalSpent=()=>get('SELECT COALESCE(SUM(cost_usd),0) AS n FROM ai_jobs').n+transcriber.cost()+operatorAICost(db);
   function status(){return{businessEchoAutoResume:{enabled:autoResumeEnabled&&autoResumeMs>0,minutes:autoResumeMs/60000},enabled:enabled(),model:MODEL,credentialPresent:!!String(config.OPENAI_API_KEY||'').trim(),activationPending:String(config.AI_ENABLED).trim()!=='true',pilotConfigured:phones.length>0,allContacts,scopeConfigured:allContacts||phones.length>0,budgetUsd:budget>0&&budget<=100?budget:0,usedUsd:spent(),totalBudgetUsd:totalBudget,usedTotalUsd:totalSpent(),audioEnabled:String(config.AI_AUDIO_ENABLED)==='true',autoRegistration:String(config.AI_AUTO_REGISTER)==='true',whatsappReady:ready,pending:get("SELECT COUNT(*) AS n FROM ai_jobs WHERE state IN ('pending','running')").n,handoffs:all("SELECT a.conversation_id,c.name,a.handoff FROM ai_control a JOIN conversations c ON c.id=a.conversation_id WHERE a.handoff<>'' ORDER BY c.updated DESC LIMIT 30")};}
-  function pause(id,reason='',{businessEcho=false}={}){
+  function pause(id,reason='',{businessEcho=false,at}={}){
     const previous=ensure(id);
-    // A new echo starts/renews a temporary pause ONLY if the AI was active or
-    // an echo-driven cooldown already existed. It may not weaken a manual handoff.
+    // The owner shown in the UI is not a human takeover: existing assisted
+    // conversations may already have an assigned responsible operator.
+    // A human action that actually takes control calls pause() without businessEcho.
     const mode=context.view(id).mode;
-    const owner=get('SELECT owner_id FROM conversations WHERE id=?',id)?.owner_id;
-    const timedEcho=businessEcho&&autoResumeEnabled&&autoResumeMs>0&&!owner
+    const owner=get('SELECT owner_id FROM conversations WHERE id=?',id)?.owner_id??null;
+    const timedEcho=businessEcho&&autoResumeEnabled&&autoResumeMs>0
       &&!previous.handoff&&(mode==='assisted'||(mode==='human'&&Number(previous.resume_after)>0));
-    const resumeAfter=timedEcho?Date.now()+autoResumeMs:null;
+    // Use the human message timestamp, not a delayed webhook delivery time.
+    // Out-of-order echoes cannot shorten a newer human intervention's cooldown.
+    const messageAt=Number(at);
+    const eventAt=Number.isFinite(messageAt)&&messageAt>0?Math.min(messageAt,Date.now()):Date.now();
+    const resumeAfter=timedEcho?Math.max(Number(previous.resume_after)||0,eventAt+autoResumeMs):null;
     const handoff=businessEcho?previous.handoff:reason;
-    run('UPDATE ai_control SET epoch=epoch+1,handoff=?,resume_after=? WHERE conversation_id=?',handoff,resumeAfter,id);
+    run('UPDATE ai_control SET epoch=epoch+1,handoff=?,resume_after=?,resume_owner_id=? WHERE conversation_id=?',handoff,resumeAfter,timedEcho?owner:null,id);
     run("UPDATE ai_jobs SET state='cancelled',updated=? WHERE conversation_id=? AND state='pending'",Date.now(),id);
     run("UPDATE conversation_context SET mode='human',version=version+1,updated=? WHERE conversation_id=? AND mode<>'human'",Date.now(),id);
   }
@@ -68,10 +75,10 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
     if(!enabled())fail(503,'Configure a chave, o piloto, o limite de consumo e a conexão WhatsApp antes de liberar a IA.');
     if(isDirectionContact(conversation.phone))fail(403,'Contatos internos da direção não podem ser liberados no atendimento automático de clientes.');
     if(!allowed(conversation.phone))fail(403,'Este telefone não está autorizado no piloto da IA.');
-    ensure(conversation.id);run("UPDATE ai_control SET epoch=epoch+1,handoff='',resume_after=NULL WHERE conversation_id=?",conversation.id);
+    ensure(conversation.id);run("UPDATE ai_control SET epoch=epoch+1,handoff='',resume_after=NULL,resume_owner_id=NULL WHERE conversation_id=?",conversation.id);
   }
   function incoming(conversation,message,{fresh=false,echo=false,type='text'}={}){
-    if(echo){pause(conversation.id,'',{businessEcho:true});return;}
+    if(echo){pause(conversation.id,'',{businessEcho:true,at:message.created});return;}
     if(isDirectionContact(conversation.phone)){pause(conversation.id,'Contato interno da direção: atendimento automático a clientes desativado.');return;}
     if(!enabled()||!allowed(conversation.phone))return;
     const c=context.view(conversation.id),previous=ensure(conversation.id);
@@ -80,13 +87,14 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
       if(humanRequest(message.body)){pause(conversation.id,'Contato solicitou atendimento humano.');return;}
       // A clock expiry alone never sends a message: only a NEW client message can resume.
       // A delayed webhook older than the deadline cannot reactivate old work.
-      const eligible=c.mode==='human'&&conversation.status==='open'&&!conversation.owner_id
+      const eligible=c.mode==='human'&&conversation.status==='open'
+        &&(conversation.owner_id??null)===(previous.resume_owner_id??null)
         &&!previous.handoff&&Date.now()>=previous.resume_after
         &&Number(message.created)>previous.resume_after;
       if(!eligible)return;
       const changed=run("UPDATE conversation_context SET mode='assisted',version=version+1,updated=? WHERE conversation_id=? AND mode='human'",Date.now(),conversation.id);
       if(changed.changes!==1)return;
-      run('UPDATE ai_control SET epoch=epoch+1,resume_after=NULL WHERE conversation_id=? AND resume_after=?',conversation.id,previous.resume_after);
+      run('UPDATE ai_control SET epoch=epoch+1,resume_after=NULL,resume_owner_id=NULL WHERE conversation_id=? AND resume_after=?',conversation.id,previous.resume_after);
     }
     if(fresh&&!conversation.owner_id){run("UPDATE conversation_context SET mode='assisted',version=version+1 WHERE conversation_id=?",conversation.id);}
     else if(context.view(conversation.id).mode!=='assisted')return;
