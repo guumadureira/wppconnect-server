@@ -82,6 +82,10 @@ export function createConversationReconciliation(db, config, transport, context,
           const parsed=JSON.parse((data.output||[]).filter(x=>x.type==='message').flatMap(x=>x.content||[]).filter(x=>x.type==='output_text').map(x=>x.text).join(''));
           for(const key of ['summary','missing','nextStep','kind'])if(typeof parsed[key]!=='string'||parsed[key].length>(key==='summary'?1800:key==='kind'?30:1000))throw Error('Síntese inválida');
           if(!schema.properties.kind.enum.includes(parsed.kind))throw Error('Categoria inválida');
+          if(parsed.kind==='comercial'&&view.client_id){
+            run("UPDATE context_reconciliation_jobs SET state='needs_review',error=? WHERE conversation_id=? AND cursor=?", 'Contato vinculado classificado como oferta comercial; verificar antes de modificar o contexto.',job.conversation_id,job.cursor);
+            continue;
+          }
           const latest=get('SELECT cursor FROM context_reconciliation_jobs WHERE conversation_id=?',job.conversation_id);
           if(latest?.cursor!==job.cursor){continue;} // New messages win; never overwrite fresher context.
           const applied=context.applyReconciliation(job.conversation_id,{...parsed,version:view.version,cursor:job.cursor});
