@@ -27,7 +27,7 @@ test('MCP exige credencial própria, origem válida e não aceita cookie como au
   assert.equal((await f.post(rpc,{},'GET')).status,405);
   const init=await(await f.post(rpc)).json();assert.equal(init.result.protocolVersion,'2025-06-18');
   assert.equal((await f.post({jsonrpc:'2.0',method:'notifications/initialized'})).status,202);
-  const list=await(await f.post({jsonrpc:'2.0',id:2,method:'tools/list'})).json();assert.equal(list.result.tools.length,12);
+  const list=await(await f.post({jsonrpc:'2.0',id:2,method:'tools/list'})).json();assert.equal(list.result.tools.length,14);
   assert.deepEqual(init.result.capabilities.resources,{});
   assert.ok(list.result.tools.find(x=>x.name==='confirmar_envio').annotations.destructiveHint);
   assert.equal((await fetch(f.base+'/api/state',{headers:{authorization:'Bearer '+key}})).status,401);
@@ -425,4 +425,71 @@ test('operador autenticado prepara documento fora do piloto sem ampliar MCP e ou
   const result=await action('confirmar_envio',args,cookie);assert.equal(result.body.aceitoPelaMeta,true);
   await action('confirmar_envio',args,cookie);assert.equal(f.calls.filter(c=>c.url.endsWith('/messages')).length,1);
   assert.equal((await f.tool('consultar_conversa',{telefone:other})).isError,true);
+});
+
+
+test('MCP lista somente conversas permitidas, sem contatos de fora da lista',async t=>{
+  const second='5544000000002',outside='5544000000003';
+  const f=await fixture(t,{CENTRAL_MCP_ALLOWED_PHONES:phone+','+second});
+  const own=f.incoming('Conversa autorizada',phone);
+  f.incoming('Segunda conversa permitida',second);
+  f.incoming('Conteúdo privado não permitido',outside);
+  const data=(await f.tool('listar_conversas_autorizadas',{})).structuredContent;
+  assert.equal(data.total,2);
+  assert.deepEqual(new Set(data.conversas.map(c=>c.telefone)),new Set([phone,second]));
+  assert.equal(data.conversas.some(c=>c.conversaId===own.id),true);
+  assert.ok(!JSON.stringify(data).includes(outside));
+  assert.ok(!JSON.stringify(data).includes('Conteúdo privado não permitido'));
+  assert.equal(f.calls.length,0);
+});
+
+test('MCP pagina histórico sem ampliar escopo, alterar mensagens ou enviar WhatsApp',async t=>{
+  const f=await fixture(t),c=f.incoming('Mensagem 0');
+  for(let i=1;i<70;i++)f.incoming('Mensagem '+i);
+  const foreign=f.incoming('Mensagem secreta', '5544000000002');
+  const before=f.app.db.prepare('SELECT COUNT(*) AS n FROM messages').get().n;
+  const parts=[],texts=[];
+  let cursor;
+  do{
+    const args={telefone:phone,...(cursor?{antesDe:cursor}:{})};
+    const result=await f.tool('consultar_historico',args);
+    assert.equal(result.isError,undefined);
+    const data=result.structuredContent;
+    assert.equal(data.conversaId,c.id);
+    assert.ok(data.mensagens.length<=30);
+    for(const m of data.mensagens)texts.push(m.body);
+    parts.push(data.mensagens.length);
+    cursor=data.proximaPagina;
+  }while(cursor);
+  assert.deepEqual(parts,[30,30,10]);
+  assert.equal(texts.length,70);
+  assert.equal(new Set(texts).size,70);
+  assert.ok(!texts.includes('Mensagem secreta'));
+  const alien=f.app.db.prepare('SELECT id FROM messages WHERE conversation_id=?').get(foreign.id).id;
+  assert.equal((await f.tool('consultar_historico',{telefone:phone,antesDe:alien})).isError,true);
+  assert.equal((await f.tool('consultar_historico',{telefone:'5544000000002'})).isError,true);
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM messages').get().n,before);
+  assert.equal(f.calls.length,0);
+});
+
+test('modo MCP somente leitura não anuncia nem executa operações de escrita',async t=>{
+  const f=await fixture(t,{CENTRAL_MCP_READ_ONLY:'true',CENTRAL_MCP_SEND_ENABLED:'true'});
+  f.incoming('Mensagem de teste');
+  const list=await(await f.post({jsonrpc:'2.0',id:8,method:'tools/list'})).json();
+  const names=list.result.tools.map(tool=>tool.name);
+  for(const allowed of ['listar_conversas_autorizadas','consultar_conversa','consultar_historico','listar_arquivos_recebidos'])
+    assert.ok(names.includes(allowed));
+  for(const blocked of ['preparar_envio','confirmar_envio','atualizar_contexto_notion','preparar_documento_notion','preparar_pagina_notion_pdf'])
+    assert.ok(!names.includes(blocked));
+  assert.equal((await f.tool('preparar_envio',{telefone:phone,texto:'Não envia',requestId:randomUUID()})).isError,true);
+  assert.equal((await f.tool('atualizar_contexto_notion',{telefone:phone})).isError,true);
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM integration_drafts').get().n,0);
+  // Rejected calls must be audited, but must never create a draft or dispatch.
+  const rejected=f.app.db.prepare("SELECT tool,outcome FROM integration_audit ORDER BY tool").all()
+    .map(({tool,outcome})=>({tool,outcome}));
+  assert.deepEqual(rejected,[
+    {tool:'atualizar_contexto_notion',outcome:'error'},
+    {tool:'preparar_envio',outcome:'error'}
+  ]);
+  assert.equal(f.calls.length,0);
 });

@@ -1,0 +1,32 @@
+name: Central MCP tests
+# Validation only: no production deploy, network secrets, or customer data.
+on:
+  push:
+    branches:
+      - codex/central-mcp-consulta-paginada-20261105
+    paths:
+      - 'central-mcp.mjs'
+      - 'chatgpt-oauth.mjs'
+      - 'test/**'
+      - 'server.mjs'
+      - '.github/workflows/central-mcp-tests.yml'
+  pull_request:
+    paths:
+      - 'central-mcp.mjs'
+      - 'chatgpt-oauth.mjs'
+      - 'test/**'
+      - 'server.mjs'
+      - '.github/workflows/central-mcp-tests.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm test

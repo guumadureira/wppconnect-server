@@ -11,6 +11,7 @@ import { createNotionContext } from './notion-context.mjs';
 import {createNotionGlobalContext} from './notion-global-context.mjs';
 import { createAIAttendance, simulateAttendance } from './ai-attendance.mjs';
 import { createCentralMCP } from './central-mcp.mjs';
+import { createChatGPTAuth } from './chatgpt-oauth.mjs';
 import {createSupplierRegister} from './supplier-register.mjs';
 import {createHistoryImport} from './history-import.mjs';
 import {createOperatorChat} from './operator-chat.mjs';
@@ -78,6 +79,11 @@ export function createCentral(config = process.env, transport = fetch, options =
   ai = createAIAttendance(db,config,transport,customerContext,{ready:!!ready,debounceMs:options.aiDebounceMs,media,suppliers,isDirectionContact:directionGuard.isDirectionContact,directionDecisions,globalContext,importedHistory:id=>manualHistory?.forAI(id)});
   manualHistory=createHistoryImport(db,customerContext,ai);
   const centralMCP=createCentralMCP(db,config,transport,{context:customerContext,ai,media,ready:!!ready});
+  const chatgptAuth=createChatGPTAuth(db,config,async(email,password)=>{
+    const agent=get('SELECT * FROM agents WHERE email=? AND active=1',email);
+    if(!await checkPassword(password,agent?.password))return null;
+    return {id:agent.id,role:agent.role};
+  },transport);
   const operatorContext=createOperatorContext(db,customerContext);
   const centralAssistant=createOperatorAI(db,config,transport,{usage:()=>ai.status(),validContext:ctx=>!!get('SELECT id FROM conversations WHERE id=?',ctx.conversation.id)&&customerContext.view(ctx.conversation.id).client_id===(ctx.client?.id||null)});
   const operatorChat=createOperatorChat(db,config,transport,{conversationContext:operatorContext,centralAssistant});
@@ -203,6 +209,7 @@ export function createCentral(config = process.env, transport = fetch, options =
       res.setHeader('content-security-policy',"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'");
       if(url.pathname==='/healthz' && req.method==='GET')return reply(200,{status:'ok',mode:live?'live':'demo',revision:/^[a-f0-9]{40}$/i.test(config.RENDER_GIT_COMMIT||'')?config.RENDER_GIT_COMMIT:null});
       // Dedicated service credential; never reuse or bypass browser-session authentication.
+      if(chatgptAuth.matches(url.pathname))return await chatgptAuth.handle(req,res,{url,readBody,forwardMcp:()=>centralMCP.handle(req,res,{origin,readBody,reply,externalReadOnly:true})});
       if(url.pathname==='/mcp')return await centralMCP.handle(req,res,{origin,readBody,reply});
       if (url.pathname === '/webhooks/whatsapp') {
         if (req.method==='GET') {
