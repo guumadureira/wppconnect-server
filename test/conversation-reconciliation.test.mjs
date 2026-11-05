@@ -10,7 +10,9 @@ function fixture(t,{enabled=true,kind='atendimento',clientId=null,onRequest,noti
     CREATE TABLE conversations(id TEXT PRIMARY KEY,phone TEXT NOT NULL,name TEXT NOT NULL);
     CREATE TABLE messages(id TEXT PRIMARY KEY,conversation_id TEXT REFERENCES conversations(id),
       direction TEXT NOT NULL,body TEXT NOT NULL,agent_name TEXT,status TEXT NOT NULL,created INTEGER NOT NULL);
-    INSERT INTO conversations(id,phone,name) VALUES('c1','5544999990000','Contato de teste');`);
+    INSERT INTO conversations(id,phone,name) VALUES('c1','5544999990000','Contato de teste');
+    CREATE TABLE conversation_context(conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),kind TEXT NOT NULL DEFAULT 'atendimento');
+    INSERT INTO conversation_context(conversation_id,kind) VALUES('c1','atendimento');`);
   const applied=[],requests=[];let counter=0;
   let state={client_id:clientId,kind,summary:'Demanda em análise',missing:'',next_step:'',version:1,snapshot:null};
   const context={
@@ -30,6 +32,7 @@ function fixture(t,{enabled=true,kind='atendimento',clientId=null,onRequest,noti
     return Response.json({status:'completed',output:[{type:'message',content:[{type:'output_text',text:JSON.stringify(output)}]}]});
   };
   const config={CONTEXT_RECONCILIATION_ENABLED:enabled?'true':'false',CONTEXT_RECONCILIATION_MONTHLY_BUDGET_USD:'1',OPENAI_API_KEY:'test-only-placeholder'};
+  db.prepare('UPDATE conversation_context SET kind=? WHERE conversation_id=\'c1\'').run(kind);
   const worker=createConversationReconciliation(db,config,transport,context,{isDirectionContact});
   function insert(direction,body,status=direction==='in'?'received':'sent',actor=null){
     const id='msg-'+(++counter);
@@ -126,4 +129,47 @@ test('contexto local rejeita cursor antigo e registra uma única conciliação q
   app.intake({metadata:{phone_number_id:'test-phone'},messages:[{id:'in-2',from:'5544999990000',type:'text',text:{body:'Também preciso de regularização'}}]});
   const refreshed=app.customerContext.view(conversation.id);
   assert.equal(app.customerContext.applyReconciliation(conversation.id,{...input,version:refreshed.version}),false);
+});
+
+test('prévia histórica é somente leitura e recuperação confirmada não duplica trabalho',async t=>{
+  const f=fixture(t);
+  const id=f.insert('in','Mensagem antiga');
+  // Simulate messages inserted before the trigger existed.
+  f.db.prepare('DELETE FROM context_reconciliation_jobs').run();
+  const before=f.db.prepare('SELECT COUNT(*) AS n FROM context_reconciliation_jobs').get().n;
+  assert.equal(before,0);
+  const preview=f.worker.backfill({limit:50});
+  assert.equal(preview.confirmed,false);
+  assert.equal(preview.eligible,1);
+  assert.equal(preview.enqueued,0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM context_reconciliation_jobs').get().n,0);
+  assert.equal(f.worker.backfill({confirmed:true,limit:50}).enqueued,1);
+  assert.equal(f.worker.backfill({confirmed:true,limit:50}).enqueued,0);
+  await f.worker.process();
+  assert.equal(f.requests.length,1);
+  assert.equal(f.worker.backfill({confirmed:false}).unchanged,1);
+});
+
+test('confirmação posterior de envio reabre a fila sem esperar o intervalo anterior',async t=>{
+  const f=fixture(t);
+  const id=f.insert('out','Enviado pelo aplicativo','unknown','Gustavo');
+  await f.worker.process();
+  assert.equal(f.requests.length,0);
+  const delayed=f.db.prepare('SELECT next_attempt AS n FROM context_reconciliation_jobs').get().n;
+  assert.ok(delayed>Date.now());
+  f.db.prepare("UPDATE messages SET status='sent' WHERE id=?").run(id);
+  assert.equal(f.db.prepare('SELECT state FROM context_reconciliation_jobs').get().state,'pending');
+  assert.equal(f.db.prepare('SELECT next_attempt AS n FROM context_reconciliation_jobs').get().n,0);
+  await f.worker.process();
+  assert.equal(f.applied.length,1);
+});
+
+test('a prévia histórica exclui contatos comerciais sem criar novo cliente',async t=>{
+  const f=fixture(t,{kind:'comercial'});
+  f.insert('in','Oferta comercial antiga');
+  f.db.prepare('DELETE FROM context_reconciliation_jobs').run();
+  const preview=f.worker.backfill({confirmed:false,limit:50});
+  assert.equal(preview.eligible,0);
+  assert.equal(preview.excluded,1);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM context_reconciliation_jobs').get().n,0);
 });
