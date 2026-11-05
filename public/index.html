@@ -90,7 +90,8 @@ async function importHistory(){
   fileInput.onchange=inspect;dateInput.onchange=inspect;
 }
 function contextPanel(c){
-  const cached=contextCache.get(c.id),mode=cached?.mode||(state.contexts||[]).find(item=>item.conversation_id===c.id)?.mode||'human';
+  // The live /api/state snapshot overrides a separately loaded, possibly stale context cache.
+  const cached=contextCache.get(c.id),mode=(state.contexts||[]).find(item=>item.conversation_id===c.id)?.mode||cached?.mode||'human';
   let body='';
   if(contextOpen.has(c.id)){
     if(!cached)body='<p>Carregando contexto…</p>';
@@ -103,7 +104,8 @@ function contextPanel(c){
       if(snap?.history?.rows)body+='<h3>Outros registros do cliente no Notion</h3>'+snap.history.rows.filter(item=>!remoteIds.has(item.id)).map(item=>'<div class="context-entry"><a href="'+esc(item.url)+'" target="_blank" rel="noopener">'+esc(item.title)+'</a><small> · '+esc(item.source)+' · '+esc(item.qualification)+'</small><p class="context-text">'+esc(item.summary)+'</p>'+(item.missing?'<p>Falta: '+esc(item.missing)+'</p>':'')+'</div>').join('');
     }
   }
-  return '<div class="context-toolbar"><button type="button" id="open-customer-context" aria-expanded="'+contextOpen.has(c.id)+'">'+(contextOpen.has(c.id)?'Fechar contexto':'Cliente e histórico')+'</button>'+(!localMode?'<button type="button" id="review-ai-quality">Revisar IA</button>':'')+'<span>'+esc(mode==='human'?'Atendimento humano':'Assistência liberada')+(state.ai?.enabled?' · Piloto de IA habilitado':' · IA automática ainda não ativa')+'</span><button type="button" id="take-conversation">Assumir atendimento</button>'+(mode==='human'?'<button type="button" id="release-assistance">Permitir assistência</button>':'')+'</div>'+(contextOpen.has(c.id)?'<aside class="context-panel" data-conversation-id="'+esc(c.id)+'" aria-label="Contexto interno do atendimento">'+body+'</aside>':'');
+  const aiBanner=mode==='human'?(state.ai?.enabled?'Atendimento humano · IA pausada nesta conversa':'Atendimento humano · IA automática ainda não ativa'):(state.ai?.enabled?'Assistência liberada · Piloto de IA habilitado':'Assistência liberada · IA automática ainda não ativa');
+  return '<div class="context-toolbar"><button type="button" id="open-customer-context" aria-expanded="'+contextOpen.has(c.id)+'">'+(contextOpen.has(c.id)?'Fechar contexto':'Cliente e histórico')+'</button>'+(!localMode?'<button type="button" id="review-ai-quality">Revisar IA</button>':'')+'<span>'+esc(aiBanner)+'</span><button type="button" id="take-conversation">Assumir atendimento</button>'+(mode==='human'?'<button type="button" id="release-assistance">Permitir assistência</button>':'')+'</div>'+(contextOpen.has(c.id)?'<aside class="context-panel" data-conversation-id="'+esc(c.id)+'" aria-label="Contexto interno do atendimento">'+body+'</aside>':'');
 }
 async function contextEdit(){
   const id=active,c=await loadContext(id),requestId=uid(),works=c.snapshot?.sections?.works?.rows||[];

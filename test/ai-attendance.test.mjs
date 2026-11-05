@@ -447,3 +447,194 @@ test('contexto geral do Notion integra a resposta seguinte sem expor trechos de 
   assert.match(input2.generalServiceReference.text,/Habite-se sob analise/);
   assert.doesNotMatch(input2.generalServiceReference.text,/Projeto residencial/);
 });
+
+
+test('eco Business pausa por 60 minutos e retoma somente com nova mensagem elegível',async t=>{
+  const f=fixture(t,{AI_BUSINESS_ECHO_AUTO_RESUME_ENABLED:'true',AI_BUSINESS_ECHO_RESUME_MINUTES:'60'});
+  const c=f.incoming('Quero uma avaliação inicial');await f.app.ai.process();
+  const replies=()=>f.calls.filter(x=>x.url.includes('openai.com')).length;
+  assert.equal(replies(),1);
+  const echo={metadata:{phone_number_id:'test-phone'},message_echoes:[{
+    id:'echo-resume-60-min',from:'5544000000002',to:phone,type:'text',
+    text:{body:'Vou verificar o documento pessoalmente.'},timestamp:Math.floor(Date.now()/1000)
+  }]};
+  f.app.intake(echo,'smb_message_echoes');
+  const afterEcho=f.app.db.prepare('SELECT resume_after FROM ai_control WHERE conversation_id=?').get(c.id).resume_after;
+  assert.ok(afterEcho>Date.now()+59*60000&&afterEcho<=Date.now()+60*60000+5000);
+  assert.equal(f.app.customerContext.view(c.id).mode,'human');
+  f.incoming('Detalhe durante atendimento humano');await f.app.ai.process();
+  assert.equal(replies(),1);
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM ai_jobs WHERE state=\'pending\'').get().n,0);
+  // Inject the elapsed clock into the isolated test database: no 60-minute sleep.
+  f.app.db.prepare('UPDATE ai_control SET resume_after=? WHERE conversation_id=?').run(Date.now()-2000,c.id);
+  assert.equal(replies(),1); // expiry does not create an unsolicited reply.
+  f.incoming('Podemos continuar agora?');await f.app.ai.process();
+  assert.equal(replies(),2);
+  assert.equal(f.app.customerContext.view(c.id).mode,'assisted');
+  assert.equal(f.app.db.prepare('SELECT resume_after FROM ai_control WHERE conversation_id=?').get(c.id).resume_after,null);
+  const input=JSON.parse(f.calls.filter(x=>x.url.includes('openai.com')).at(-1).body.input[0].content);
+  assert.ok(input.messages.some(m=>m.text==='Vou verificar o documento pessoalmente.'));
+  assert.ok(input.messages.some(m=>m.text==='Detalhe durante atendimento humano'));
+});
+test('eco repetido e nova resposta humana renovam a janela sem mensagens duplicadas',async t=>{
+  const f=fixture(t,{AI_BUSINESS_ECHO_AUTO_RESUME_ENABLED:'true'}),c=f.incoming();
+  const echo=id=>({metadata:{phone_number_id:'test-phone'},message_echoes:[{
+    id,from:'5544000000002',to:phone,type:'text',text:{body:'Analisaremos o caso.'},
+    timestamp:Math.floor(Date.now()/1000)
+  }]});
+  f.app.intake(echo('business-echo-1'),'smb_message_echoes');
+  const first=f.app.db.prepare('SELECT resume_after FROM ai_control WHERE conversation_id=?').get(c.id).resume_after;
+  f.app.intake(echo('business-echo-1'),'smb_message_echoes');
+  assert.equal(f.app.db.prepare('SELECT resume_after FROM ai_control WHERE conversation_id=?').get(c.id).resume_after,first);
+  f.app.db.prepare('UPDATE ai_control SET resume_after=? WHERE conversation_id=?').run(Date.now()-30000,c.id);
+  f.app.intake(echo('business-echo-2'),'smb_message_echoes');
+  const again=f.app.db.prepare('SELECT resume_after FROM ai_control WHERE conversation_id=?').get(c.id).resume_after;
+  assert.ok(again>Date.now()+59*60000);
+  assert.equal(f.app.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE agent_name='Aplicativo Business (atendente não identificado)'").get().n,2);
+});
+test('pedido humano durante pausa cancela retomada automática e mantém handoff',async t=>{
+  const f=fixture(t,{AI_BUSINESS_ECHO_AUTO_RESUME_ENABLED:'true'}),c=f.incoming();
+  f.app.intake({metadata:{phone_number_id:'test-phone'},message_echoes:[{
+    id:'business-human-request',from:'5544000000002',to:phone,type:'text',
+    text:{body:'Cuidarei disso.'},timestamp:Math.floor(Date.now()/1000)
+  }]},'smb_message_echoes');
+  f.incoming('Quero falar com uma pessoa, não com a IA');
+  assert.equal(f.app.db.prepare('SELECT resume_after FROM ai_control WHERE conversation_id=?').get(c.id).resume_after,null);
+  assert.match(f.app.db.prepare('SELECT handoff FROM ai_control WHERE conversation_id=?').get(c.id).handoff,/humano/);
+  f.incoming('Já passou o tempo?');await f.app.ai.process();
+  assert.equal(f.app.customerContext.view(c.id).mode,'human');
+  assert.equal(f.calls.filter(x=>x.url.includes('openai.com')).length,0);
+});
+test('retomada não ignora designação humana ou pausa manual; configuração desligada permanece segura',async t=>{
+  const f=fixture(t,{AI_BUSINESS_ECHO_AUTO_RESUME_ENABLED:'true'}),c=f.incoming();
+  const echo=id=>f.app.intake({metadata:{phone_number_id:'test-phone'},message_echoes:[{
+    id,from:'5544000000002',to:phone,type:'text',
+    text:{body:'A equipe assumiu.'},timestamp:Math.floor(Date.now()/1000)
+  }]},'smb_message_echoes');
+  echo('business-owned-1');
+  f.app.db.prepare('UPDATE ai_control SET resume_after=? WHERE conversation_id=?').run(Date.now()-2000,c.id);
+  f.app.db.prepare("INSERT INTO agents(id,name,email,password,role,active) VALUES(?,?,?,?,?,1)")
+    .run('human-owner','Operador de teste','operador@example.invalid','senha-ficticia','agent');
+  f.app.db.prepare('UPDATE conversations SET owner_id=? WHERE id=?').run('human-owner',c.id);
+  f.incoming('Resposta depois da janela');await f.app.ai.process();
+  assert.equal(f.app.customerContext.view(c.id).mode,'human');
+  assert.equal(f.calls.filter(x=>x.url.includes('openai.com')).length,0);
+  f.app.db.prepare('UPDATE conversations SET owner_id=NULL WHERE id=?').run(c.id);
+  f.app.ai.pause(c.id);
+  assert.equal(f.app.db.prepare('SELECT resume_after FROM ai_control WHERE conversation_id=?').get(c.id).resume_after,null);
+  f.incoming('Depois da pausa manual');await f.app.ai.process();
+  assert.equal(f.app.customerContext.view(c.id).mode,'human');
+  const disabled=fixture(t),other=disabled.incoming();
+  disabled.app.intake({metadata:{phone_number_id:'test-phone'},message_echoes:[{
+    id:'business-default-disabled',from:'5544000000002',to:phone,type:'text',
+    text:{body:'Assumi.'},timestamp:Math.floor(Date.now()/1000)
+  }]},'smb_message_echoes');
+  assert.equal(disabled.app.db.prepare('SELECT resume_after FROM ai_control WHERE conversation_id=?').get(other.id).resume_after,null);
+});
+test('eco antigo não libera respostas antigas após expiração da pausa',async t=>{
+  const f=fixture(t,{AI_BUSINESS_ECHO_AUTO_RESUME_ENABLED:'true'}),c=f.incoming();
+  f.app.intake({metadata:{phone_number_id:'test-phone'},message_echoes:[{
+    id:'business-old-window',from:'5544000000002',to:phone,type:'text',
+    text:{body:'Conferirei.'},timestamp:Math.floor(Date.now()/1000)
+  }]},'smb_message_echoes');
+  const deadline=Date.now()-1000;
+  f.app.db.prepare('UPDATE ai_control SET resume_after=? WHERE conversation_id=?').run(deadline,c.id);
+  f.incoming('Mensagem antiga recebida tardiamente',phone,{timestamp:Math.floor((deadline-60000)/1000)});
+  await f.app.ai.process();
+  assert.equal(f.app.customerContext.view(c.id).mode,'human');
+  assert.equal(f.calls.filter(x=>x.url.includes('openai.com')).length,0);
+});
+
+test('eco posterior não converte um handoff humano permanente em retomada temporária',async t=>{
+  const f=fixture(t,{AI_BUSINESS_ECHO_AUTO_RESUME_ENABLED:'true'}),c=f.incoming('Quero falar com uma pessoa');
+  assert.match(f.app.db.prepare('SELECT handoff FROM ai_control WHERE conversation_id=?').get(c.id).handoff,/humano/);
+  f.app.intake({metadata:{phone_number_id:'test-phone'},message_echoes:[{
+    id:'human-after-permanent',from:'5544000000002',to:phone,type:'text',
+    text:{body:'Já estou atendendo.'},timestamp:Math.floor(Date.now()/1000)
+  }]},'smb_message_echoes');
+  const control=f.app.db.prepare('SELECT handoff,resume_after FROM ai_control WHERE conversation_id=?').get(c.id);
+  assert.equal(control.resume_after,null);
+  assert.match(control.handoff,/humano/);
+  f.incoming('Segunda pergunta');await f.app.ai.process();
+  assert.equal(f.calls.filter(x=>x.url.includes('openai.com')).length,0);
+});
+test('prazo de pausa sobrevive a reinicialização e não dispara mensagem sozinho',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'domum-ai-resume-test-'));
+  const config={DATABASE_PATH:join(dir,'test.sqlite'),WHATSAPP_MODE:'live',
+    WHATSAPP_PHONE_NUMBER_ID:'test-phone',WHATSAPP_ACCESS_TOKEN:'test-meta-key',
+    META_APP_SECRET:'test-secret',WEBHOOK_VERIFY_TOKEN:'test-verify',META_GRAPH_VERSION:'v25.0',
+    AI_ENABLED:'true',OPENAI_API_KEY:'test-openai-key',AI_ALLOWED_PHONES:phone,
+    AI_MONTHLY_BUDGET_USD:'1',AI_BUSINESS_ECHO_AUTO_RESUME_ENABLED:'true',
+    AI_BUSINESS_ECHO_RESUME_MINUTES:'60'};
+  let app,c;const calls=[];
+  const transport=async(url,options)=>{
+    calls.push(url);
+    if(url.includes('api.openai.com'))return Response.json({status:'completed',
+      usage:{input_tokens:1000,output_tokens:150},
+      output:[{type:'message',content:[{type:'output_text',text:JSON.stringify(output)}]}]});
+    return Response.json({messages:[{id:'test-out-'+calls.length}]});
+  };
+  try{
+    app=createCentral(config,transport,{aiDebounceMs:0});
+    app.intake({metadata:{phone_number_id:'test-phone'},messages:[{
+      id:'restore-initial',from:phone,type:'text',text:{body:'Olá'},
+      timestamp:Math.floor(Date.now()/1000)}]});
+    c=app.db.prepare('SELECT * FROM conversations WHERE phone=?').get(phone);
+    app.intake({metadata:{phone_number_id:'test-phone'},message_echoes:[{
+      id:'restore-echo',from:'5544000000002',to:phone,type:'text',
+      text:{body:'Atendente responde.'},timestamp:Math.floor(Date.now()/1000)}]},'smb_message_echoes');
+    const original=app.db.prepare('SELECT resume_after FROM ai_control WHERE conversation_id=?').get(c.id).resume_after;
+    assert.ok(original>Date.now());
+    await app.close();app=null;
+    app=createCentral(config,transport,{aiDebounceMs:0});
+    assert.equal(app.db.prepare('SELECT resume_after FROM ai_control WHERE conversation_id=?').get(c.id).resume_after,original);
+    assert.equal(app.customerContext.view(c.id).mode,'human');
+    await app.ai.process();assert.equal(calls.length,0);
+    app.db.prepare('UPDATE ai_control SET resume_after=? WHERE conversation_id=?').run(Date.now()-2000,c.id);
+    app.intake({metadata:{phone_number_id:'test-phone'},messages:[{
+      id:'restore-next-inbound',from:phone,type:'text',text:{body:'Podemos continuar?'},
+      timestamp:Math.floor(Date.now()/1000)}]});
+    await app.ai.process();
+    assert.equal(app.customerContext.view(c.id).mode,'assisted');
+    assert.equal(calls.filter(url=>url.includes('api.openai.com')).length,1);
+  }finally{if(app)await app.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+
+test('responsável previamente atribuído não impede retomada de conversa que estava assistida',async t=>{
+  const f=fixture(t,{AI_BUSINESS_ECHO_AUTO_RESUME_ENABLED:'true',AI_BUSINESS_ECHO_RESUME_MINUTES:'60'});
+  const c=f.incoming('Tenho uma dúvida sobre o projeto');await f.app.ai.process();
+  assert.equal(f.app.customerContext.view(c.id).mode,'assisted');
+  assert.equal(f.calls.filter(x=>x.url.includes('openai.com')).length,1);
+  f.app.db.prepare("INSERT INTO agents(id,name,email,password,role,active) VALUES(?,?,?,?,?,1)")
+    .run('assigned-before-echo','Atendente de teste','preassigned@example.invalid','senha-ficticia','agent');
+  f.app.db.prepare('UPDATE conversations SET owner_id=? WHERE id=?').run('assigned-before-echo',c.id);
+  f.app.intake({metadata:{phone_number_id:'test-phone'},message_echoes:[{
+    id:'echo-to-assigned-assisted',from:'5544000000002',to:phone,
+    type:'text',text:{body:'Vou confirmar o combinado.'},timestamp:Math.floor(Date.now()/1000)
+  }]},'smb_message_echoes');
+  const control=f.app.db.prepare('SELECT resume_after,resume_owner_id FROM ai_control WHERE conversation_id=?').get(c.id);
+  assert.equal(control.resume_owner_id,'assigned-before-echo');
+  assert.ok(control.resume_after>Date.now()+59*60000);
+  f.app.db.prepare('UPDATE ai_control SET resume_after=? WHERE conversation_id=?').run(Date.now()-1200,c.id);
+  f.incoming('Pode atualizar meu atendimento?');await f.app.ai.process();
+  assert.equal(f.calls.filter(x=>x.url.includes('openai.com')).length,2);
+  assert.equal(f.app.customerContext.view(c.id).mode,'assisted');
+  assert.equal(f.app.db.prepare('SELECT resume_after FROM ai_control WHERE conversation_id=?').get(c.id).resume_after,null);
+});
+
+test('desligar retomada ou invalidar o intervalo bloqueia prazos persistidos de execução anterior',async t=>{
+  for(const config of [
+    {AI_BUSINESS_ECHO_AUTO_RESUME_ENABLED:'false'},
+    {AI_BUSINESS_ECHO_AUTO_RESUME_ENABLED:'true',AI_BUSINESS_ECHO_RESUME_MINUTES:'0'}
+  ]){
+    const f=fixture(t,config),c=f.incoming('Primeiro contato');
+    f.app.ai.pause(c.id);
+    // Emulate the persisted cooldown from a previous enabled process.
+    f.app.db.prepare('UPDATE ai_control SET resume_after=?,resume_owner_id=NULL WHERE conversation_id=?').run(Date.now()-2000,c.id);
+    f.incoming('Nova mensagem após o prazo persistido');await f.app.ai.process();
+    assert.equal(f.app.customerContext.view(c.id).mode,'human');
+    assert.equal(f.calls.filter(x=>x.url.includes('openai.com')).length,0);
+    assert.equal(f.app.db.prepare("SELECT COUNT(*) AS n FROM ai_jobs WHERE state='pending'").get().n,0);
+  }
+});
