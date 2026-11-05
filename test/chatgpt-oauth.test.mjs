@@ -301,6 +301,25 @@ test('CIMD e callback específicos da conexão completam PKCE com issuer exato',
     grant_type:'authorization_code',code:callback.searchParams.get('code'),code_verifier:verifier})).status,200);
 });
 
+test('CSP do login permite apenas submissão local e retorno ao callback validado',async t=>{
+  for(const [clientId,callback] of [[client,redirect],
+    ['https://chatgpt.com/oauth/csp_test/client.json','https://chatgpt.com/connector/oauth/csp_test']]){
+    const f=await fixture(t,{},async url=>Response.json({client_id:url,client_name:'ChatGPT',
+      redirect_uris:[callback],token_endpoint_auth_method:'none'}));
+    const page=await f.start({client_id:clientId,redirect_uri:callback});assert.equal(page.status,200);
+    const directive=response=>response.headers.get('content-security-policy').split(';').map(v=>v.trim()).find(v=>v.startsWith('form-action ')).split(/\s+/);
+    assert.deepEqual(directive(page),['form-action',"'self'",callback]);
+    assert.match(page.headers.get('content-security-policy'),/frame-ancestors 'none'/);
+    const ticket=/name="ticket" value="([^"]+)"/.exec(await page.text())[1];
+    const rejected=await f.login(ticket,'incorrect');assert.equal(rejected.status,401);
+    assert.deepEqual(directive(rejected),['form-action',"'self'"]);
+    const approved=await f.login(ticket);assert.equal(approved.status,302);
+    assert.deepEqual(directive(approved),['form-action',"'self'",callback]);
+    const target=new URL(approved.headers.get('location'));
+    assert.equal(target.origin+target.pathname,callback);assert.ok(target.searchParams.get('code'));
+  }
+});
+
 test('piloto recusa múltiplos telefones e origens com credenciais ou sintaxe ambígua sem criar tabelas',async t=>{
   for(const extra of [
     {CHATGPT_OAUTH_ALLOWED_PHONES:'5544999999999,5544999999999'},

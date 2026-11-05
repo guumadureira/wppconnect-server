@@ -62,3 +62,9 @@ Resultados remotos e SHA final devem ser conferidos na PR e nos workflows do res
 Faltam revisão/CI do commit final, autorização de publicação, seleção privada de admin/telefone, inspeção SQL de produção, backup atual antes da alteração, autorização de esquema/env/reinício e teste real na conta ChatGPT. Não há motivo para ampliar permissões SharePoint ou contatos para concluir a homologação de código.
 
 O emissor usa a senha local da Central, sem MFA/OIDC. Não oferece restrição de domínio verificado do ChatGPT Enterprise. Uma conta administrativa compartilhada não prova identidade individual de quem lê. O piloto deve permanecer individual e restrito; expansão requer identidade corporativa gerenciada e nova revisão. Limites de abuso são locais ao processo e usam socket remoto sem confiar em X-Forwarded-For; podem agrupar usuários atrás do proxy Render e reiniciam com o processo. Não presumir proteção distribuída ou autenticação mTLS da origem ChatGPT.
+
+## Retorno do formulário OAuth
+
+Na conferência do fluxo publicado foi identificado que `form-action 'self'` podia bloquear o retorno POST → 302 → ChatGPT em navegadores que aplicam CSP também aos redirecionamentos de formulário. [A documentação MDN descreve a diferença entre implementações](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy/form-action). A política da página de login e da resposta de sucesso passa a permitir somente a origem local e o callback exato previamente validado pelo CIMD. Não libera todo o domínio, scripts ou frames. Erros de autenticação permanecem restritos à origem local.
+
+O teste de regressão verifica callbacks estável e específico, política da página e do retorno, e erro de senha. Isso não equivale a um login real no navegador da conta ChatGPT, que continua exigindo validação individual.
