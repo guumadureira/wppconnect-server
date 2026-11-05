@@ -58,7 +58,7 @@ test('ChatGPT OAuth reads authorized conversation but never bypasses legacy MCP 
   assert.ok(tools.some(x=>x.name==='listar_conversas_autorizadas'));
   assert.ok(tools.every(x=>x.annotations?.readOnlyHint));
   assert.ok(tools.every(x=>x.securitySchemes?.[0]?.scopes.includes('central:read')));
-  assert.ok(!tools.some(x=>['preparar_envio','confirmar_envio','consultar_envio'].includes(x.name)));
+  assert.ok(!tools.some(x=>['preparar_envio','confirmar_envio','consultar_envio','verificar_integracao_notion','atualizar_contexto_notion'].includes(x.name)));
   const read=await rpc('tools/call',{name:'consultar_conversa',arguments:{telefone:phone}});
   assert.equal(read.status,200);assert.match(JSON.stringify(await read.json()),/Pedido autorizado/);
   const listing=await rpc('tools/call',{name:'listar_conversas_autorizadas',arguments:{}});
@@ -70,6 +70,8 @@ test('ChatGPT OAuth reads authorized conversation but never bypasses legacy MCP 
   }
   const draft=await rpc('tools/call',{name:'consultar_envio',arguments:{envioId:randomUUID()}});
   assert.equal((await draft.json()).result.isError,true);
+  const notionAudit=await rpc('tools/call',{name:'verificar_integracao_notion',arguments:{}});
+  assert.equal((await notionAudit.json()).result.isError,true);
   const resource='central://conversations/'+foreign.id+'/messages/'+foreignMessage.id+'/attachments/'+foreignFile.id;
   const resourceRead=await rpc('resources/read',{uri:resource});
   assert.ok((await resourceRead.json()).error,'Anexo de conversa fora do escopo OAuth foi rejeitado');
