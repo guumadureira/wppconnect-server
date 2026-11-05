@@ -1,8 +1,18 @@
 name: Central MCP tests
 on:
+  push:
+    branches:
+      - codex/central-mcp-consulta-paginada-20261105
+    paths:
+      - 'central-mcp.mjs'
+      - 'chatgpt-oauth.mjs'
+      - 'test/**'
+      - 'server.mjs'
+      - '.github/workflows/central-mcp-tests.yml'
   pull_request:
     paths:
       - 'central-mcp.mjs'
+      - 'chatgpt-oauth.mjs'
       - 'test/**'
       - 'server.mjs'
       - '.github/workflows/central-mcp-tests.yml'
