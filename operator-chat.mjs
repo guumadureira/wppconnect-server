@@ -14,15 +14,16 @@ export function createOperatorChat(db,config,transport,{conversationContext,cent
   db.exec("CREATE TABLE IF NOT EXISTS operator_message_details(message_id TEXT PRIMARY KEY REFERENCES operator_chat_messages(id),sources TEXT NOT NULL,suggested_reply TEXT NOT NULL)");
   run("UPDATE operator_chats SET state='unknown',error='Execução interrompida. Confira o resultado antes de repetir o comando.' WHERE state='sending'");
   run("UPDATE operator_chat_requests SET state='unknown' WHERE state='sending'");
+  if(!all('PRAGMA table_info(operator_chats)').some(c=>c.name==='deleted'))db.exec('ALTER TABLE operator_chats ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0');
   const token=String(config.NOTION_AGENT_TOKEN||config.NOTION_TOKEN||'').trim(),agent=String(config.NOTION_OPERATOR_AGENT_ID||'').trim().toLowerCase();
   const owner=u=>digest(u.id+'\n'+String(u.signatureName||u.name).trim().toLocaleLowerCase('pt-BR'));
   const scrub=s=>String(s||'').split(token||'\0').join('[credencial omitida]').replace(/(?:sk-proj-|ntn_)[A-Za-z0-9_-]+/g,'[credencial omitida]');
   const centralId='central-openai-v1';
   function status(){const missing=[...(!token?['NOTION_TOKEN ou NOTION_AGENT_TOKEN']:[]),...(!uuid(agent)?['NOTION_OPERATOR_AGENT_ID']:[])];return{configured:!missing.length,enabled:String(config.NOTION_OPERATOR_CHAT_ENABLED)==='true'&&!missing.length,activationPending:String(config.NOTION_OPERATOR_CHAT_ENABLED)!=='true',missing,provider:'notion',central:centralAssistant?.status(),billing:'O agente usa os créditos e permissões do Notion; não a API OpenAI do atendimento.'};}
   const requireReady=(readOnly=false)=>{if(!status().configured||!readOnly&&!status().enabled)fail(503,'Configure e habilite o chat de operadores com um agente do Notion antes de enviar comandos.');};
-  function chat(u,id){if(!uuid(id))fail(400,'Chat inválido.');const c=get('SELECT * FROM operator_chats WHERE id=? AND owner=?',id,owner(u));if(!c)fail(404,'Chat não encontrado para esta conta e assinatura.');return c;}
+  function chat(u,id){if(!uuid(id))fail(400,'Chat inválido.');const c=get('SELECT * FROM operator_chats WHERE id=? AND owner=? AND deleted=0',id,owner(u));if(!c)fail(404,'Chat não encontrado para esta conta e assinatura.');return c;}
   function view(u,id){const c=chat(u,id),central=c.agent_id===centralId,messages=all('SELECT id,role,text,created FROM operator_chat_messages WHERE chat_id=? ORDER BY rowid DESC LIMIT 120',id).reverse().map(m=>{const d=get('SELECT * FROM operator_message_details WHERE message_id=?',m.id);return d?{...m,sources:JSON.parse(d.sources),suggestedReply:d.suggested_reply}:m;}),actions=c.state==='requires_action'&&!c.events_pending?JSON.parse(c.actions):[];return{id:c.id,provider:central?'central':'notion',conversationId:c.conversation_id,title:c.title,state:c.state,error:c.error,updated:c.updated,messages,actions,reviewDigest:digest(JSON.stringify({id:c.id,actions,messages})),needsRefresh:!!c.events_pending||['queued','in_progress'].includes(c.state),canSend:(central?centralAssistant?.status().enabled:status().enabled&&c.agent_id===agent)&&c.state==='completed'&&!c.events_pending};}
-  function list(u){return{...status(),chats:all('SELECT id,title,state,updated,error FROM operator_chats WHERE owner=? ORDER BY updated DESC LIMIT 30',owner(u))};}
+  function list(u){return{...status(),chats:all('SELECT id,title,state,updated,error FROM operator_chats WHERE owner=? AND deleted=0 ORDER BY updated DESC LIMIT 30',owner(u))};}
   let retryUntil=0;
   async function api(path,method='GET',body,readOnly=false){
     requireReady(readOnly);if(Date.now()<retryUntil)fail(429,'O Notion pediu uma pausa. Aguarde antes de consultar novamente.');let r;
@@ -45,6 +46,20 @@ export function createOperatorChat(db,config,transport,{conversationContext,cent
     run('UPDATE operator_chats SET remote_id=?,state=?,actions=?,error=?,updated=?,events_pending=1 WHERE id=?',s.id,s.status,JSON.stringify(actions),s.status==='failed'?'O agente não concluiu a execução. Confira antes de tentar outra vez.':null,Date.now(),id);
   }
   const active=new Map();
+  function remove(u,id,confirmed){
+    const c=chat(u,id);
+    if(confirmed!==true)fail(400,'Confirme a exclusão do chat interno.');
+    if(active.has(id)||['sending','queued','in_progress','requires_action'].includes(c.state))fail(409,'Aguarde o término ou resolva a ação pendente antes de excluir.');
+    db.exec('BEGIN IMMEDIATE');
+    try{
+      run('DELETE FROM operator_message_details WHERE message_id IN (SELECT id FROM operator_chat_messages WHERE chat_id=?)',id);
+      run('DELETE FROM operator_chat_messages WHERE chat_id=?',id);
+      run("UPDATE operator_chat_requests SET intent='',state='deleted' WHERE chat_id=?",id);
+      run("UPDATE operator_chats SET deleted=1,title='',error=NULL,actions='[]',remote_id=NULL,conversation_id=NULL WHERE id=?",id);
+      db.exec('COMMIT');
+    }catch(e){db.exec('ROLLBACK');throw e;}
+    return{deleted:true};
+  }
   async function perform(u,body,action=false){
     const existing=body.chatId?chat(u,body.chatId):null;
     if(body.provider&&!['central','notion'].includes(body.provider))fail(400,'Assistente inválido.');
@@ -118,7 +133,7 @@ export function createOperatorChat(db,config,transport,{conversationContext,cent
       return view(u,id);
     })().catch(e=>{run("UPDATE operator_chats SET events_pending=1,error=? WHERE id=?",'Não foi possível carregar a resposta. '+e.message,id);throw e;});active.set(id,work);try{return await work;}finally{active.delete(id);}
   }
-  return{status,list,view,verify,send:(u,b)=>perform(u,b),action:(u,b)=>perform(u,b,true),refresh,close:async()=>{await Promise.allSettled([...active.values()]);}};
+  return{status,list,view,verify,remove,send:(u,b)=>perform(u,b),action:(u,b)=>perform(u,b,true),refresh,close:async()=>{await Promise.allSettled([...active.values()]);}};
 }
 
 export function boundedContext(context){

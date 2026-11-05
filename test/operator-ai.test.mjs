@@ -27,3 +27,20 @@ test('falha incerta reserva consumo, oculta segredo e impede repetição',async 
  await assert.rejects(f.ai.respond(request),e=>e.unknown&&!e.message.includes('fake-key'));assert.ok(operatorAICost(f.db)>0);
  await assert.rejects(f.ai.respond(request));assert.equal(f.calls(),1);
 });
+
+test('exclusão exige confirmação, apaga conteúdo local e preserva consumo e idempotência',async t=>{
+ const f=setup(t),u={id:'u',signatureName:'Gustavo'},chat=createOperatorChat(f.db,f.config,f.transport,{centralAssistant:f.ai,conversationContext:async()=>context});
+ const body={provider:'central',conversationId:context.conversation.id,message:'Atualize a situação',requestId:randomUUID()};
+ const c=await chat.send(u,body),cost=operatorAICost(f.db);
+ assert.throws(()=>chat.remove({id:'outro'},c.id,true),{status:404});
+ assert.throws(()=>chat.remove(u,c.id,false),{status:400});
+ f.db.prepare("UPDATE operator_chats SET state='requires_action' WHERE id=?").run(c.id);
+ assert.throws(()=>chat.remove(u,c.id,true),{status:409});
+ f.db.prepare("UPDATE operator_chats SET state='completed' WHERE id=?").run(c.id);
+ assert.deepEqual(chat.remove(u,c.id,true),{deleted:true});assert.equal(chat.list(u).chats.length,0);
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM operator_chat_messages').get().n,0);
+ assert.equal(f.db.prepare('SELECT COUNT(*) n FROM operator_message_details').get().n,0);
+ assert.equal(operatorAICost(f.db),cost);
+ assert.throws(()=>chat.view(u,c.id),{status:404});await assert.rejects(chat.send(u,body),{status:404});assert.equal(f.calls(),1);
+ await chat.close();
+});

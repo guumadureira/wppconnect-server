@@ -1,0 +1,21 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {randomUUID} from 'node:crypto';
+import {createCentral} from '../server.mjs';
+test('DELETE autenticado exige origem e confirmação sem apagar mensagens de clientes',async t=>{
+ const agent=randomUUID(),config={DATABASE_PATH:':memory:',NOTION_OPERATOR_CHAT_ENABLED:'true',NOTION_OPERATOR_AGENT_ID:agent,NOTION_TOKEN:'fake-secret'};
+ const app=createCentral(config,async()=>Response.json({id:randomUUID(),agent_id:agent,status:'completed'}));
+ await new Promise(r=>app.server.listen(0,'127.0.0.1',r));t.after(()=>app.close());const origin='http://127.0.0.1:'+app.server.address().port;config.PUBLIC_ORIGIN=origin;
+ let cookie='';const request=(path,method='GET',body,source=origin)=>fetch(origin+path,{method,headers:{origin:source,cookie,'content-type':'application/json'},body:body?JSON.stringify(body):undefined});
+ const credentials={name:'Teste',email:'test@example.invalid',password:'test-only-password'};
+ assert.equal((await request('/api/setup','POST',credentials)).status,201);
+ cookie=(await request('/api/login','POST',credentials)).headers.get('set-cookie').split(';')[0];
+ const c=await (await request('/api/operator-chat/messages','POST',{message:'Consulta fictícia',requestId:randomUUID()})).json();assert.ok(c.id);
+ assert.equal((await request('/api/operator-chat/'+c.id,'DELETE',{confirmed:true},'https://invalid.example')).status,403);
+ assert.equal((await request('/api/operator-chat/'+c.id,'DELETE',{})).status,400);
+ assert.equal((await request('/api/operator-chat/'+c.id,'DELETE',{confirmed:true})).status,200);
+ assert.equal((await request('/api/operator-chat/'+c.id)).status,404);
+ assert.deepEqual((await (await request('/api/operator-chat')).json()).chats,[]);
+ const html=await (await fetch(origin)).text();assert.match(html,/domum-interface.css/);
+ assert.equal((await fetch(origin+'/assets/operator-chat.js')).status,200);
+});
