@@ -10,7 +10,7 @@ test('ChatGPT OAuth reads authorized conversation but never bypasses legacy MCP 
   const config={DATABASE_PATH:':memory:',HOST:'127.0.0.1',PUBLIC_ORIGIN:origin,SETUP_TOKEN:'setup-secret-only',
     WHATSAPP_MODE:'demo',WHATSAPP_PHONE_NUMBER_ID:'fake-number',
     CENTRAL_MCP_ENABLED:'false',CENTRAL_MCP_TOKEN:'',CENTRAL_MCP_SEND_ENABLED:'true',
-    CENTRAL_MCP_ALLOWED_PHONES:phone,CHATGPT_OAUTH_ENABLED:'true',CHATGPT_OAUTH_ADMIN_EMAIL:'admin@example.invalid'};
+    CENTRAL_MCP_ALLOWED_PHONES:phone,CHATGPT_OAUTH_ENABLED:'true',CHATGPT_OAUTH_ADMIN_EMAIL:'admin@example.invalid',CHATGPT_OAUTH_ALLOWED_PHONES:phone};
   const app=createCentral(config,async url=>{
     calls.push(String(url));
     if(url===client)return Response.json({client_id:client,client_name:'ChatGPT oficial',redirect_uris:[redirect],
