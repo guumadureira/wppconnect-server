@@ -485,7 +485,8 @@ test('modo MCP somente leitura não anuncia nem executa operações de escrita',
   assert.equal((await f.tool('atualizar_contexto_notion',{telefone:phone})).isError,true);
   assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM integration_drafts').get().n,0);
   // Rejected calls must be audited, but must never create a draft or dispatch.
-  const rejected=f.app.db.prepare("SELECT tool,outcome FROM integration_audit ORDER BY tool").all();
+  const rejected=f.app.db.prepare("SELECT tool,outcome FROM integration_audit ORDER BY tool").all()
+    .map(({tool,outcome})=>({tool,outcome}));
   assert.deepEqual(rejected,[
     {tool:'atualizar_contexto_notion',outcome:'error'},
     {tool:'preparar_envio',outcome:'error'}
