@@ -29,8 +29,16 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
   const get=(sql,...params)=>db.prepare(sql).get(...params);
   const run=(sql,...params)=>db.prepare(sql).run(...params);
   const attempts=new Map();
+  const authRequests=new Map();
   const clientCache=new Map();
   const abuseKey=ip=>ip+'|all';
+  function allowAuthorize(ip){
+    const now=Date.now(),previous=authRequests.get(ip);
+    if(previous?.until>now&&previous.n>=16)return false;
+    authRequests.set(ip,previous?.until>now
+      ?{n:previous.n+1,until:previous.until}:{n:1,until:now+300000});
+    return true;
+  }
   if(enabled)db.exec(`CREATE TABLE IF NOT EXISTS chatgpt_oauth_pending (
     id_hash TEXT PRIMARY KEY,client_id TEXT NOT NULL,redirect_uri TEXT NOT NULL,
     challenge TEXT NOT NULL,state TEXT NOT NULL,scope TEXT NOT NULL,expires INTEGER NOT NULL);
@@ -68,20 +76,33 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
     const now=Date.now(),v=attempts.get(key);
     attempts.set(key,v&&v.until>now?{n:v.n+1,until:v.until}:{n:1,until:now+900000});
   }
-  function issue(userId,clientId,family=random()){
-    const access=random(),refresh=random(),now=Date.now();
-    run('INSERT INTO chatgpt_oauth_access VALUES(?,?,?,?,?,?)',hash(access),clientId,userId,family,resource,now+900000);
-    run('INSERT INTO chatgpt_oauth_refresh(token_hash,client_id,user_id,family,resource,expires) VALUES(?,?,?,?,?,?)',hash(refresh),clientId,userId,family,resource,now+30*86400000);
-    return{access_token:access,token_type:'Bearer',expires_in:900,refresh_token:refresh,scope:SCOPE};
-  }
   function currentAdmin(userId){
-    return get("SELECT id FROM agents WHERE id=? AND active=1 AND role='admin' AND lower(email)=?",userId,String(config.CHATGPT_OAUTH_ADMIN_EMAIL).trim().toLowerCase());
+    return get("SELECT id,password FROM agents WHERE id=? AND active=1 AND role='admin' AND lower(email)=?",userId,String(config.CHATGPT_OAUTH_ADMIN_EMAIL).trim().toLowerCase());
+  }
+  // A password reset invalidates all tokens, without requiring database schema changes.
+  function passwordStamp(userId){
+    const account=currentAdmin(userId);
+    return account?.password?hash('central-chatgpt-admin:'+userId+':'+account.password).slice(0,32):null;
+  }
+  function familyIsCurrent(userId,family){
+    const stamp=passwordStamp(userId);
+    return !!stamp&&typeof family==='string'&&family.endsWith('.'+stamp);
+  }
+  function issue(userId,clientId,family=null){
+    const stamp=passwordStamp(userId);
+    if(!stamp)fail(403,'Administrador sem autorização ativa.');
+    const familyId=family??(random()+'.'+stamp);
+    if(!familyIsCurrent(userId,familyId))fail(403,'Autorização de sessão desatualizada.');
+    const access=random(),refresh=random(),now=Date.now();
+    run('INSERT INTO chatgpt_oauth_access VALUES(?,?,?,?,?,?)',hash(access),clientId,userId,familyId,resource,now+900000);
+    run('INSERT INTO chatgpt_oauth_refresh(token_hash,client_id,user_id,family,resource,expires) VALUES(?,?,?,?,?,?)',hash(refresh),clientId,userId,familyId,resource,now+30*86400000);
+    return{access_token:access,token_type:'Bearer',expires_in:900,refresh_token:refresh,scope:SCOPE};
   }
   function validToken(supplied){
     if(typeof supplied!=='string'||!/^Bearer [A-Za-z0-9_-]{40,256}$/.test(supplied))return false;
     const token=supplied.slice(7);
     const row=get('SELECT * FROM chatgpt_oauth_access WHERE token_hash=? AND expires>? AND resource=?',hash(token),Date.now(),resource);
-    if(!row||!currentAdmin(row.user_id))return false;
+    if(!row||!familyIsCurrent(row.user_id,row.family))return false;
     const revoked=get('SELECT 1 FROM chatgpt_oauth_refresh WHERE family=? AND revoked=1 LIMIT 1',row.family);
     return !revoked;
   }
@@ -149,6 +170,7 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
     }
     if(path==='/oauth/authorize'){
       if(req.method!=='GET')fail(405,'Método não permitido.');
+      if(!allowAuthorize(String(req.socket.remoteAddress||'unknown')))fail(429,'Muitas solicitações de autorização. Aguarde.');
       const q=url.searchParams,clientId=q.get('client_id'),redirect=q.get('redirect_uri'),challenge=q.get('code_challenge');
       if(q.get('response_type')!=='code'||q.get('code_challenge_method')!=='S256'||!challenge||
           !/^[A-Za-z0-9_-]{43}$/.test(challenge)||!q.get('state')||q.get('state').length>512||
@@ -156,6 +178,7 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
       const scopes=new Set(String(q.get('scope')||SCOPE).split(' ').filter(Boolean));
       if(!scopes.has(SCOPE)||[...scopes].some(s=>![SCOPE,'offline_access'].includes(s)))fail(400,'Escopo OAuth não autorizado.');
       cleanup();
+      if(get('SELECT COUNT(*) AS n FROM chatgpt_oauth_pending').n>=64)fail(429,'Muitas autorizações pendentes. Aguarde.');
       const ticket=random();
       run('INSERT INTO chatgpt_oauth_pending VALUES(?,?,?,?,?,?,?)',hash(ticket),clientId,redirect,challenge,q.get('state'),SCOPE,Date.now()+300000);
       return htmlReply(res,200,`<h1>Conectar ChatGPT à Central Domum</h1><p>Autorize a consulta somente de leitura das conversas previamente permitidas. Nenhum envio de mensagem será habilitado.</p><form method="post" action="/oauth/approve"><input type="hidden" name="ticket" value="${ticket}"><label>E-mail do administrador<input type="email" name="email" autocomplete="username" required maxlength="160"></label><label>Senha da Central<input type="password" name="password" autocomplete="current-password" required maxlength="512"></label><button type="submit">Autorizar consulta</button></form>`);
@@ -210,7 +233,7 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
           run('DELETE FROM chatgpt_oauth_access WHERE family=?',row.family);
           return tokenError(res);
         }
-        if(row.expires<=Date.now()||!currentAdmin(row.user_id))return tokenError(res);
+        if(row.expires<=Date.now()||!familyIsCurrent(row.user_id,row.family))return tokenError(res);
         const claim=run('UPDATE chatgpt_oauth_refresh SET used=1 WHERE token_hash=? AND used=0 AND revoked=0',hash(secret));
         if(claim.changes!==1)return tokenError(res);
         return json(res,200,issue(row.user_id,clientId,row.family));
