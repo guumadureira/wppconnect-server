@@ -51,11 +51,16 @@ export function createAIAttendance(db,config,transport,context,{ready=false,debo
   const totalSpent=()=>get('SELECT COALESCE(SUM(cost_usd),0) AS n FROM ai_jobs').n+transcriber.cost()+operatorAICost(db);
   function status(){return{businessEchoAutoResume:{enabled:autoResumeEnabled&&autoResumeMs>0,minutes:autoResumeMs/60000},enabled:enabled(),model:MODEL,credentialPresent:!!String(config.OPENAI_API_KEY||'').trim(),activationPending:String(config.AI_ENABLED).trim()!=='true',pilotConfigured:phones.length>0,allContacts,scopeConfigured:allContacts||phones.length>0,budgetUsd:budget>0&&budget<=100?budget:0,usedUsd:spent(),totalBudgetUsd:totalBudget,usedTotalUsd:totalSpent(),audioEnabled:String(config.AI_AUDIO_ENABLED)==='true',autoRegistration:String(config.AI_AUTO_REGISTER)==='true',whatsappReady:ready,pending:get("SELECT COUNT(*) AS n FROM ai_jobs WHERE state IN ('pending','running')").n,handoffs:all("SELECT a.conversation_id,c.name,a.handoff FROM ai_control a JOIN conversations c ON c.id=a.conversation_id WHERE a.handoff<>'' ORDER BY c.updated DESC LIMIT 30")};}
   function pause(id,reason='',{businessEcho=false}={}){
-    ensure(id);
-    // Only a confirmed Business-app echo is eligible for time-limited handoff.
-    // Manual handoffs, explicit human requests and operational failures never expire.
-    const resumeAfter=businessEcho&&autoResumeEnabled&&autoResumeMs>0?Date.now()+autoResumeMs:null;
-    run('UPDATE ai_control SET epoch=epoch+1,handoff=?,resume_after=? WHERE conversation_id=?',reason,resumeAfter,id);
+    const previous=ensure(id);
+    // A new echo starts/renews a temporary pause ONLY if the AI was active or
+    // an echo-driven cooldown already existed. It may not weaken a manual handoff.
+    const mode=context.view(id).mode;
+    const owner=get('SELECT owner_id FROM conversations WHERE id=?',id)?.owner_id;
+    const timedEcho=businessEcho&&autoResumeEnabled&&autoResumeMs>0&&!owner
+      &&!previous.handoff&&(mode==='assisted'||(mode==='human'&&Number(previous.resume_after)>0));
+    const resumeAfter=timedEcho?Date.now()+autoResumeMs:null;
+    const handoff=businessEcho?previous.handoff:reason;
+    run('UPDATE ai_control SET epoch=epoch+1,handoff=?,resume_after=? WHERE conversation_id=?',handoff,resumeAfter,id);
     run("UPDATE ai_jobs SET state='cancelled',updated=? WHERE conversation_id=? AND state='pending'",Date.now(),id);
     run("UPDATE conversation_context SET mode='human',version=version+1,updated=? WHERE conversation_id=? AND mode<>'human'",Date.now(),id);
   }
