@@ -148,3 +148,11 @@ test('OAuth desativa a conexão quando nenhum telefone específico do ChatGPT fo
   assert.equal(f.auth.enabled,false);
   assert.equal((await f.fetchPath('/oauth/authorize')).status,404);
 });
+
+test('OAuth bloqueia configuração com telefone inválido, não autorizado ou mistura perigosa',async t=>{
+  for(const allowed of ['invalido','5544111111111','5544999999999,invalido']){
+    const f=await fixture(t,{CHATGPT_OAUTH_ALLOWED_PHONES:allowed});
+    assert.equal(f.auth.enabled,false,allowed);
+    assert.equal((await f.fetchPath('/oauth/authorize')).status,404,allowed);
+  }
+});
