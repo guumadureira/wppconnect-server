@@ -13,7 +13,7 @@ const MAX_FORM = 8192;
 // callback already validated against ChatGPT's CIMD, never the whole domain.
 const formPolicy = callback => "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'"+
   (callback?' '+callback:'')+"; base-uri 'none'; frame-ancestors 'none'";
-const html = text => `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="no-referrer"><title>Autorizar leitura — Central Domum</title><style>body{font:16px system-ui,sans-serif;max-width:440px;margin:3rem auto;padding:1rem}input,button{box-sizing:border-box;width:100%;padding:12px;margin:8px 0;font:inherit}button{background:#252525;color:white;border:0;cursor:pointer}p{line-height:1.5}</style></head><body>${text}</body></html>`;
+const html = text => `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="same-origin"><title>Autorizar leitura — Central Domum</title><style>body{font:16px system-ui,sans-serif;max-width:440px;margin:3rem auto;padding:1rem}input,button{box-sizing:border-box;width:100%;padding:12px;margin:8px 0;font:inherit}button{background:#252525;color:white;border:0;cursor:pointer}p{line-height:1.5}</style></head><body>${text}</body></html>`;
 
 /** An isolated OAuth 2.1 authorization layer. Does not authenticate legacy /mcp traffic. */
 export function createChatGPTAuth(db,config,authenticate,transport=fetch){
@@ -133,7 +133,9 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
   }
   function htmlReply(res,status,body,callback){
     res.setHeader('content-security-policy',formPolicy(callback));
-    res.setHeader('referrer-policy','no-referrer');
+    // no-referrer makes native form navigations send Origin: null. Keep the
+    // legitimate same-origin POST identifiable without accepting null origins.
+    res.setHeader('referrer-policy','same-origin');
     res.writeHead(status,{'content-type':'text/html; charset=utf-8','cache-control':'no-store'});
     return res.end(html(body));
   }

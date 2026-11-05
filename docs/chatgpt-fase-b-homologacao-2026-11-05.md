@@ -68,3 +68,9 @@ O emissor usa a senha local da Central, sem MFA/OIDC. Não oferece restrição d
 Na conferência do fluxo publicado foi identificado que `form-action 'self'` podia bloquear o retorno POST → 302 → ChatGPT em navegadores que aplicam CSP também aos redirecionamentos de formulário. [A documentação MDN descreve a diferença entre implementações](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy/form-action). A política da página de login e da resposta de sucesso passa a permitir somente a origem local e o callback exato previamente validado pelo CIMD. Não libera todo o domínio, scripts ou frames. Erros de autenticação permanecem restritos à origem local.
 
 O teste de regressão verifica callbacks estável e específico, política da página e do retorno, e erro de senha. Isso não equivale a um login real no navegador da conta ChatGPT, que continua exigindo validação individual.
+
+## Origem do formulário nativo
+
+Durante o primeiro login real foi relatado `Origem não autorizada`. A página usava `no-referrer` tanto no header quanto na meta tag; essa política faz navegadores enviarem `Origin: null` em POSTs de formulário nativo. [MDN: efeito de Referrer-Policy no Origin](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Referrer-Policy#effect_on_the_origin_header). Os testes HTTP anteriores preenchiam Origin explicitamente e não detectaram a incompatibilidade.
+
+A página agora usa `same-origin` nos dois lugares, preservando a origem do POST local e suprimindo Referer entre origens. A checagem estrita de Origin não foi relaxada: origens ausentes, nulas, do ChatGPT ou de terceiros continuam recusadas. O redirecionamento final mantém `no-referrer`. O teste novo cobre a política efetiva da página e essas recusas; o resultado no navegador do usuário ainda precisa ser confirmado após a publicação.

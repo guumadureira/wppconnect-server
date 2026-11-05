@@ -320,6 +320,24 @@ test('CSP do login permite apenas submissão local e retorno ao callback validad
   }
 });
 
+test('política do formulário preserva Origin local e continua recusando origens nulas ou externas',async t=>{
+  const f=await fixture(t),page=await f.start();assert.equal(page.status,200);
+  assert.equal(page.headers.get('referrer-policy'),'same-origin');
+  const document=await page.text();
+  assert.match(document,/<meta name="referrer" content="same-origin">/);
+  assert.doesNotMatch(document,/<meta name="referrer" content="no-referrer">/);
+  const ticket=/name="ticket" value="([^"]+)"/.exec(document)[1];
+  for(const origin of ['null','https://chatgpt.com','https://evil.example']){
+    assert.equal((await f.login(ticket,'correct',origin)).status,403);
+  }
+  const absent=await f.fetchPath('/oauth/approve',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},
+    body:new URLSearchParams({ticket,email:'admin@example.invalid',password:'correct'})});
+  assert.equal(absent.status,403);
+  const approved=await f.login(ticket);assert.equal(approved.status,302);
+  assert.equal(approved.headers.get('referrer-policy'),'no-referrer');
+  assert.equal(new URL(approved.headers.get('location')).origin,'https://chatgpt.com');
+});
+
 test('piloto recusa múltiplos telefones e origens com credenciais ou sintaxe ambígua sem criar tabelas',async t=>{
   for(const extra of [
     {CHATGPT_OAUTH_ALLOWED_PHONES:'5544999999999,5544999999999'},
