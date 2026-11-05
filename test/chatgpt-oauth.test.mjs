@@ -23,7 +23,7 @@ async function fixture(t,extra={},transport){
   t.after(async()=>{await new Promise(resolve=>server.close(resolve));db.close()});
   const mock=transport|| (async url=>Response.json({client_id:url,client_name:'ChatGPT oficial',redirect_uris:[redirect],grant_types:['authorization_code'],token_endpoint_auth_method:'none'}));
   auth=createChatGPTAuth(db,{PUBLIC_ORIGIN:issuer,CHATGPT_OAUTH_ENABLED:'true',
-    CHATGPT_OAUTH_ADMIN_EMAIL:'admin@example.invalid',CENTRAL_MCP_ALLOWED_PHONES:'5544999999999',...extra},
+    CHATGPT_OAUTH_ADMIN_EMAIL:'admin@example.invalid',CENTRAL_MCP_ALLOWED_PHONES:'5544999999999',CHATGPT_OAUTH_ALLOWED_PHONES:'5544999999999',...extra},
     async(email,password)=>email==='admin@example.invalid'&&password==='correct'?{id:'admin1',role:'admin'}:null,mock);
   const base='http://127.0.0.1:'+server.address().port;
   const fetchPath=(path,opts={})=>fetch(base+path,{redirect:'manual',...opts});
@@ -141,4 +141,10 @@ test('rejeita CIMD cuja lista não inclui none apesar de preferência antiga',as
     token_endpoint_auth_methods_supported:['private_key_jwt']
   }));
   assert.equal((await f.start()).status,400);
+});
+
+test('OAuth desativa a conexão quando nenhum telefone específico do ChatGPT foi autorizado',async t=>{
+  const f=await fixture(t,{CHATGPT_OAUTH_ALLOWED_PHONES:''});
+  assert.equal(f.auth.enabled,false);
+  assert.equal((await f.fetchPath('/oauth/authorize')).status,404);
 });
