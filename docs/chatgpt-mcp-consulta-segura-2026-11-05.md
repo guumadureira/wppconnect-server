@@ -91,3 +91,46 @@ Foram acrescentados testes de regressão para isolamento entre telefones do Noti
 A página `https://github.com/guumadureira/wppconnect-server/actions` exibe o aviso do próprio GitHub: `Workflows are not currently being run on this fork due to the scale of GitHub Actions usage. A repository maintainer can choose to re-enable these.` Portanto, os testes não estão simplesmente pendentes por falta de commit: **o GitHub Actions está desativado neste fork**. Só o mantenedor pode reativar o workflow nas configurações/página Actions do repositório; os conectores disponíveis aqui não permitem essa alteração. Depois da reativação, executar `Central MCP tests` na branch desta PR e conferir `npm test` com Node 24. Até lá não mesclar nem publicar no Render.
 
 A validação dos telefones autorizados no módulo OAuth agora é fail-closed, inclusive em listas com números malformados ou fora do escopo. Os **12 testes isolados** (reproduzidos no ambiente local Node 22 com SQLite de teste, sem dados reais) passaram. Os testes integrados do servidor completo **não foram executados**. O teste remoto de identidade CIMD foi reforçado para fornecer campos de cliente válidos, evitando falso positivo por outro campo ausente.
+
+## Segurança e CI — revisão 05/11/2026 (substitui as pendências antigas de CI)
+
+A validação do módulo OAuth incluiu mais três cenários de regressão, implementados **sem mudança de esquema no banco**:
+
+1. A sessão OAuth e seus tokens opacos de acesso/renovação deixam de ser válidos quando a senha do administrador autorizado muda, incluindo a conta posteriormente desativada.
+2. O endpoint público `/oauth/authorize` limita a 16 tentativas por origem em cinco minutos.
+3. Há limite global de 64 autorizações pendentes simultâneas; ao atingir o teto, novas solicitações retornam HTTP 429 até expiração/consumo.
+
+Todos os testes foram executados novamente com Node 24. No commit `3f360b9cb569aa1aa0de9c56add48a7190185e6c`:
+
+- [Central MCP tests #8](https://github.com/guumadureira/wppconnect-server/actions/runs/42040893117): **277 executados, 277 aprovados, 0 falhas**.
+- [Central de atendimento #241](https://github.com/guumadureira/wppconnect-server/actions/runs/42040894158): **277 executados, 277 aprovados, 0 falhas**.
+- A suíte inclui testes do backup SQLite com WAL ativo, restauração independente da fonte e recusa de bancos corrompidos/com vínculos inconsistentes.
+
+Esses resultados são de ambiente de teste, **não** de uma execução de backup sobre o banco de produção. A PR continua em rascunho, não publicada.
+
+### Comprovação do backup real antes de qualquer publicação
+
+O código principal atualmente publicado no Render possui `scripts/banco-central.mjs`, que não exige conexão externa nem imprime conversas. Para executar no **Render Shell autenticado** do serviço existente, sem revelar senhas, tokens ou histórico:
+
+```sh
+cd ~/project/src
+node scripts/banco-central.mjs inspecionar --database /var/data/central.sqlite
+node scripts/banco-central.mjs backup --database /var/data/central.sqlite --backup-dir /var/data/backups
+```
+
+Validar o retorno de `integrity=ok`, `restoreVerified=true`, hash SHA-256, contagens, tamanho do arquivo e manifesto. Não editar o banco original. O backup acima fica **no mesmo disco do serviço** e `externalCopyVerified=false`: não substitui uma cópia protegida **fora do Render**. Registrar a conferência da cópia externa somente após transferi-la para armazenamento corporativo aprovado, mantendo acesso restrito.
+
+Os conectores disponíveis nesta conversa permitem consultar Render, GitHub e logs, mas **não executam comandos no Shell nem acessam `/var/data/central.sqlite` diretamente**. Assim, esta etapa não foi confirmada no banco real e continua bloqueando o deploy.
+
+### Gates de homologação ainda abertos
+
+- [x] OAuth com escopo estrito de telefones e apenas ferramentas de consulta.
+- [x] Duas suítes completas aprovadas com Node 24 e sem dados de clientes.
+- [ ] Backup do SQLite de produção executado e recuperação local comprovada.
+- [ ] Cópia externa protegida do backup e confirmação do manifesto.
+- [ ] Confirmação privada do administrador e de um telefone interno de teste.
+- [ ] Revisão final dos riscos do login OAuth público; sem identidade gerenciada neste piloto.
+- [ ] Autorização específica para publicar a PR e habilitar o OAuth no Render.
+- [ ] Conexão privada no ChatGPT web e teste de consulta sem envio de mensagens.
+
+Não tratar a suíte automatizada como certificação de segurança ou como comprovação de recuperação do banco real.
