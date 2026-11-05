@@ -232,10 +232,12 @@ test('resumo desabilitado no Notion impede perda de sincronização do cliente v
 });
 
 test('recuperação histórica exige sessão de administrador e confirmação explícita',async t=>{
-  const app=createCentral({DATABASE_PATH:':memory:',WHATSAPP_MODE:'demo',WHATSAPP_PHONE_NUMBER_ID:'test-phone'});
+  const config={DATABASE_PATH:':memory:',WHATSAPP_MODE:'demo',WHATSAPP_PHONE_NUMBER_ID:'test-phone'};
+  const app=createCentral(config);
   await new Promise(resolve=>app.server.listen(0,'127.0.0.1',resolve));
   t.after(()=>app.close());
   const origin='http://127.0.0.1:'+app.server.address().port;
+  config.PUBLIC_ORIGIN=origin;
   async function call(path,method='GET',body,cookie){
     const response=await fetch(origin+path,{method,
       headers:{origin,...(body?{'content-type':'application/json'}:{}),...(cookie?{cookie}:{})},
