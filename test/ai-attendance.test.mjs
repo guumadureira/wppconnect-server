@@ -542,3 +542,58 @@ test('eco antigo não libera respostas antigas após expiração da pausa',async
   assert.equal(f.app.customerContext.view(c.id).mode,'human');
   assert.equal(f.calls.filter(x=>x.url.includes('openai.com')).length,0);
 });
+
+test('eco posterior não converte um handoff humano permanente em retomada temporária',async t=>{
+  const f=fixture(t,{AI_BUSINESS_ECHO_AUTO_RESUME_ENABLED:'true'}),c=f.incoming('Quero falar com uma pessoa');
+  assert.match(f.app.db.prepare('SELECT handoff FROM ai_control WHERE conversation_id=?').get(c.id).handoff,/humano/);
+  f.app.intake({metadata:{phone_number_id:'test-phone'},message_echoes:[{
+    id:'human-after-permanent',from:'5544000000002',to:phone,type:'text',
+    text:{body:'Já estou atendendo.'},timestamp:Math.floor(Date.now()/1000)
+  }]},'smb_message_echoes');
+  const control=f.app.db.prepare('SELECT handoff,resume_after FROM ai_control WHERE conversation_id=?').get(c.id);
+  assert.equal(control.resume_after,null);
+  assert.match(control.handoff,/humano/);
+  f.incoming('Segunda pergunta');await f.app.ai.process();
+  assert.equal(f.calls.filter(x=>x.url.includes('openai.com')).length,0);
+});
+test('prazo de pausa sobrevive a reinicialização e não dispara mensagem sozinho',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'domum-ai-resume-test-'));
+  const config={DATABASE_PATH:join(dir,'test.sqlite'),WHATSAPP_MODE:'live',
+    WHATSAPP_PHONE_NUMBER_ID:'test-phone',WHATSAPP_ACCESS_TOKEN:'test-meta-key',
+    META_APP_SECRET:'test-secret',WEBHOOK_VERIFY_TOKEN:'test-verify',META_GRAPH_VERSION:'v25.0',
+    AI_ENABLED:'true',OPENAI_API_KEY:'test-openai-key',AI_ALLOWED_PHONES:phone,
+    AI_MONTHLY_BUDGET_USD:'1',AI_BUSINESS_ECHO_AUTO_RESUME_ENABLED:'true',
+    AI_BUSINESS_ECHO_RESUME_MINUTES:'60'};
+  let app,c;const calls=[];
+  const transport=async(url,options)=>{
+    calls.push(url);
+    if(url.includes('api.openai.com'))return Response.json({status:'completed',
+      usage:{input_tokens:1000,output_tokens:150},
+      output:[{type:'message',content:[{type:'output_text',text:JSON.stringify(output)}]}]});
+    return Response.json({messages:[{id:'test-out-'+calls.length}]});
+  };
+  try{
+    app=createCentral(config,transport,{aiDebounceMs:0});
+    app.intake({metadata:{phone_number_id:'test-phone'},messages:[{
+      id:'restore-initial',from:phone,type:'text',text:{body:'Olá'},
+      timestamp:Math.floor(Date.now()/1000)}]});
+    c=app.db.prepare('SELECT * FROM conversations WHERE phone=?').get(phone);
+    app.intake({metadata:{phone_number_id:'test-phone'},message_echoes:[{
+      id:'restore-echo',from:'5544000000002',to:phone,type:'text',
+      text:{body:'Atendente responde.'},timestamp:Math.floor(Date.now()/1000)}]},'smb_message_echoes');
+    const original=app.db.prepare('SELECT resume_after FROM ai_control WHERE conversation_id=?').get(c.id).resume_after;
+    assert.ok(original>Date.now());
+    await app.close();app=null;
+    app=createCentral(config,transport,{aiDebounceMs:0});
+    assert.equal(app.db.prepare('SELECT resume_after FROM ai_control WHERE conversation_id=?').get(c.id).resume_after,original);
+    assert.equal(app.customerContext.view(c.id).mode,'human');
+    await app.ai.process();assert.equal(calls.length,0);
+    app.db.prepare('UPDATE ai_control SET resume_after=? WHERE conversation_id=?').run(Date.now()-2000,c.id);
+    app.intake({metadata:{phone_number_id:'test-phone'},messages:[{
+      id:'restore-next-inbound',from:phone,type:'text',text:{body:'Podemos continuar?'},
+      timestamp:Math.floor(Date.now()/1000)}]});
+    await app.ai.process();
+    assert.equal(app.customerContext.view(c.id).mode,'assisted');
+    assert.equal(calls.filter(url=>url.includes('api.openai.com')).length,1);
+  }finally{if(app)await app.close();rmSync(dir,{recursive:true,force:true});}
+});
