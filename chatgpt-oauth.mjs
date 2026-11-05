@@ -114,7 +114,13 @@ export function createChatGPTAuth(db,config,authenticate,transport=fetch){
         !Array.isArray(data.redirect_uris)||!data.redirect_uris.length||data.redirect_uris.length>30||
         !data.redirect_uris.every(uri=>typeof uri==='string'&&uri.length<500))fail(400,'Metadados do cliente inválidos.');
     if(data.grant_types&&(!Array.isArray(data.grant_types)||!data.grant_types.includes('authorization_code')))fail(400,'Cliente sem autorização de código.');
-    if(data.token_endpoint_auth_method&&data.token_endpoint_auth_method!=='none')fail(400,'Cliente não permite autenticação pública.');
+    // ChatGPT's production CIMD advertises both methods, with a legacy preference for private_key_jwt.
+    // This server supports only public clients, so require 'none' in the authoritative methods list.
+    const methods=data.token_endpoint_auth_methods_supported;
+    if(methods!==undefined){
+      if(!Array.isArray(methods)||!methods.length||!methods.every(m=>typeof m==='string')||!methods.includes('none'))
+        fail(400,'Cliente não permite autenticação pública.');
+    }else if(data.token_endpoint_auth_method!=='none')fail(400,'Cliente não permite autenticação pública.');
     clientCache.set(clientId,{until:Date.now()+300000,redirects:data.redirect_uris});
     return data.redirect_uris.includes(redirect);
   }
