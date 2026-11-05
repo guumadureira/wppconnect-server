@@ -21,7 +21,7 @@ async function fixture(t,extra={},transport){
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   t.after(async()=>{await new Promise(resolve=>server.close(resolve));db.close()});
-  const mock=transport|| (async url=>Response.json({client_id:url,redirect_uris:[redirect],grant_types:['authorization_code'],token_endpoint_auth_methods_supported:['none']}));
+  const mock=transport|| (async url=>Response.json({client_id:url,client_name:'ChatGPT oficial',redirect_uris:[redirect],grant_types:['authorization_code'],token_endpoint_auth_method:'none'}));
   auth=createChatGPTAuth(db,{PUBLIC_ORIGIN:issuer,CHATGPT_OAUTH_ENABLED:'true',
     CHATGPT_OAUTH_ADMIN_EMAIL:'admin@example.invalid',CENTRAL_MCP_ALLOWED_PHONES:'5544999999999',...extra},
     async(email,password)=>email==='admin@example.invalid'&&password==='correct'?{id:'admin1',role:'admin'}:null,mock);
@@ -106,4 +106,19 @@ test('CIMD alterado e integração desativada não concedem acesso',async t=>{
   const off=await fixture(t,{CHATGPT_OAUTH_ENABLED:'false'});
   assert.equal(off.auth.enabled,false);
   assert.equal((await off.fetchPath('/oauth/authorize')).status,404);
+});
+
+test('recusa cliente com método de autenticação incompatível',async t=>{
+  const f=await fixture(t,{},async url=>Response.json({client_id:url,client_name:'ChatGPT',redirect_uris:[redirect],token_endpoint_auth_method:'private_key_jwt'}));
+  assert.equal((await f.start()).status,400);
+});
+
+test('limita tentativas de senha mesmo alternando e-mails',async t=>{
+  const f=await fixture(t);
+  const page=await f.start();const ticket=/name="ticket" value="([A-Za-z0-9_-]+)"/.exec(await page.text())[1];
+  for(let i=0;i<8;i++){
+    const r=await f.fetchPath('/oauth/approve',{method:'POST',headers:{origin:issuer,'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({ticket,email:'falso'+i+'@example.invalid',password:'errada'})});
+    assert.equal(r.status,401);
+  }
+  assert.equal((await f.login(ticket,'correct')).status,429);
 });
