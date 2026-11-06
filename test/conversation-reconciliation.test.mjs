@@ -260,3 +260,20 @@ test('recuperação histórica exige sessão de administrador e confirmação ex
   assert.equal((await call('/api/context/reconciliation/status','GET',null,agentCookie)).status,403);
   assert.equal((await call('/api/context/reconciliation/backfill','GET',null,agentCookie)).status,403);
 });
+
+test('turno ativo da IA impede conciliação que cancelaria resposta automática',async t=>{
+  const f=fixture(t);
+  f.db.exec("CREATE TABLE ai_jobs(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,state TEXT NOT NULL)");
+  f.insert('in','Dúvida do cliente');
+  f.db.prepare("INSERT INTO ai_jobs(id,conversation_id,state) VALUES('job-1','c1','running')").run();
+  await f.worker.process();
+  assert.equal(f.requests.length,0);
+  assert.equal(f.applied.length,0);
+  let job=f.db.prepare('SELECT state,error FROM context_reconciliation_jobs').get();
+  assert.equal(job.state,'retry');
+  assert.match(job.error,/turno ativo da IA/);
+  f.db.prepare("UPDATE ai_jobs SET state='done' WHERE id='job-1'").run();
+  f.db.prepare('UPDATE context_reconciliation_jobs SET next_attempt=0').run();
+  await f.worker.process();
+  assert.equal(f.applied.length,1);
+});
