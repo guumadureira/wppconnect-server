@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { createWhatsAppSignup } from './whatsapp-signup.mjs';
 import { createMediaStore } from './media.mjs';
 import { createNotionContext } from './notion-context.mjs';
+import {createConversationReconciliation} from './conversation-reconciliation.mjs';
 import {createNotionGlobalContext} from './notion-global-context.mjs';
 import { createAIAttendance, simulateAttendance } from './ai-attendance.mjs';
 import { createCentralMCP } from './central-mcp.mjs';
@@ -68,10 +69,11 @@ export function createCentral(config = process.env, transport = fetch, options =
   };
   const live = config.WHATSAPP_MODE === 'live';
   const media = createMediaStore(db,config,transport,live);
-  let ai,manualHistory;
+  let ai,manualHistory,reconciliation;
   const directionGuard=createDirectionContactGuard(config);
-  const customerContext = createNotionContext(db,config,transport,{requestIntervalMs:options.notionRequestIntervalMs,aiEnabled:()=>ai?.status().enabled||false,isDirectionContact:directionGuard.isDirectionContact});
+  const customerContext = createNotionContext(db,config,transport,{requestIntervalMs:options.notionRequestIntervalMs,aiEnabled:()=>ai?.status().enabled||false,isDirectionContact:directionGuard.isDirectionContact,isReconciliationPending:id=>reconciliation?.pendingForContact(id)||false});
   const globalContext=createNotionGlobalContext(config,transport);
+  reconciliation=createConversationReconciliation(db,config,transport,customerContext,{isDirectionContact:directionGuard.isDirectionContact});
   const ready = live && ['WHATSAPP_PHONE_NUMBER_ID','WHATSAPP_ACCESS_TOKEN','META_APP_SECRET','WEBHOOK_VERIFY_TOKEN','META_GRAPH_VERSION'].every(k => config[k]);
   const suppliers=createSupplierRegister(db,config,transport);
   const directionDecisions=createDirectionDecisions(db,config);
@@ -417,6 +419,21 @@ export function createCentral(config = process.env, transport = fetch, options =
         return reply(200,{available:state.available,checkedAt:state.checkedAt||null,
           source:state.source,diagnostic:globalContext.status()});
       }
+      if(url.pathname==='/api/context/reconciliation/status'&&req.method==='GET'){
+        if(user.role!=='admin')fail(403,'Somente administradores podem consultar a conciliação.');
+        return reply(200,reconciliation.status());
+      }
+      if(url.pathname==='/api/context/reconciliation/backfill'&&['GET','POST'].includes(req.method)){
+        if(user.role!=='admin')fail(403,'Somente administradores podem preparar o histórico.');
+        const confirmed=req.method==='POST';
+        if(confirmed&&body.confirmed!==true)fail(400,'Confirme explicitamente a recuperação histórica.');
+        if(confirmed&&!reconciliation.status().enabled)fail(409,'Habilite primeiro a conciliação em ambiente homologado.');
+        const rawLimit=confirmed?(body.limit??100):(url.searchParams.get('limit')??'100');
+        const limit=Number(rawLimit);
+        if(!Number.isInteger(limit)||limit<1||limit>100)fail(400,'Limite de recuperação inválido.');
+        const result=reconciliation.backfill({confirmed,limit});
+        return reply(200,result);
+      }
       if(url.pathname==='/api/notion/status'&&req.method==='GET')return reply(200,customerContext.status());
       if(url.pathname==='/api/notion/verify'&&req.method==='POST'){
         if(user.role!=='admin')fail(403,'Somente administradores podem verificar a integração.');
@@ -646,6 +663,8 @@ export function createCentral(config = process.env, transport = fetch, options =
   }
   const server=http.createServer(handler);
   const aiTimer=setInterval(()=>ai.process().catch(()=>{}),1500);aiTimer.unref();
+  const reconciliationTimer=setInterval(()=>reconciliation.process().then(()=>customerContext.processLookups()).then(()=>customerContext.processQueue()).catch(()=>{}),15000);
+  reconciliationTimer.unref();
   let delivering=false;
   const timer=setInterval(async()=>{
     if(delivering)return;
@@ -653,12 +672,14 @@ export function createCentral(config = process.env, transport = fetch, options =
     try{await deliverAlerts();await media.processPending();await customerContext.processLookups();await customerContext.processQueue();await suppliers.process();}catch{console.error('Falha ao verificar lembretes, anexos ou integração.');}finally{delivering=false;}
   },60000);
   timer.unref();
-  return {server,db,intake,tick,deliverAlerts,media,customerContext,globalContext,ai,suppliers,directionDecisions,templateResumption,manualHistory,operatorChat,close:()=>{
+  return {server,db,intake,tick,deliverAlerts,media,customerContext,globalContext,ai,suppliers,directionDecisions,templateResumption,manualHistory,operatorChat,reconciliation,close:()=>{
     clearInterval(timer);
     clearInterval(aiTimer);
+    clearInterval(reconciliationTimer);
     return new Promise((resolve,reject)=>server.close(async error=>{
       await media.close();
       await ai.close();
+      await reconciliation.close();
       await operatorChat.close();
       await customerContext.close();
       await suppliers.close();

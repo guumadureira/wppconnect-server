@@ -226,6 +226,9 @@ export function createNotionContext(db,config,transport,options={}){
         const guard=()=>!stopped&&get('SELECT last_received FROM conversations WHERE id=?',c.id)?.last_received===job.last_received;
         if(!guard()){run("UPDATE context_lookup_jobs SET state='cancelled' WHERE conversation_id=? AND last_received=?",c.id,job.last_received);continue;}
         try{
+          // Wait for the dedicated reconciliation classifier before automatically creating a client.
+          // An unclassified commercial contact must never become a customer merely from a phone number.
+          if(automaticContacts()&&options.isReconciliationPending?.(c.id))continue;
           // Let an active AI turn classify a commercial offer before creating a client page.
           if(automaticContacts()&&options.aiEnabled?.()&&get("SELECT id FROM ai_jobs WHERE conversation_id=? AND state IN ('pending','running')",c.id))continue;
           if(automaticContacts()&&context(c.id).kind==='comercial'){
@@ -328,6 +331,34 @@ export function createNotionContext(db,config,transport,options={}){
       ...(commercial?{clientId:null,workId:null}:{})
     });
   }
+  // Reconcile a bounded, evidence-labelled summary without changing contracts or tasks.
+  // The caller must have read the exact latest message cursor and context version.
+  function applyReconciliation(id,body){
+    const cursor=Number(body.cursor);
+    if(!Number.isSafeInteger(cursor)||cursor<=0||!Number.isInteger(body.version))return false;
+    const latest=get('SELECT COALESCE(MAX(rowid),0) AS n FROM messages WHERE conversation_id=?',id).n;
+    if(latest!==cursor)return false;
+    const previous=context(id);
+    if(previous.version!==body.version||previous.kind==='comercial')return false;
+    const kind=String(body.kind||'');
+    if(!kinds.includes(kind))return false;
+    const summary=text(body.summary,1800),missing=text(body.missing,1000),nextStep=text(body.nextStep,1000);
+    if(!summary)return false;
+    if(summary===previous.summary&&missing===previous.missing&&nextStep===previous.next_step&&kind===previous.kind)return true;
+    try{
+      transaction(()=>{
+        checkVersion(id,body.version);
+        if(get('SELECT COALESCE(MAX(rowid),0) AS n FROM messages WHERE conversation_id=?',id).n!==cursor)fail(409,'A conversa recebeu outra mensagem.');
+        run('UPDATE conversation_context SET summary=?,missing=?,next_step=?,kind=?,version=version+1,updated=? WHERE conversation_id=?',summary,missing,nextStep,kind,Date.now(),id);
+        if(kind==='comercial')run("UPDATE service_events SET sync_state='separate' WHERE conversation_id=? AND event_key LIKE 'incoming:%' AND sync_state='waiting_link'",id);
+        addEvent(id,{key:'reconcile:'+id+':'+cursor,kind:kind==='comercial'?'comercial':'contexto',
+          currentSummary:kind!=='comercial',summary,missing,nextStep,
+          actor:'Central · conciliação automática',source:'Sistema',qualification:'Interpretado',
+          ...(kind==='comercial'?{clientId:null,workId:null}:{})});
+      });
+      return true;
+    }catch(error){if(error.status===409)return false;throw error;}
+  }
   function aiRecord(id,jobId,result,handoff=false,{updateCurrent=false,expectedVersion,clientId}={}){
     const eventKey='ai:'+jobId;if(get('SELECT id FROM service_events WHERE event_key=?',eventKey))return;
     const record=()=>{
@@ -428,7 +459,7 @@ export function createNotionContext(db,config,transport,options={}){
     if(!descriptions[state])return;
     addEvent(conversationId,{key:'mcp:'+draftId,kind:'contexto',summary:descriptions[state],missing:'',nextStep:state==='sent'?'Conferir entrega na central.':'Conferir resultado com a equipe.',actor:'Notion · integração',source:'Sistema',qualification:'Confirmado',messageId});
   }
-  return{status,view:localView,lookup,link,refresh,resolveBeforeReply:resolve,queueLookup,processLookups,save,request,updateRequest,control,receivedFile,receivedMessage,receivedBusinessEcho,aiRecord,createClient,registerFromAI,processQueue,verify,integrationRecord,
+  return{status,view:localView,lookup,link,refresh,resolveBeforeReply:resolve,queueLookup,processLookups,save,request,updateRequest,control,receivedFile,receivedMessage,receivedBusinessEcho,applyReconciliation,aiRecord,createClient,registerFromAI,processQueue,verify,integrationRecord,
     close:async()=>{stopped=true;await Promise.allSettled([worker,lookupWorker,...refreshing.values(),...resolving.values(),...creating.values(),serial].filter(Boolean));},
   };
 }
