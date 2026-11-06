@@ -277,3 +277,22 @@ test('turno ativo da IA impede conciliação que cancelaria resposta automática
   await f.worker.process();
   assert.equal(f.applied.length,1);
 });
+
+test('turno da IA iniciado durante síntese invalida gravação e é reprocessado depois',async t=>{
+  let calls=0;
+  const f=fixture(t,{onRequest:({db})=>{
+    if(++calls===1)db.prepare("INSERT INTO ai_jobs(id,conversation_id,state) VALUES('job-during','c1','pending')").run();
+  }});
+  f.db.exec("CREATE TABLE ai_jobs(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,state TEXT NOT NULL)");
+  f.insert('in','Mensagem recebida');
+  await f.worker.process();
+  assert.equal(f.applied.length,0);
+  const row=f.db.prepare('SELECT state,error FROM context_reconciliation_jobs').get();
+  assert.equal(row.state,'retry');
+  assert.match(row.error,/Novo turno da IA/);
+  f.db.prepare("UPDATE ai_jobs SET state='done' WHERE id='job-during'").run();
+  f.db.prepare("UPDATE context_reconciliation_jobs SET next_attempt=0").run();
+  await f.worker.process();
+  assert.equal(f.applied.length,1);
+  assert.equal(calls,2);
+});
