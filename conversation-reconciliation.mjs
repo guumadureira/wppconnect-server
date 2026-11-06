@@ -145,6 +145,11 @@ export function createConversationReconciliation(db, config, transport, context,
           const latest=get('SELECT cursor,generation FROM context_reconciliation_jobs WHERE conversation_id=?',job.conversation_id);
           // New messages OR a status-confirmation for the same message must invalidate old work.
           if(latest?.cursor!==job.cursor||latest.generation!==job.generation){continue;}
+          if(aiJobsTable&&get("SELECT 1 AS ok FROM ai_jobs WHERE conversation_id=? AND state IN ('pending','running') LIMIT 1",job.conversation_id)){
+            run("UPDATE context_reconciliation_jobs SET state='retry',next_attempt=?,error=? WHERE conversation_id=? AND cursor=?",
+              Date.now()+15000,'Novo turno da IA iniciado durante a síntese; aguardando conclusão.',job.conversation_id,job.cursor);
+            continue;
+          }
           const applied=context.applyReconciliation(job.conversation_id,{...parsed,version:view.version,cursor:job.cursor});
           if(applied)run("UPDATE context_reconciliation_jobs SET state='done',error=NULL WHERE conversation_id=? AND cursor=?",job.conversation_id,job.cursor);
           else run("UPDATE context_reconciliation_jobs SET state='pending',next_attempt=? WHERE conversation_id=? AND cursor=?",Date.now()+30000,job.conversation_id,job.cursor);
