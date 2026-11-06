@@ -76,6 +76,14 @@ export function createConversationReconciliation(db, config, transport, context,
       for(const job of jobs){
         if(stopped)break;
         const conversation=get('SELECT * FROM conversations WHERE id=?',job.conversation_id);
+        // Never mutate the context version while an automated reply is queued or running.
+        // An active reply uses the same version as a cancellation guard.
+        const aiJobsTable=get("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='ai_jobs'");
+        if(aiJobsTable&&get("SELECT 1 AS ok FROM ai_jobs WHERE conversation_id=? AND state IN ('pending','running') LIMIT 1",job.conversation_id)){
+          run("UPDATE context_reconciliation_jobs SET state='retry',next_attempt=?,error=? WHERE conversation_id=? AND cursor=?",
+            Date.now()+15000,'Aguardando turno ativo da IA antes de consolidar contexto.',job.conversation_id,job.cursor);
+          continue;
+        }
         if(!conversation||isDirectionContact(conversation.phone)){
           run("UPDATE context_reconciliation_jobs SET state='excluded',error=NULL WHERE conversation_id=? AND cursor=?",job.conversation_id,job.cursor);continue;
         }
