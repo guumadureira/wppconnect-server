@@ -1,5 +1,7 @@
 # Central de atendimento WhatsApp
 
+**Piloto de grupos existentes, preparado em 11/11/2026:** [coletor privado por dispositivo vinculado](docs/grupos-piloto-dispositivo-2026-11-11.md). Desligado por padrão, separado da conexão oficial, acesso administrativo e sem respostas/Notion automáticos. Não iniciar o coletor nem parear aparelho como efeito colateral do início da Central.
+
 **Produção e retomada em 04/11/2026:** o serviço existente usa Starter e disco persistente; o blueprint Free e os exemplos temporários abaixo descrevem a avaliação inicial. A versão integrada preparada e a rotina de backup estão em [docs/retomada-integrada-2026-11-04.md](docs/retomada-integrada-2026-11-04.md). Não reaplicar a configuração de demonstração sobre o banco real.
 
 **Próximo lote, ainda separado da produção:** [telefones e arquivos recebidos pelo MCP](docs/mcp-contatos-anexos.md). Aceita variantes do mesmo contato autorizado, preserva o destino original e permite recuperar anexos antigos por recursos MCP autenticados. Não amplia a lista de contatos permitidos nem configura automaticamente um conector no ChatGPT ou Notion.
