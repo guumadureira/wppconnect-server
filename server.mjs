@@ -14,6 +14,8 @@ import { createCentralMCP } from './central-mcp.mjs';
 import { createChatGPTAuth } from './chatgpt-oauth.mjs';
 import {createSupplierRegister} from './supplier-register.mjs';
 import {createHistoryImport} from './history-import.mjs';
+import {createGroupHistory} from './group-history.mjs';
+import {createGroupPilot} from './group-pilot.mjs';
 import {createOperatorChat} from './operator-chat.mjs';
 import {createOperatorContext} from './operator-context.mjs';
 import {createOperatorAI} from './operator-ai.mjs';
@@ -78,6 +80,9 @@ export function createCentral(config = process.env, transport = fetch, options =
   const templateResumption=createTemplateResumption(db,config,transport,{ready:!!ready});
   ai = createAIAttendance(db,config,transport,customerContext,{ready:!!ready,debounceMs:options.aiDebounceMs,media,suppliers,isDirectionContact:directionGuard.isDirectionContact,directionDecisions,globalContext,importedHistory:id=>manualHistory?.forAI(id)});
   manualHistory=createHistoryImport(db,customerContext,ai);
+  const groupsEnabled=config.GROUP_HISTORY_ENABLED==='true'||config.GROUP_PILOT_ENABLED==='true';
+  const groupHistory=groupsEnabled?createGroupHistory(db):null;
+  const groupPilot=createGroupPilot(db,config,groupHistory);
   const centralMCP=createCentralMCP(db,config,transport,{context:customerContext,ai,media,ready:!!ready});
   const chatgptAuth=createChatGPTAuth(db,config,async(email,password)=>{
     const agent=get('SELECT * FROM agents WHERE email=? AND active=1',email);
@@ -199,7 +204,7 @@ export function createCentral(config = process.env, transport = fetch, options =
     const reply = (status, data) => {res.writeHead(status, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'});res.end(JSON.stringify(data));};
     const readBody = async () => {
       const chunks=[];let length=0;
-      const limit=url.pathname.startsWith('/oauth/')?8192:/^\/api\/conversations\/[^/]+\/history-import\//.test(url.pathname)?2_100_000:131072;
+      const limit=url.pathname==='/webhooks/group-pilot'?32768:url.pathname.startsWith('/oauth/')?8192:/^\/api\/conversations\/[^/]+\/history-import\//.test(url.pathname)?2_100_000:131072;
       for await (const chunk of req) {length+=chunk.length;if(length>limit) fail(413,'Mensagem muito grande.');chunks.push(chunk);}
       return Buffer.concat(chunks);
     };
@@ -210,6 +215,11 @@ export function createCentral(config = process.env, transport = fetch, options =
       if(url.pathname==='/healthz' && req.method==='GET')return reply(200,{status:'ok',mode:live?'live':'demo',revision:/^[a-f0-9]{40}$/i.test(config.RENDER_GIT_COMMIT||'')?config.RENDER_GIT_COMMIT:null});
       // Dedicated service credential; never reuse or bypass browser-session authentication.
       if(chatgptAuth.matches(url.pathname))return await chatgptAuth.handle(req,res,{url,readBody,forwardMcp:()=>centralMCP.handle(req,res,{origin,readBody,reply,externalReadOnly:true})});
+      if(url.pathname==='/webhooks/group-pilot'){
+        if(req.method!=='POST')fail(405,'Use POST.');
+        if(!groupPilot.enabled)fail(404,'Piloto nao habilitado.');
+        return reply(200,groupPilot.receive(await readBody(),req.headers));
+      }
       if(url.pathname==='/mcp')return await centralMCP.handle(req,res,{origin,readBody,reply});
       if (url.pathname === '/webhooks/whatsapp') {
         if (req.method==='GET') {
@@ -275,7 +285,8 @@ export function createCentral(config = process.env, transport = fetch, options =
       const signupPage = ['/connect/whatsapp','/assets/whatsapp-signup.mjs'].includes(url.pathname);
       const directionPage=url.pathname==='/direcao';
       const resumptionPage=url.pathname==='/retomadas';
-      if (!url.pathname.startsWith('/api/') && !signupPage && !directionPage && !resumptionPage) fail(404,'Página não encontrada.');
+      const groupsPage=url.pathname==='/grupos';
+      if (!url.pathname.startsWith('/api/') && !signupPage && !directionPage && !resumptionPage && !groupsPage) fail(404,'Página não encontrada.');
       if (!['GET','HEAD'].includes(req.method) && req.headers.origin !== origin) fail(403,'Origem não autorizada.');
       let body = {};
       if (['POST','PATCH','DELETE'].includes(req.method) && !(url.pathname==='/api/media'&&req.method==='POST')) {const raw=await readBody();try{body=JSON.parse(raw.toString() || '{}');}catch{fail(400,'Dados inválidos.');}if(!body||typeof body!=='object'||Array.isArray(body))fail(400,'Dados inválidos.');}
@@ -311,6 +322,21 @@ export function createCentral(config = process.env, transport = fetch, options =
         return reply(200,{ok:true});
       }
       if (!user) fail(401,'Entre com seu usuário para continuar.');
+      if(groupsPage||url.pathname.startsWith('/api/groups')){
+        if(!groupsEnabled)fail(404,'Grupos nao habilitados.');
+        if(user.role!=='admin')fail(403,'Piloto de grupos restrito ao administrador.');
+        if(groupsPage&&req.method==='GET'){
+          res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store'});
+          return res.end(readFileSync(new URL('./public/grupos.html',import.meta.url)));
+        }
+        if(url.pathname==='/api/groups/pilot-status'&&req.method==='GET')return reply(200,groupPilot.status());
+        if(url.pathname==='/api/groups'&&req.method==='GET')return reply(200,{groups:groupHistory.list(),pilot:groupPilot.status(),aiResponses:false});
+        if(url.pathname==='/api/groups'&&req.method==='POST')return reply(201,groupHistory.create(body));
+        const match=url.pathname.match(/^\/api\/groups\/([a-f0-9-]{36})(?:\/(preview|confirm))?$/i);
+        if(match&&req.method==='GET'&&!match[2])return reply(200,groupHistory.detail(match[1]));
+        if(match&&req.method==='POST'&&match[2])return reply(200,groupHistory[match[2]](match[1],body,user));
+        fail(405,'Metodo nao permitido.');
+      }
       if(directionPage&&req.method==='GET'){
         directionDecisions.list(user,'pending');
         res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store'});
@@ -653,7 +679,7 @@ export function createCentral(config = process.env, transport = fetch, options =
     try{await deliverAlerts();await media.processPending();await customerContext.processLookups();await customerContext.processQueue();await suppliers.process();}catch{console.error('Falha ao verificar lembretes, anexos ou integração.');}finally{delivering=false;}
   },60000);
   timer.unref();
-  return {server,db,intake,tick,deliverAlerts,media,customerContext,globalContext,ai,suppliers,directionDecisions,templateResumption,manualHistory,operatorChat,close:()=>{
+  return {server,db,intake,tick,deliverAlerts,media,customerContext,globalContext,ai,suppliers,directionDecisions,templateResumption,manualHistory,groupHistory,groupPilot,operatorChat,close:()=>{
     clearInterval(timer);
     clearInterval(aiTimer);
     return new Promise((resolve,reject)=>server.close(async error=>{

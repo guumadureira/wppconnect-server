@@ -2,3 +2,6 @@
 data/
 node_modules/
 *.sqlite*
+
+pilot/wppconnect/private/
+pilot/wppconnect/.env
